@@ -1,0 +1,25 @@
+[build-system]
+requires = ["maturin>=1.11,<2"]
+build-backend = "maturin"
+
+[project]
+name = "auslander"
+version = "0.1.0"
+description = "Finite-dimensional monomial bound quiver algebras kQ/I over prime fields, and their right modules"
+requires-python = ">=3.10"
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
+keywords = ["quiver", "representation theory", "algebra", "homological algebra", "mathematics"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+
+[project.urls]
+Homepage = "https://github.com/t0rsion/auslander"
+Repository = "https://github.com/t0rsion/auslander"
+
+[tool.maturin]
+module-name = "auslander"
