@@ -1,0 +1,28 @@
+name: QPA oracle
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 3 * *"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  live-oracle:
+    # A live GAP+QPA run; any disagreement with the library or the committed
+    # qpa_expected.json is a hard failure by design (no continue-on-error).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.92.0
+      - name: Install GAP (distro package)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gap
+      - name: Install QPA v1.36 and its gbnp dependency (pinned)
+        run: |
+          mkdir -p "$HOME/.gap/pkg"
+          git clone --depth 1 --branch v1.36 https://github.com/gap-packages/qpa.git "$HOME/.gap/pkg/qpa"
+          git clone --depth 1 --branch v1.1.0 https://github.com/gap-packages/gbnp.git "$HOME/.gap/pkg/gbnp"
+      - run: QPA_ORACLE=1 cargo +1.92.0 test -p auslander --test qpa_oracle

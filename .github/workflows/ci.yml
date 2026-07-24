@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: clippy, rustfmt
+      - run: cargo +1.92.0 fmt --all --check
+      - run: cargo +1.92.0 clippy --all-targets -- -D warnings
+      - run: cargo +1.92.0 doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.92.0
+      - run: cargo +1.92.0 test --workspace --locked
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - run: cargo +1.88.0 test --workspace --locked
+      - name: Check with a fresh resolution
+        run: |
+          rm Cargo.lock
+          cargo +1.88.0 check --workspace
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.92.0
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - run: cargo +1.92.0 package -p auslander
+      - name: Test inside the extracted package
+        run: |
+          mkdir -p "$RUNNER_TEMP/pkg"
+          tar xzf target/package/auslander-*.crate -C "$RUNNER_TEMP/pkg"
+          cd "$RUNNER_TEMP"/pkg/auslander-*
+          cargo +1.88.0 test
+
+  wheel-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: crates/auslander-py
+          target: x86_64
+          manylinux: "2014"
+          args: --release --out dist
+      - name: Install the wheel and run the smoke tests
+        run: |
+          pip install pytest crates/auslander-py/dist/auslander-*.whl
+          python -m pytest crates/auslander-py/tests/test_smoke.py
