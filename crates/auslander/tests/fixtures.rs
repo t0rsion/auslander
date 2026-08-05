@@ -11,7 +11,7 @@
 //! `Ext^1(S_i, S_j)` counts arrows `i → j`, and `Ext^2(S_i, S_j)` counts minimal
 //! relations from `i` to `j` (Bongartz, "Algebras and quadratic forms", 1983).
 //!
-//! Convention note against the frozen archive repo: the old code computed with LEFT
+//! Convention note against the frozen archive repo: the old code computed with left
 //! modules (column convention), so its nonzero Ext pairs are the transposes of ours.
 //! For example, its `verify_ext_manual.rs` expected `Ext¹(S_sink, S_source) = 1` for A_2,
 //! while for right modules the extension realized by an arrow sits on
@@ -28,9 +28,10 @@ use auslander::algebra::{
     MonomialAlgebra, an_with_relations, cyclic_nakayama, dual_numbers, kronecker, linear_an,
     linear_nakayama, radical_square_zero_cycle, truncated_poly,
 };
+use auslander::decompose::{Certificate, decompose};
 use auslander::ext::{ext_table, global_dimension};
 use auslander::field::PrimeField;
-use auslander::module::Module;
+use auslander::module::{Module, direct_sum};
 use auslander::quiver::{ArrowId, Quiver};
 use auslander::radical::radical_series;
 use auslander::resolution::{Bounded, projective_dimension};
@@ -136,9 +137,9 @@ fn a3_expected() -> Expected {
 }
 
 fn a3_mod_ab_expected() -> Expected {
-    // 0 → P_2 → P_1 → P_0 → S_0 → 0 gives pd S_0 = 2 and Ext²(S_0, S_2) = 1, the
-    // QPA-verified facts from the archive (P_0 = (1, 1, 0), Ext²(S_0, S_2) = 1);
-    // the ordered pairs already agree with the right-module derivation.
+    // 0 → P_2 → P_1 → P_0 → S_0 → 0 gives pd S_0 = 2 and Ext²(S_0, S_2) = 1, both
+    // verified by QPA in the archive with P_0 = (1, 1, 0). The ordered pairs already
+    // agree with the right-module derivation.
     Expected {
         dim: 5,
         cartan: vec![vec![1, 1, 0], vec![0, 1, 1], vec![0, 0, 1]],
@@ -190,9 +191,9 @@ fn linear_a3() {
     check(&linear_an(3), &a3_expected());
 }
 
-// The archive's PRODUCTION_READINESS_ASSESSMENT claimed gldim kA_3 = 2; the path
-// algebra of A_3 is hereditary, so a3_expected() asserting Exact(1) is a regression
-// test against that error.
+// The path algebra of A_3 is hereditary, so gldim kA_3 = 1. The archive's
+// PRODUCTION_READINESS_ASSESSMENT claimed 2, so a3_expected() asserting Exact(1)
+// is a regression test against that error.
 #[test]
 fn linear_a3_is_hereditary() {
     let algebra = linear_an(3);
@@ -204,7 +205,7 @@ fn linear_a3_is_hereditary() {
     }
 }
 
-// D_4 as a subspace quiver: arrows 0 → 3, 1 → 3, 2 → 3 into the center. Hereditary;
+// D_4 as a subspace quiver: arrows 0 → 3, 1 → 3, 2 → 3 into the center. Hereditary.
 // P_i = (e_i, path to center) for i < 3 and P_3 = S_3, I_3 = D(A e_3) has dimension
 // vector (1, 1, 1, 1).
 #[test]
@@ -257,9 +258,9 @@ fn a3_mod_ab() {
     );
 }
 
-// Regression against the archive's examples-db, which listed hereditary Kronecker
-// algebras with infinite global dimension; a hereditary algebra that is not
-// semisimple has gldim exactly 1.
+// A hereditary algebra that is not semisimple has gldim exactly 1. This is a
+// regression against the archive's examples-db, which listed hereditary Kronecker
+// algebras with infinite global dimension.
 #[test]
 fn kronecker_2_is_hereditary() {
     check(
@@ -315,9 +316,9 @@ fn linear_nakayama_3_2_1() {
 }
 
 // Regression: the old library hung on the Kupisch series [2, 2, 1]. The algebra is
-// kA_3/(ab), so the full kA_3/(ab) expectations apply. This test only runs the
-// assertions when spawned by the watchdog below; a hang here would stall the whole
-// in-process test run, so the watchdog moves it into a killable subprocess.
+// kA_3/(ab), so the full kA_3/(ab) expectations apply. The assertions run only when
+// the watchdog below spawns this test. A hang here would stall the whole in-process
+// test run, so the watchdog moves it into a killable subprocess.
 #[test]
 fn linear_nakayama_2_2_1_child() {
     if env::var("AUSLANDER_WATCHDOG_CHILD").is_err() {
@@ -329,8 +330,8 @@ fn linear_nakayama_2_2_1_child() {
 }
 
 // Spawns the current test binary on the child test alone, polls it, and kills it
-// after 10 seconds; the bound is enormous compared to the milliseconds the child
-// takes, and exists to turn the old hang back into a test failure.
+// after 10 seconds. The child takes milliseconds, so the bound is far above what it
+// needs. The bound exists to turn a hang into a test failure.
 #[test]
 fn linear_nakayama_2_2_1_completes_under_watchdog() {
     let exe = env::current_exe().expect("path of the running test binary");
@@ -447,7 +448,7 @@ fn gentle_branch_a_0_1_b_1_2_c_1_3_with_ab_zero() {
     );
 }
 
-// Mirrors the quick-start example in the repo README; keep the two in sync.
+// Mirrors the quick-start example in the repo README. Keep the two in sync.
 #[test]
 fn readme_quick_start_example() {
     let algebra = an_with_relations(3, &[(0, 2)]).unwrap();
@@ -455,4 +456,21 @@ fn readme_quick_start_example() {
     let s0 = Module::simple(&algebra, field, 0);
     let s2 = Module::simple(&algebra, field, 2);
     assert_eq!(ext_table(&s0, &s2, 4).unwrap(), vec![0, 0, 1, 0, 0]);
+}
+
+// Mirrors the decomposition example in the repo README. Keep the two in sync.
+#[test]
+fn readme_decomposition_example() {
+    let algebra = truncated_poly(3).unwrap();
+    let field = PrimeField::new(32003).unwrap();
+    let p = Module::projective(&algebra, field, 0);
+    let s = Module::simple(&algebra, field, 0);
+    let (m, _, _) = direct_sum(&[&p, &p, &s]);
+    let d = decompose(&m);
+    assert_eq!(d.summands().len(), 3);
+    assert!(
+        d.certificates()
+            .iter()
+            .all(|c| *c == Certificate::Indecomposable)
+    );
 }

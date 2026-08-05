@@ -1,14 +1,15 @@
-//! Differential harness against QPA; design notes in `tests/qpa-oracle/README.md`.
+//! Differential harness against QPA. Design notes in `tests/qpa-oracle/README.md`.
 //!
-//! The oracle is `tests/qpa-oracle/qpa_expected.json`, generated only by an actual
-//! GAP+QPA run of `generate_fixtures.g`; the always-on test compares the library
-//! against it and a missing file is a hard failure. `native_snapshot.json` is a
-//! drift snapshot of this library's own output, not an oracle; `QPA_ORACLE_WRITE=1`
-//! rewrites it (and never touches `qpa_expected.json`). `QPA_ORACLE=1` invokes GAP
-//! itself and fails hard when GAP or QPA is unavailable or any value disagrees.
+//! The oracle is `tests/qpa-oracle/qpa_expected.json`. Only a real GAP+QPA run of
+//! `generate_fixtures.g` writes it. The always-on test compares the library against
+//! it, and a missing file is a hard failure. `native_snapshot.json` is a drift
+//! snapshot of this library's own output, not an oracle. `QPA_ORACLE_WRITE=1`
+//! rewrites the snapshot and never touches `qpa_expected.json`. `QPA_ORACLE=1`
+//! invokes GAP itself and fails hard when GAP or QPA is unavailable, or when any
+//! value disagrees.
 //!
-//! The JSON layer is hand-rolled: the schema is small and fixed, so a writer built
-//! on `format!` and a tolerant recursive-descent reader replace a serde dependency.
+//! The JSON layer is hand-rolled. The schema is small and fixed, so a writer built
+//! on `format!` and a strict recursive-descent reader replace a serde dependency.
 
 use std::env;
 use std::fs;
@@ -21,13 +22,40 @@ use auslander::algebra::{
     MonomialAlgebra, an_with_relations, cyclic_nakayama, dual_numbers, kronecker, linear_an,
     linear_nakayama, radical_square_zero_cycle, truncated_poly,
 };
+use auslander::ar::{Tau, tau};
 use auslander::ext::ext_table;
 use auslander::field::PrimeField;
+use auslander::injective::injective_dimension;
 use auslander::module::Module;
+use auslander::opposite::opposite;
 use auslander::quiver::{ArrowId, Quiver};
+use auslander::resolution::Bounded;
 
 const MAX_EXT_DEGREE: usize = 4;
-const SCHEMA: &str = "auslander-qpa-oracle-v1";
+/// Injective dimensions are recorded up to this bound. A simple whose injective
+/// dimension exceeds the bound is stored as `INJ_DIM_BOUND + 1`. That value is the
+/// payload of the `Bounded::AtLeast` that `injective_dimension` returns, so the
+/// encoding loses nothing. QPA's `InjDimensionOfModule` refuses the same way and
+/// returns `false`.
+const INJ_DIM_BOUND: usize = 6;
+const SCHEMA: &str = "auslander-qpa-oracle-v4";
+const ROOT_KEYS: [&str; 5] = [
+    "schema",
+    "convention",
+    "max_ext_degree",
+    "injdim_bound",
+    "fixtures",
+];
+const FIXTURE_KEYS: [&str; 8] = [
+    "name",
+    "num_vertices",
+    "dim",
+    "cartan",
+    "tau",
+    "tau_injectives",
+    "injdim",
+    "ext",
+];
 
 /// The fixture algebras, under the names used by `generate_fixtures.g`.
 fn fixtures() -> Vec<(&'static str, Arc<MonomialAlgebra>)> {
@@ -69,8 +97,56 @@ struct FixtureData {
     num_vertices: usize,
     dim: usize,
     cartan: Vec<Vec<usize>>,
+    /// `tau[i]` = dimension vector of `τ S_i`, all zeros when `S_i` is
+    /// projective.
+    tau: Vec<Vec<usize>>,
+    /// `τ` of the simples over the opposite algebra. A left-convention document
+    /// records these values, because left `A`-modules are right `A^op`-modules.
+    tau_op: Vec<Vec<usize>>,
+    /// `tau_injectives[i]` = dimension vector of `τ I_i`, all zeros when
+    /// `I_i` is projective. The injective family supplies the non-simple,
+    /// multi-entry presentation cases across the suite. Individual `I_i` may
+    /// still be simple or projective.
+    tau_injectives: Vec<Vec<usize>>,
+    /// `τ` of the injectives over the opposite algebra, for left-convention
+    /// documents.
+    tau_injectives_op: Vec<Vec<usize>>,
+    /// `injdim[i]` = injective dimension of `S_i`, capped: `INJ_DIM_BOUND + 1`
+    /// stands for "greater than the bound".
+    injdim: Vec<usize>,
+    /// Injective dimensions of the simples over the opposite algebra. A
+    /// left-convention document records these values.
+    injdim_op: Vec<usize>,
     /// `ext[i][j][k] = dim Ext^k(S_i, S_j)`, `k = 0..=MAX_EXT_DEGREE`.
     ext: Vec<Vec<Vec<usize>>>,
+}
+
+fn injdim_row(algebra: &Arc<MonomialAlgebra>, field: PrimeField) -> Vec<usize> {
+    (0..algebra.quiver().num_vertices())
+        .map(|v| {
+            let s = Module::simple(algebra, field, v);
+            match injective_dimension(&s, INJ_DIM_BOUND) {
+                Bounded::Exact(d) => d,
+                Bounded::AtLeast(d) => d,
+            }
+        })
+        .collect()
+}
+
+fn tau_rows(
+    algebra: &Arc<MonomialAlgebra>,
+    field: PrimeField,
+    module: fn(&Arc<MonomialAlgebra>, PrimeField, u32) -> Module,
+) -> Vec<Vec<usize>> {
+    let n = algebra.quiver().num_vertices();
+    (0..n)
+        .map(
+            |v| match tau(&module(algebra, field, v)).expect("τ routes agree on fixtures") {
+                Tau::Zero => vec![0; n as usize],
+                Tau::Module(t) => t.dim_vector().to_vec(),
+            },
+        )
+        .collect()
 }
 
 fn compute(name: &'static str, algebra: &Arc<MonomialAlgebra>, field: PrimeField) -> FixtureData {
@@ -87,17 +163,24 @@ fn compute(name: &'static str, algebra: &Arc<MonomialAlgebra>, field: PrimeField
                 .collect()
         })
         .collect();
+    let op = opposite(algebra);
     FixtureData {
         name,
         num_vertices: n as usize,
         dim: algebra.dim(),
         cartan: algebra.cartan_matrix(),
+        tau: tau_rows(algebra, field, Module::simple),
+        tau_op: tau_rows(op.opposite(), field, Module::simple),
+        tau_injectives: tau_rows(algebra, field, Module::injective),
+        tau_injectives_op: tau_rows(op.opposite(), field, Module::injective),
+        injdim: injdim_row(algebra, field),
+        injdim_op: injdim_row(op.opposite(), field),
         ext,
     }
 }
 
-/// The fixture data over F_5, after checking F_2 agrees; every stored value is
-/// characteristic-free, so a disagreement is a library bug, not fixture drift.
+/// The fixture data over F_5, after checking that F_2 agrees. Every stored value
+/// is characteristic-free, so a disagreement is a library bug, not fixture drift.
 fn compute_all() -> Vec<FixtureData> {
     let f2 = PrimeField::new(2).unwrap();
     let f5 = PrimeField::new(5).unwrap();
@@ -109,6 +192,21 @@ fn compute_all() -> Vec<FixtureData> {
             assert_eq!(
                 over_f5.ext, over_f2.ext,
                 "{name}: Ext differs between F_2 and F_5"
+            );
+            assert_eq!(
+                (&over_f5.tau, &over_f5.tau_op),
+                (&over_f2.tau, &over_f2.tau_op),
+                "{name}: τ differs between F_2 and F_5"
+            );
+            assert_eq!(
+                (&over_f5.tau_injectives, &over_f5.tau_injectives_op),
+                (&over_f2.tau_injectives, &over_f2.tau_injectives_op),
+                "{name}: τ of injectives differs between F_2 and F_5"
+            );
+            assert_eq!(
+                (&over_f5.injdim, &over_f5.injdim_op),
+                (&over_f2.injdim, &over_f2.injdim_op),
+                "{name}: injective dimensions differ between F_2 and F_5"
             );
             over_f5
         })
@@ -135,6 +233,7 @@ fn render_json(data: &[FixtureData]) -> String {
     out.push_str(&format!("  \"schema\": \"{SCHEMA}\",\n"));
     out.push_str("  \"convention\": \"right\",\n");
     out.push_str(&format!("  \"max_ext_degree\": {MAX_EXT_DEGREE},\n"));
+    out.push_str(&format!("  \"injdim_bound\": {INJ_DIM_BOUND},\n"));
     out.push_str("  \"fixtures\": [\n");
     for (idx, fx) in data.iter().enumerate() {
         out.push_str("    {\n");
@@ -142,6 +241,12 @@ fn render_json(data: &[FixtureData]) -> String {
         out.push_str(&format!("      \"num_vertices\": {},\n", fx.num_vertices));
         out.push_str(&format!("      \"dim\": {},\n", fx.dim));
         out.push_str(&format!("      \"cartan\": {},\n", int_matrix(&fx.cartan)));
+        out.push_str(&format!("      \"tau\": {},\n", int_matrix(&fx.tau)));
+        out.push_str(&format!(
+            "      \"tau_injectives\": {},\n",
+            int_matrix(&fx.tau_injectives)
+        ));
+        out.push_str(&format!("      \"injdim\": {},\n", int_row(&fx.injdim)));
         out.push_str("      \"ext\": [\n");
         for (i, row) in fx.ext.iter().enumerate() {
             let comma = if i + 1 < fx.ext.len() { "," } else { "" };
@@ -156,8 +261,10 @@ fn render_json(data: &[FixtureData]) -> String {
     out
 }
 
-/// Minimal JSON reader for the oracle schema. Tolerates extra whitespace, trailing
-/// commas, and unknown keys; numbers are non-negative integers (all the schema needs).
+/// Minimal JSON reader for the oracle schema. Strict where corruption could
+/// hide: duplicate object keys and trailing commas are parse errors, and the
+/// comparator rejects unknown keys. Only whitespace is free-form. Numbers are
+/// non-negative integers, which is all the schema needs.
 mod json {
     #[derive(Debug, Clone, PartialEq)]
     pub enum Value {
@@ -171,6 +278,14 @@ mod json {
         pub fn get(&self, key: &str) -> Option<&Value> {
             match self {
                 Value::Obj(pairs) => pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+                _ => None,
+            }
+        }
+
+        /// The object's keys in document order; `None` for non-objects.
+        pub fn keys(&self) -> Option<Vec<&str>> {
+            match self {
+                Value::Obj(pairs) => Some(pairs.iter().map(|(k, _)| k.as_str()).collect()),
                 _ => None,
             }
         }
@@ -295,36 +410,62 @@ mod json {
     fn parse_arr(bytes: &[u8], pos: &mut usize) -> Result<Value, String> {
         expect(bytes, pos, b'[')?;
         let mut items = Vec::new();
+        skip_ws(bytes, pos);
+        if bytes.get(*pos) == Some(&b']') {
+            *pos += 1;
+            return Ok(Value::Arr(items));
+        }
         loop {
-            skip_ws(bytes, pos);
-            if bytes.get(*pos) == Some(&b']') {
-                *pos += 1;
-                return Ok(Value::Arr(items));
-            }
             items.push(parse_value(bytes, pos)?);
             skip_ws(bytes, pos);
-            if bytes.get(*pos) == Some(&b',') {
-                *pos += 1;
+            match bytes.get(*pos) {
+                Some(b',') => *pos += 1,
+                Some(b']') => {
+                    *pos += 1;
+                    return Ok(Value::Arr(items));
+                }
+                other => {
+                    return Err(format!(
+                        "expected ',' or ']' at byte {}, found {:?}",
+                        pos,
+                        other.map(|&b| b as char)
+                    ));
+                }
             }
         }
     }
 
     fn parse_obj(bytes: &[u8], pos: &mut usize) -> Result<Value, String> {
         expect(bytes, pos, b'{')?;
-        let mut pairs = Vec::new();
+        let mut pairs: Vec<(String, Value)> = Vec::new();
+        skip_ws(bytes, pos);
+        if bytes.get(*pos) == Some(&b'}') {
+            *pos += 1;
+            return Ok(Value::Obj(pairs));
+        }
         loop {
             skip_ws(bytes, pos);
-            if bytes.get(*pos) == Some(&b'}') {
-                *pos += 1;
-                return Ok(Value::Obj(pairs));
-            }
             let key = parse_str(bytes, pos)?;
+            if pairs.iter().any(|(k, _)| *k == key) {
+                return Err(format!("duplicate key {key:?} at byte {pos}"));
+            }
             expect(bytes, pos, b':')?;
             let value = parse_value(bytes, pos)?;
             pairs.push((key, value));
             skip_ws(bytes, pos);
-            if bytes.get(*pos) == Some(&b',') {
-                *pos += 1;
+            match bytes.get(*pos) {
+                Some(b',') => *pos += 1,
+                Some(b'}') => {
+                    *pos += 1;
+                    return Ok(Value::Obj(pairs));
+                }
+                other => {
+                    return Err(format!(
+                        "expected ',' or '}}' at byte {}, found {:?}",
+                        pos,
+                        other.map(|&b| b as char)
+                    ));
+                }
             }
         }
     }
@@ -337,12 +478,58 @@ fn transpose(mat: &[Vec<usize>]) -> Vec<Vec<usize>> {
         .collect()
 }
 
+/// Compares one τ matrix field (`tau` or `tau_injectives`) of a fixture.
+/// `label` names the row modules in mismatch messages (`S` or `I`).
+fn compare_tau_block(
+    mismatches: &mut Vec<String>,
+    name: &str,
+    field: &str,
+    label: &str,
+    theirs: Option<&json::Value>,
+    ours: &[Vec<usize>],
+    n: usize,
+) {
+    match theirs.and_then(json::Value::as_int_matrix) {
+        Some(their_tau) => {
+            if their_tau.len() != n {
+                mismatches.push(format!(
+                    "{name}: {field} has {} rows, expected {n}",
+                    their_tau.len()
+                ));
+            }
+            for (i, row) in their_tau.iter().enumerate() {
+                if row.len() != n {
+                    mismatches.push(format!(
+                        "{name}: {field} row {i} has {} columns, expected {n}",
+                        row.len()
+                    ));
+                }
+            }
+            for (i, our_row) in ours.iter().enumerate() {
+                if their_tau.get(i) != Some(our_row) {
+                    mismatches.push(format!(
+                        "{name}: {field}({label}_{i}) is {:?}, ours is {our_row:?}",
+                        their_tau.get(i)
+                    ));
+                }
+            }
+        }
+        None => mismatches.push(format!("{name}: unreadable {field} matrix")),
+    }
+}
+
 /// Mismatch descriptions from comparing `ours` against a parsed oracle document.
-/// With `"convention": "left"` the document's Cartan matrix is transposed and its
-/// Ext tables have `(i, j)` swapped before comparison (left modules over `A` are
-/// right modules over `A^op`, which flips all directed pairings).
+/// With `"convention": "left"` the document's Cartan matrix is transposed, its
+/// Ext tables have `(i, j)` swapped, and its tau rows are read as `τ` over the
+/// opposite algebra before comparison. Left modules over `A` are right modules
+/// over `A^op`, which flips all directed pairings and moves `τ` to `A^op`.
 fn compare(ours: &[FixtureData], doc: &json::Value) -> Vec<String> {
     let mut mismatches = Vec::new();
+    for key in doc.keys().unwrap_or_default() {
+        if !ROOT_KEYS.contains(&key) {
+            mismatches.push(format!("unknown top-level key {key:?}"));
+        }
+    }
     let left_convention = match doc.get("convention").and_then(json::Value::as_str) {
         Some("left") => true,
         Some("right") => false,
@@ -381,6 +568,11 @@ fn compare(ours: &[FixtureData], doc: &json::Value) -> Vec<String> {
             mismatches.push(format!("{}: missing from oracle file", fx.name));
             continue;
         };
+        for key in theirs.keys().unwrap_or_default() {
+            if !FIXTURE_KEYS.contains(&key) {
+                mismatches.push(format!("{}: unknown fixture key {key:?}", fx.name));
+            }
+        }
         if theirs.get("num_vertices").and_then(json::Value::as_usize) != Some(fx.num_vertices) {
             mismatches.push(format!(
                 "{}: num_vertices is {:?}, ours is {}",
@@ -410,6 +602,56 @@ fn compare(ours: &[FixtureData], doc: &json::Value) -> Vec<String> {
                 }
             }
             None => mismatches.push(format!("{}: unreadable Cartan matrix", fx.name)),
+        }
+        compare_tau_block(
+            &mut mismatches,
+            fx.name,
+            "tau",
+            "S",
+            theirs.get("tau"),
+            if left_convention { &fx.tau_op } else { &fx.tau },
+            fx.num_vertices,
+        );
+        compare_tau_block(
+            &mut mismatches,
+            fx.name,
+            "tau_injectives",
+            "I",
+            theirs.get("tau_injectives"),
+            if left_convention {
+                &fx.tau_injectives_op
+            } else {
+                &fx.tau_injectives
+            },
+            fx.num_vertices,
+        );
+        let expected_injdim = if left_convention {
+            &fx.injdim_op
+        } else {
+            &fx.injdim
+        };
+        match theirs
+            .get("injdim")
+            .and_then(json::Value::as_arr)
+            .map(|row| row.iter().map(json::Value::as_usize).collect::<Vec<_>>())
+        {
+            Some(row) if row.iter().all(Option::is_some) => {
+                let row: Vec<usize> = row.into_iter().map(Option::unwrap).collect();
+                if row.len() != fx.num_vertices {
+                    mismatches.push(format!(
+                        "{}: injdim has {} entries, expected {}",
+                        fx.name,
+                        row.len(),
+                        fx.num_vertices
+                    ));
+                } else if row != *expected_injdim {
+                    mismatches.push(format!(
+                        "{}: injdim is {row:?}, ours is {expected_injdim:?}",
+                        fx.name
+                    ));
+                }
+            }
+            _ => mismatches.push(format!("{}: unreadable injdim row", fx.name)),
         }
         let tables = theirs.get("ext").and_then(json::Value::as_arr);
         let n = fx.num_vertices;
@@ -458,8 +700,8 @@ fn compare(ours: &[FixtureData], doc: &json::Value) -> Vec<String> {
     mismatches
 }
 
-/// Reads and parses an oracle-schema JSON file; both a missing file and a parse
-/// failure are hard failures, never skips.
+/// Reads and parses an oracle-schema JSON file. A missing file and a parse
+/// failure are both hard failures, not skips.
 fn read_doc(path: &Path) -> json::Value {
     let text =
         fs::read_to_string(path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
@@ -477,6 +719,12 @@ fn check_schema(path: &Path, doc: &json::Value) {
         doc.get("max_ext_degree").and_then(json::Value::as_usize),
         Some(MAX_EXT_DEGREE),
         "{}: wrong or missing max_ext_degree",
+        path.display()
+    );
+    assert_eq!(
+        doc.get("injdim_bound").and_then(json::Value::as_usize),
+        Some(INJ_DIM_BOUND),
+        "{}: wrong or missing injdim_bound",
         path.display()
     );
     let convention = doc.get("convention").and_then(json::Value::as_str);
@@ -525,12 +773,13 @@ fn library_matches_its_native_snapshot() {
     );
 }
 
-/// Locates GAP and a loadable QPA, in the order documented in the README: a plain
-/// GAP launch when `~/.gap/pkg/qpa` exists (GAP auto-loads packages from `~/.gap`),
-/// otherwise a temporary GAP root whose `pkg/qpa` symlinks to `$QPA_DIR` (and
-/// `pkg/gbnp` to `$GBNP_DIR` when set; QPA cannot load without its gbnp
-/// dependency in some root). The GAP binary is `$GAP_BIN` or `gap`; interactive
-/// shells may alias `gap` away, but process spawning here never sees shell aliases.
+/// Locates GAP and a loadable QPA, in the order the README documents. GAP launches
+/// plainly when `~/.gap/pkg/qpa` exists, because GAP auto-loads packages from
+/// `~/.gap`. Otherwise the test builds a temporary GAP root whose `pkg/qpa` symlinks
+/// to `$QPA_DIR`, and whose `pkg/gbnp` symlinks to `$GBNP_DIR` when that is set. QPA
+/// cannot load without its gbnp dependency in some root. The GAP binary is
+/// `$GAP_BIN` or `gap`. Interactive shells may alias `gap` away, but process
+/// spawning here never sees shell aliases.
 #[cfg(unix)]
 fn gap_command(workdir: &Path) -> Command {
     let gap_bin = env::var("GAP_BIN").unwrap_or_else(|_| "gap".to_string());
@@ -566,8 +815,8 @@ fn gap_command(workdir: &Path) -> Command {
 /// `QPA_ORACLE=1`: run `generate_fixtures.g` under GAP+QPA into a temp dir, then
 /// require the fresh output to agree with both this library and the committed
 /// `qpa_expected.json`. Every failure mode is hard: GAP missing, QPA not loading,
-/// no output file, schema mismatch, value mismatch. Unix-only: the GAP root is
-/// assembled with symlinks, and GAP itself is not supported on Windows here.
+/// no output file, schema mismatch, value mismatch. Unix only. The GAP root is
+/// assembled with symlinks, and this harness does not support GAP on Windows.
 #[cfg(unix)]
 #[test]
 fn live_gap_run_agrees_with_library_and_committed_truth() {
@@ -614,6 +863,17 @@ fn live_gap_run_agrees_with_library_and_committed_truth() {
         "fresh QPA run disagrees with the committed qpa_expected.json; \
          if QPA itself changed, regenerate per tests/qpa-oracle/README.md"
     );
+    // The value comparison above gives readable diagnostics. The documented
+    // guarantee is byte-for-byte reproducibility, so check that as well.
+    let fresh_text =
+        fs::read_to_string(&fresh_path).expect("fresh oracle output was already read once");
+    let committed_text =
+        fs::read_to_string(&committed_path).expect("committed oracle was already read once");
+    assert_eq!(
+        fresh_text, committed_text,
+        "fresh QPA run is value-equal but not byte-identical to qpa_expected.json; \
+         regenerate per tests/qpa-oracle/README.md"
+    );
     fs::remove_dir_all(&workdir).ok();
 }
 
@@ -632,9 +892,10 @@ fn oracle_json_round_trips_through_the_reader() {
     assert_eq!(compare(&ours, &doc), Vec::<String>::new());
 }
 
-/// A left-convention document must compare equal after transposition, checked on a
-/// transposed copy of our own data, exercising the same code path the GAP output
-/// would take if regenerated under a left-module build.
+/// A left-convention document must compare equal after transposition. The check
+/// runs on a transposed copy of our own data, with tau over the opposite algebra,
+/// so it takes the same code path that GAP output from a left-module build would
+/// take.
 #[test]
 fn left_convention_documents_are_transposed_before_comparison() {
     let ours = compute_all();
@@ -649,12 +910,16 @@ fn left_convention_documents_are_transposed_before_comparison() {
             })
             .collect();
         flipped.push_str(&format!(
-            "{}{{\"name\": \"{}\", \"num_vertices\": {}, \"dim\": {}, \"cartan\": {}, \"ext\": [{}]}}",
+            "{}{{\"name\": \"{}\", \"num_vertices\": {}, \"dim\": {}, \"cartan\": {}, \
+             \"tau\": {}, \"tau_injectives\": {}, \"injdim\": {}, \"ext\": [{}]}}",
             if idx == 0 { "" } else { ", " },
             fx.name,
             fx.num_vertices,
             fx.dim,
             int_matrix(&transpose(&fx.cartan)),
+            int_matrix(&fx.tau_op),
+            int_matrix(&fx.tau_injectives_op),
+            int_row(&fx.injdim_op),
             ext_t.join(", ")
         ));
     }
@@ -664,8 +929,7 @@ fn left_convention_documents_are_transposed_before_comparison() {
 }
 
 /// Corruption regressions: each mutation of the committed truth must be caught.
-/// The review found the original comparator accepted a corrupted convention and
-/// num_vertices; these pin the strict validation.
+/// A corrupted convention or num_vertices must not pass the comparator.
 mod corruption {
     use super::*;
 
@@ -678,6 +942,104 @@ mod corruption {
         let replaced = text.replacen(from, to, 1);
         assert_ne!(text, replaced, "corruption target {from:?} not found");
         json::parse(&replaced).expect("corrupted document still parses")
+    }
+
+    #[test]
+    #[should_panic(expected = "schema")]
+    fn schema_check_rejects_the_old_v2_schema_string() {
+        let doc = corrupted(
+            "\"schema\": \"auslander-qpa-oracle-v4\"",
+            "\"schema\": \"auslander-qpa-oracle-v2\"",
+        );
+        check_schema(Path::new("corrupted"), &doc);
+    }
+
+    #[test]
+    #[should_panic(expected = "max_ext_degree")]
+    fn schema_check_rejects_a_missing_root_field() {
+        let doc = corrupted("  \"max_ext_degree\": 4,\n", "");
+        check_schema(Path::new("corrupted"), &doc);
+    }
+
+    #[test]
+    fn compare_rejects_a_missing_fixture_field() {
+        let doc = corrupted("      \"dim\": 3,\n", "");
+        let mismatches = compare(&compute_all(), &doc);
+        assert!(mismatches.iter().any(|m| m.contains("dim is None")));
+    }
+
+    #[test]
+    fn compare_rejects_an_unknown_top_level_key() {
+        let doc = corrupted(
+            "\"max_ext_degree\": 4,",
+            "\"max_ext_degree\": 4,\n  \"surprise\": 1,",
+        );
+        let mismatches = compare(&compute_all(), &doc);
+        assert!(
+            mismatches
+                .iter()
+                .any(|m| m.contains("unknown top-level key \"surprise\""))
+        );
+    }
+
+    #[test]
+    fn compare_rejects_an_unknown_fixture_key() {
+        let doc = corrupted("\"dim\": 3,", "\"dim\": 3,\n      \"surprise\": 1,");
+        let mismatches = compare(&compute_all(), &doc);
+        assert!(
+            mismatches
+                .iter()
+                .any(|m| m.contains("unknown fixture key \"surprise\""))
+        );
+    }
+
+    #[test]
+    fn parser_rejects_a_duplicated_key() {
+        let text = committed_text().replacen("\"dim\": 3,", "\"dim\": 3,\n      \"dim\": 3,", 1);
+        let err = json::parse(&text).unwrap_err();
+        assert!(err.contains("duplicate key \"dim\""), "{err}");
+    }
+
+    #[test]
+    fn parser_rejects_a_trailing_comma() {
+        let text =
+            committed_text().replacen("\"tau\": [[0, 1], [0, 0]]", "\"tau\": [[0, 1], [0, 0],]", 1);
+        let err = json::parse(&text).unwrap_err();
+        assert!(err.contains("unexpected"), "{err}");
+    }
+
+    #[test]
+    fn compare_rejects_truncated_tau_row() {
+        let doc = corrupted("\"tau\": [[0, 1], [0, 0]]", "\"tau\": [[0, 1], [0]]");
+        let mismatches = compare(&compute_all(), &doc);
+        assert!(mismatches.iter().any(|m| m.contains("tau row")));
+    }
+
+    #[test]
+    fn compare_rejects_wrong_tau_value() {
+        let doc = corrupted("\"tau\": [[0, 1], [0, 0]]", "\"tau\": [[0, 7], [0, 0]]");
+        let mismatches = compare(&compute_all(), &doc);
+        assert!(mismatches.iter().any(|m| m.contains("tau(S_")));
+    }
+
+    #[test]
+    fn compare_rejects_truncated_tau_injectives_row() {
+        let doc = corrupted(
+            "\"tau_injectives\": [[0, 1], [0, 0]]",
+            "\"tau_injectives\": [[0, 1], [0]]",
+        );
+        let mismatches = compare(&compute_all(), &doc);
+        assert!(mismatches.iter().any(|m| m.contains("tau_injectives row")));
+    }
+
+    #[test]
+    fn compare_rejects_wrong_tau_injectives_value() {
+        let doc = corrupted(
+            "\"tau_injectives\": [[0, 1], [0, 0]]",
+            "\"tau_injectives\": [[0, 7], [0, 0]]",
+        );
+        let mismatches = compare(&compute_all(), &doc);
+        assert!(mismatches.iter().any(|m| m.contains("tau_injectives(I_")));
     }
 
     #[test]

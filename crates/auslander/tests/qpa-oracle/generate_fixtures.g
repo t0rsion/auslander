@@ -1,6 +1,11 @@
 # Builds every auslander v0.1 fixture algebra in QPA and writes fixtures_qpa.json:
 # algebra dimension, Cartan matrix (row i = dimension vector of the indecomposable
-# projective P_i), and dim Ext^k(S_i, S_j) for k = 0..4.
+# projective P_i), dim Ext^k(S_i, S_j) for k = 0..4, and the dimension vector of
+# DTr(M) = tau(M) for every simple S_i and every indecomposable injective I_i
+# (the zero vector when the module is projective). The injective family supplies
+# the non-simple, multi-entry tau cases across the suite; individual I_i may
+# still be simple or projective. Also the injective dimension of every simple,
+# capped at INJ_BOUND.
 #
 # Writes into the current working directory; run under GAP with QPA loadable
 # (discovery order in README.md):
@@ -10,8 +15,10 @@
 # QPA modules are right modules and paths compose left to right (p * q means first
 # p, then q), matching auslander's conventions, so the values are written verbatim
 # with "convention": "right". If this file is ever produced by a left-module setup,
-# set "convention": "left" and the Rust comparator transposes Cartan matrices and
-# swaps the (i, j) Ext indices. GAP vertices are 1-based; the JSON keeps GAP's
+# set "convention": "left" and the Rust comparator transposes Cartan matrices,
+# swaps the (i, j) Ext indices, and reads tau rows as tau computed over the
+# opposite algebra (left modules are right modules over A^op). GAP vertices are
+# 1-based; the JSON keeps GAP's
 # order, so QPA vertex v corresponds to auslander vertex v - 1, and the arrow lists
 # below mirror the ArrowId order of the Rust constructors.
 
@@ -19,6 +26,7 @@ LoadPackage("qpa");
 
 K := GF(5);
 MAX_EXT := 4;
+INJ_BOUND := 6;
 OUT := "fixtures_qpa.json";
 
 # dim Ext^k(M, N) via Ext^k(M, N) = Ext^1(Omega^(k-1) M, N); NthSyzygy computes
@@ -41,10 +49,32 @@ ExtDimension := function(M, N, k)
   return Length(ExtOverAlgebra(S, N)[2]);
 end;
 
+# DimensionVector(DTr(S)); a projective S gets the zero vector directly, so QPA's
+# TransposeOfModule never takes its projective branch (which prints a notice).
+TauDimensionVector := function(S)
+  if IsProjectiveModule(S) then
+    return List(DimensionVector(S), x -> 0);
+  fi;
+  return DimensionVector(DTr(S));
+end;
+
+# InjDimensionOfModule(M, n) returns false when the injective dimension exceeds
+# n; that refusal is written as INJ_BOUND + 1, which is the payload of the
+# Bounded::AtLeast the library returns for the same bound.
+InjDimensionValue := function(M)
+  local d;
+  d := InjDimensionOfModule(M, INJ_BOUND);
+  if d = false then
+    return INJ_BOUND + 1;
+  fi;
+  return d;
+end;
+
 FixtureRecord := function(name, A)
-  local simples, projs, i, j, ext, row;
+  local simples, projs, injs, i, j, ext, row;
   simples := SimpleModules(A);
   projs := IndecProjectiveModules(A);
+  injs := IndecInjectiveModules(A);
   ext := [];
   for i in [1 .. Length(simples)] do
     row := [];
@@ -57,6 +87,9 @@ FixtureRecord := function(name, A)
              num_vertices := Length(simples),
              dim := Dimension(A),
              cartan := List(projs, DimensionVector),
+             tau := List(simples, TauDimensionVector),
+             tau_injectives := List(injs, TauDimensionVector),
+             injdim := List(simples, InjDimensionValue),
              ext := ext);
 end;
 
@@ -73,9 +106,10 @@ EmitJson := function(fixtures)
   out := OutputTextFile(OUT, false);
   SetPrintFormattingStatus(out, false);
   AppendTo(out, "{\n");
-  AppendTo(out, "  \"schema\": \"auslander-qpa-oracle-v1\",\n");
+  AppendTo(out, "  \"schema\": \"auslander-qpa-oracle-v4\",\n");
   AppendTo(out, "  \"convention\": \"right\",\n");
   AppendTo(out, "  \"max_ext_degree\": ", String(MAX_EXT), ",\n");
+  AppendTo(out, "  \"injdim_bound\": ", String(INJ_BOUND), ",\n");
   AppendTo(out, "  \"fixtures\": [\n");
   for i in [1 .. Length(fixtures)] do
     fx := fixtures[i];
@@ -84,6 +118,9 @@ EmitJson := function(fixtures)
     AppendTo(out, "      \"num_vertices\": ", String(fx.num_vertices), ",\n");
     AppendTo(out, "      \"dim\": ", String(fx.dim), ",\n");
     AppendTo(out, "      \"cartan\": ", JsonIntMatrix(fx.cartan), ",\n");
+    AppendTo(out, "      \"tau\": ", JsonIntMatrix(fx.tau), ",\n");
+    AppendTo(out, "      \"tau_injectives\": ", JsonIntMatrix(fx.tau_injectives), ",\n");
+  AppendTo(out, "      \"injdim\": ", JsonIntList(fx.injdim), ",\n");
     AppendTo(out, "      \"ext\": [\n");
     for j in [1 .. Length(fx.ext)] do
       if j < Length(fx.ext) then rowcomma := ","; else rowcomma := ""; fi;

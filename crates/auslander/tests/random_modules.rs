@@ -8,9 +8,9 @@
 //!
 //! Basis-change convention, derived once and used throughout: with new
 //! coordinates `x'` related to old ones by `x = x'·G_v`, the transformed
-//! representation is `M'(a) = G_{s(a)} · M(a) · G_{t(a)}⁻¹`, and the vertex
-//! matrices `G_v` form an isomorphism `M' → M` (the squares `G_{s(a)} · M(a) =
-//! M'(a) · G_{t(a)}` hold by construction).
+//! representation is `M'(a) = G_{s(a)} · M(a) · G_{t(a)}⁻¹`. The vertex matrices
+//! `G_v` then form an isomorphism `M' → M`, because the squares
+//! `G_{s(a)} · M(a) = M'(a) · G_{t(a)}` hold by construction.
 //!
 //! Every case prints its seed before asserting, so a failing case reproduces by
 //! seeding [`XorShift64`] with the printed value.
@@ -30,7 +30,7 @@ use auslander::radical::radical;
 use auslander::resolution::{ResolutionEnd, projective_cover, resolve};
 
 const MAX_TOTAL_DIM: usize = 12;
-/// Cases per (algebra, field) pair; 5 algebras × 2 fields keeps every generator
+/// Cases per (algebra, field) pair. 5 algebras × 2 fields keeps every generator
 /// family well under 200 cases.
 const CASES: usize = 8;
 const SEED_BASE: u64 = 0x0005_eed0_fa05_1a4d;
@@ -217,7 +217,7 @@ fn random_basis_change(rng: &mut XorShift64, m: &Module) -> (Module, Vec<DenseMa
 }
 
 /// Generator (b), closure step: random vertex row-space seeds closed under all
-/// arrow actions to a fixed point; each basis is in reduced row echelon form.
+/// arrow actions to a fixed point. Each basis is in reduced row echelon form.
 fn random_closed_submodule_bases(rng: &mut XorShift64, m: &Module) -> Vec<DenseMat> {
     let field = m.field();
     let quiver = m.algebra().quiver();

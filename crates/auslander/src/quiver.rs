@@ -231,11 +231,12 @@ impl PathWord {
         }
     }
 
-    /// Checks that this word is a path of `quiver`: every arrow id is local,
-    /// consecutive arrows compose left to right, and the stored endpoints match
-    /// the arrows' endpoints there; a trivial path must name a local vertex.
+    /// Checks that this word is a path of `quiver`: every arrow id is in
+    /// range, consecutive arrows compose left to right, and the stored
+    /// endpoints match the arrows' endpoints there. A trivial path must name
+    /// a vertex of `quiver`.
     ///
-    /// A word is valid in the quiver it was built over; validation matters for
+    /// A word is valid in the quiver it was built over. Validation matters for
     /// words that may have crossed to a different quiver.
     pub fn validate_in(&self, quiver: &Quiver) -> Result<(), QuiverError> {
         if self.arrows.is_empty() {

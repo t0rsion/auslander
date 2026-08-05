@@ -2,9 +2,9 @@
 //!
 //! In the row-vector convention (see [`crate::module`]):
 //! `rad(M)_v = M·J at v` is the sum over arrows `a: u → v` of the row spaces of
-//! `M(a)` (the images of the row actions `x ↦ x M(a)` land at the arrow's target);
-//! `soc(M)_v = {x ∈ M_v : x M(a) = 0 for every arrow a with source v}`, since every
-//! nontrivial path begins with an arrow leaving its source vertex.
+//! `M(a)`. The images of the row actions `x ↦ x M(a)` land at the arrow's target.
+//! `soc(M)_v = {x ∈ M_v : x M(a) = 0 for every arrow a with source v}`, because
+//! every nontrivial path begins with an arrow leaving its source vertex.
 
 use crate::field::Fp;
 use crate::hom::{Morphism, quotient_with_projection, submodule_with_inclusion};
@@ -42,8 +42,8 @@ fn radical_bases(m: &Module) -> Vec<DenseMat> {
 }
 
 /// At each vertex, a row basis of the joint kernel of the actions of all standard
-/// paths of length exactly `k` leaving that vertex: `{x : x J^k = 0}` at `k ≥ 1`,
-/// because a path word with a forbidden factor already acts as zero on a valid
+/// paths of length exactly `k` leaving that vertex. For `k ≥ 1` this is
+/// `{x : x J^k = 0}`: a path word with a forbidden factor acts as zero on a valid
 /// module, so the standard paths span the image of `J^k`.
 fn joint_kernel_bases(m: &Module, k: usize) -> Vec<DenseMat> {
     let field = m.field();
@@ -97,8 +97,8 @@ pub fn radical_series(m: &Module) -> Vec<Module> {
 /// The ascending chain `0 = soc⁰ M ⊆ soc M ⊆ soc² M ⊆ …`, ending with `M` itself
 /// (each entry as an abstract module, not embedded in `m`).
 pub fn socle_series(m: &Module) -> Vec<Module> {
-    // soc^k M = {x : x J^k = 0}; once k exceeds the longest standard path, J^k = 0
-    // and the condition is vacuous, so the loop is guaranteed to reach M.
+    // soc^k M = {x : x J^k = 0}. Once k exceeds the longest standard path, J^k = 0
+    // and the condition is vacuous, so the loop reaches M.
     let max_len = m
         .algebra()
         .basis()
@@ -230,7 +230,6 @@ mod tests {
                     series.last().expect("nonempty").dim_vector(),
                     p.dim_vector()
                 );
-                // Both Loewy series have the same length.
                 assert_eq!(series.len(), radical_series(&p).len(), "P_{v}");
                 for pair in series.windows(2) {
                     assert!(pair[0].total_dim() < pair[1].total_dim());

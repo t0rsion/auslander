@@ -1,25 +1,36 @@
 //! Python façade for the `auslander` crate: prime fields, quivers, monomial bound
 //! quiver algebras, and their right modules.
 //!
-//! The surface is deliberately small and algebra-owned: modules are only ever
-//! created through `MonomialAlgebra` methods, so every Python-visible `Module` is a
-//! validated `kQ/I`-module. Library errors cross the boundary as `ValueError`
-//! carrying the Rust `Display` message.
+//! The surface is small and algebra-owned: modules are created only through
+//! `MonomialAlgebra` methods, so every Python-visible `Module` is a validated
+//! `kQ/I`-module. Library errors cross the boundary as `ValueError` carrying the
+//! Rust `Display` message. A rejection with variants gets one `ValueError`
+//! subclass per variant, with its payload attached as attributes, so the failed
+//! precondition is never reduced to a message string.
 
 use std::sync::Arc;
 
-use pyo3::exceptions::PyValueError;
+use pyo3::create_exception;
+use pyo3::exceptions::{PyOverflowError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 use auslander::algebra::{self, MonomialAlgebra};
+use auslander::ar::{self, Tau};
+use auslander::decompose::{self, Certificate, KrullSchmidtOutcome};
+use auslander::dynkin::{self, DynkinType, EuclideanType};
+use auslander::enumerate;
 use auslander::ext;
 use auslander::field::PrimeField;
 use auslander::hom;
+use auslander::injective::{self, InjectiveCoresolution};
+use auslander::iso::{self, IsoOutcome, Obstruction};
 use auslander::linalg::DenseMat;
 use auslander::module::Module;
 use auslander::quiver::{ArrowId, Quiver};
 use auslander::radical;
-use auslander::resolution::{Bounded, ResolutionEnd, projective_dimension, resolve};
+use auslander::resolution::{
+    Bounded, ProjectiveResolution, ResolutionEnd, projective_cover, projective_dimension, resolve,
+};
 
 fn value_error(e: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(e.to_string())
@@ -100,6 +111,24 @@ impl PyQuiver {
         Ok(PyQuiver {
             inner: Quiver::new(num_vertices, &arrows).map_err(value_error)?,
         })
+    }
+
+    /// The number of vertices.
+    #[getter]
+    fn num_vertices(&self) -> u32 {
+        self.inner.num_vertices()
+    }
+
+    /// The number of arrows.
+    #[getter]
+    fn num_arrows(&self) -> usize {
+        self.inner.num_arrows()
+    }
+
+    /// The arrows as (source, target) pairs, arrow i at index i.
+    #[getter]
+    fn arrows(&self) -> Vec<(u32, u32)> {
+        self.inner.arrows().to_vec()
     }
 
     fn __repr__(&self) -> String {
@@ -247,6 +276,15 @@ impl PyAlgebra {
     #[getter]
     fn num_arrows(&self) -> usize {
         self.inner.quiver().num_arrows()
+    }
+
+    /// The underlying quiver, as a fresh Quiver object; the argument the
+    /// diagram-recognition functions take.
+    #[getter]
+    fn quiver(&self) -> PyQuiver {
+        PyQuiver {
+            inner: self.inner.quiver().clone(),
+        }
     }
 
     /// The Cartan matrix C with C[i][j] = dim e_i A e_j, the number of standard
@@ -470,16 +508,121 @@ impl PyRightModule {
         radical::socle(&self.inner).0.dim_vector().to_vec()
     }
 
+    /// The projective cover as a pair (P(M), the cover P(M) -> M): P(M) is the
+    /// direct sum of P_v with multiplicity dim (top M)_v and the cover is an
+    /// epimorphism inducing an isomorphism on tops, so its kernel lies in
+    /// rad P(M). The cover has this module as its target, so it composes with
+    /// anything else built from the same algebra object. Dual to
+    /// injective_envelope.
+    #[pyo3(text_signature = "($self)")]
+    fn projective_cover(&self) -> (PyRightModule, PyMorphism) {
+        let (cover, epi) = projective_cover(&self.inner);
+        (PyRightModule { inner: cover }, PyMorphism { inner: epi })
+    }
+
     /// A minimal projective resolution prefix with at most `steps` differentials.
     /// The result records how it ended; see Resolution.status.
     #[pyo3(text_signature = "($self, steps)")]
     fn resolve(&self, steps: usize) -> PyResolution {
-        let res = resolve(&self.inner, steps);
         PyResolution {
             module: self.inner.clone(),
-            terms_dims: res.terms.iter().map(|t| t.dim_vector().to_vec()).collect(),
-            end: res.end,
+            inner: resolve(&self.inner, steps),
         }
+    }
+
+    /// The injective envelope as a pair (I(M), the embedding M -> I(M)):
+    /// I(M) is the direct sum of I_v with multiplicity dim (soc M)_v and the
+    /// embedding is a monomorphism with essential image, dual to the minimality
+    /// of a projective cover. The embedding has this module as its source, so it
+    /// composes with anything else built from the same algebra object.
+    #[pyo3(text_signature = "($self)")]
+    fn injective_envelope(&self) -> (PyRightModule, PyMorphism) {
+        let (envelope, embedding) = injective::injective_envelope(&self.inner);
+        (
+            PyRightModule { inner: envelope },
+            PyMorphism { inner: embedding },
+        )
+    }
+
+    /// A minimal injective coresolution prefix with at most `steps`
+    /// differentials. The result records how it ended; see
+    /// InjectiveCoresolution.status.
+    #[pyo3(text_signature = "($self, steps)")]
+    fn coresolve(&self, steps: usize) -> PyInjectiveCoresolution {
+        PyInjectiveCoresolution {
+            inner: injective::coresolve(&self.inner, steps),
+        }
+    }
+
+    /// The injective dimension, decided up to `bound` differentials: Exact(n)
+    /// with n <= bound when the minimal coresolution reaches zero by step
+    /// `bound`, AtLeast(bound + 1) otherwise. The coresolution is minimal, so
+    /// the lower bound is genuine. The zero module is injective, so its
+    /// injective dimension is Exact(0).
+    #[pyo3(text_signature = "($self, bound)")]
+    fn injective_dimension(&self, bound: usize) -> PyBounded {
+        PyBounded {
+            inner: injective::injective_dimension(&self.inner, bound),
+        }
+    }
+
+    /// A verified direct-sum decomposition of the module with one certificate
+    /// per summand; the zero module decomposes into no summands. The summands
+    /// are ordinary Modules over the same algebra object, so they interact
+    /// with everything else built from it. Deterministic: all randomness is
+    /// seeded per call.
+    #[pyo3(text_signature = "($self)")]
+    fn decompose(&self) -> PyDecomposition {
+        PyDecomposition {
+            inner: decompose::decompose(&self.inner),
+        }
+    }
+
+    /// Groups the summands of a full decomposition into isomorphism classes
+    /// with multiplicities, as a KrullSchmidtResult: `classes` when every
+    /// summand was certified indecomposable, an explicit `reason` otherwise,
+    /// never a partial grouping.
+    #[pyo3(text_signature = "($self)")]
+    fn krull_schmidt(&self) -> PyKrullSchmidtResult {
+        PyKrullSchmidtResult {
+            outcome: decompose::krull_schmidt(&self.inner),
+        }
+    }
+
+    /// The Auslander–Reiten translate τM as a Module, or None when τM = 0,
+    /// which happens exactly when the module is projective. This None is a
+    /// definite mathematical answer (the translate is the zero module), not a
+    /// partiality convention. Both computation routes (Nakayama kernel and
+    /// transpose-then-dual) always run and are cross-checked. A certified
+    /// disagreement raises RuntimeError, a library-bug signal distinct from the
+    /// ValueError used for input errors. A cross-check the isomorphism test
+    /// could not decide either way raises TauAgreementUnknown, which is a limit
+    /// of that test rather than evidence that the routes differ.
+    #[pyo3(text_signature = "($self)")]
+    fn tau(&self) -> PyResult<Option<PyRightModule>> {
+        match ar::tau(&self.inner) {
+            Ok(Tau::Zero) => Ok(None),
+            Ok(Tau::Module(inner)) => Ok(Some(PyRightModule { inner })),
+            Err(e @ ar::TauError::RoutesDisagree { .. }) => {
+                Err(PyRuntimeError::new_err(e.to_string()))
+            }
+            Err(e @ ar::TauError::AgreementUnknown { .. }) => {
+                Err(TauAgreementUnknown::new_err(e.to_string()))
+            }
+        }
+    }
+
+    /// Decides self ≅ other as an IsoResult: isomorphic True comes with a
+    /// verified witness (checked two-sided inverse), False with a proof-shaped
+    /// obstruction, and None means undetermined, not "no".
+    /// Raises ValueError when the modules do not share one algebra object and
+    /// field.
+    #[pyo3(text_signature = "($self, other)")]
+    fn is_isomorphic(&self, other: &PyRightModule) -> PyResult<PyIsoResult> {
+        check_same_context(&self.inner, &other.inner)?;
+        Ok(PyIsoResult {
+            outcome: iso::is_isomorphic(&self.inner, &other.inner).map_err(value_error)?,
+        })
     }
 
     fn __repr__(&self) -> String {
@@ -495,7 +638,7 @@ impl PyRightModule {
 /// by one matrix per vertex, acting on row vectors.
 ///
 /// Instances come from Module.hom (a basis of the hom space) or Module.morphism
-/// (a checked construction); every Morphism satisfies all commuting squares.
+/// (a checked construction). Every Morphism satisfies all commuting squares.
 #[pyclass(name = "Morphism", module = "auslander")]
 struct PyMorphism {
     inner: hom::Morphism,
@@ -528,6 +671,298 @@ impl PyMorphism {
     }
 }
 
+fn obstruction_string(o: &Obstruction) -> String {
+    match o {
+        Obstruction::DimensionVector { source, target } => {
+            format!("dimension vectors differ: {source:?} vs {target:?}")
+        }
+        Obstruction::LoewySeries { source, target } => {
+            format!("radical series differ: {source:?} vs {target:?}")
+        }
+        Obstruction::HomDimension {
+            end_source,
+            end_target,
+            forward,
+            backward,
+        } => format!(
+            "hom dimensions are asymmetric: dim End = {end_source} vs {end_target}, \
+             dim Hom = {forward} vs {backward}"
+        ),
+        Obstruction::RadicalCriterion => "radical criterion: both modules are indecomposable \
+             and every composite through Hom(N, M) lies in rad End(M)"
+            .to_string(),
+        Obstruction::UnmatchedSummand { dim_vector } => format!(
+            "an indecomposable summand with dimension vector {dim_vector:?} \
+             matches no summand of the other module"
+        ),
+    }
+}
+
+/// The outcome of Module.is_isomorphic.
+///
+/// Exactly one of three shapes: `isomorphic` True with a `witness` Morphism
+/// verified to have a two-sided inverse; `isomorphic` False with a
+/// proof-shaped `obstruction` string (see `obstruction_kind` for programmatic
+/// dispatch); or `isomorphic` None with a `reason` string when neither a
+/// witness nor an obstruction could be certified. None is distinguishable
+/// from False and claims nothing either way. Instances are immutable and come
+/// only from Module.is_isomorphic.
+#[pyclass(name = "IsoResult", module = "auslander", frozen)]
+struct PyIsoResult {
+    outcome: IsoOutcome,
+}
+
+#[pymethods]
+impl PyIsoResult {
+    /// True (isomorphic, see `witness`), False (not isomorphic, see
+    /// `obstruction`), or None (undetermined, see `reason`).
+    #[getter]
+    fn isomorphic(&self) -> Option<bool> {
+        match &self.outcome {
+            IsoOutcome::Isomorphic(_) => Some(true),
+            IsoOutcome::NotIsomorphic(_) => Some(false),
+            IsoOutcome::Unknown { .. } => None,
+        }
+    }
+
+    /// The verified isomorphism when `isomorphic` is True; None otherwise.
+    #[getter]
+    fn witness(&self) -> Option<PyMorphism> {
+        match &self.outcome {
+            IsoOutcome::Isomorphic(w) => Some(PyMorphism { inner: w.clone() }),
+            _ => None,
+        }
+    }
+
+    /// The proof of non-isomorphism when `isomorphic` is False; None otherwise.
+    #[getter]
+    fn obstruction(&self) -> Option<String> {
+        match &self.outcome {
+            IsoOutcome::NotIsomorphic(o) => Some(obstruction_string(o)),
+            _ => None,
+        }
+    }
+
+    /// A stable tag for the obstruction when `isomorphic` is False
+    /// ("dimension_vector", "loewy_series", "hom_dimension",
+    /// "radical_criterion", or "unmatched_summand"); None otherwise.
+    #[getter]
+    fn obstruction_kind(&self) -> Option<&'static str> {
+        match &self.outcome {
+            IsoOutcome::NotIsomorphic(o) => Some(match o {
+                Obstruction::DimensionVector { .. } => "dimension_vector",
+                Obstruction::LoewySeries { .. } => "loewy_series",
+                Obstruction::HomDimension { .. } => "hom_dimension",
+                Obstruction::RadicalCriterion => "radical_criterion",
+                Obstruction::UnmatchedSummand { .. } => "unmatched_summand",
+            }),
+            _ => None,
+        }
+    }
+
+    /// Why certification failed when `isomorphic` is None; None otherwise.
+    #[getter]
+    fn reason(&self) -> Option<String> {
+        match &self.outcome {
+            IsoOutcome::Unknown { reason } => Some(reason.clone()),
+            _ => None,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        match &self.outcome {
+            IsoOutcome::Isomorphic(_) => "IsoResult(isomorphic=True)".to_string(),
+            IsoOutcome::NotIsomorphic(o) => format!(
+                "IsoResult(isomorphic=False, obstruction={:?})",
+                obstruction_string(o)
+            ),
+            IsoOutcome::Unknown { reason } => {
+                format!("IsoResult(isomorphic=None, reason={reason:?})")
+            }
+        }
+    }
+}
+
+/// What decompose proved about one summand.
+///
+/// `kind` is "indecomposable" (the summand's endomorphism algebra is local, an
+/// exact computation, so this is proof) or "undetermined" (every splitting
+/// route was exhausted without a decision; nothing is claimed either way, and
+/// `attempts` is the number of exhausted seeded split attempts). Instances are
+/// immutable and come only from Decomposition.certificates and
+/// nakayama_indecomposables.
+#[pyclass(name = "Certificate", module = "auslander", frozen)]
+struct PyCertificate {
+    inner: Certificate,
+}
+
+#[pymethods]
+impl PyCertificate {
+    /// "indecomposable" or "undetermined".
+    #[getter]
+    fn kind(&self) -> &'static str {
+        match self.inner {
+            Certificate::Indecomposable => "indecomposable",
+            Certificate::Undetermined { .. } => "undetermined",
+        }
+    }
+
+    /// The number of exhausted split attempts when `kind` is "undetermined";
+    /// None when the summand is certified indecomposable.
+    #[getter]
+    fn attempts(&self) -> Option<u32> {
+        match self.inner {
+            Certificate::Indecomposable => None,
+            Certificate::Undetermined { attempts } => Some(attempts),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        match self.inner {
+            Certificate::Indecomposable => "Certificate(kind='indecomposable')".to_string(),
+            Certificate::Undetermined { attempts } => {
+                format!("Certificate(kind='undetermined', attempts={attempts})")
+            }
+        }
+    }
+}
+
+/// A verified direct-sum decomposition M ≅ S_0 ⊕ ... ⊕ S_{k-1} with one
+/// certificate per summand.
+///
+/// The split identities (each inclusion followed by its projection is the
+/// identity, cross terms vanish, the projection-inclusion composites sum to
+/// the identity of M) were checked at construction, so holding a
+/// Decomposition is proof of the direct sum. certificates[k] is a Certificate
+/// whose kind is "indecomposable" (End(S_k) is local, an exact computation)
+/// or "undetermined" (every splitting route was exhausted without a decision;
+/// nothing is claimed about that summand either way). Instances come only
+/// from Module.decompose.
+#[pyclass(name = "Decomposition", module = "auslander")]
+struct PyDecomposition {
+    inner: decompose::Decomposition,
+}
+
+#[pymethods]
+impl PyDecomposition {
+    /// The summands, in certificate order, as Modules over the same algebra
+    /// object as the decomposed module.
+    #[getter]
+    fn summands(&self) -> Vec<PyRightModule> {
+        self.inner
+            .summands()
+            .iter()
+            .map(|m| PyRightModule { inner: m.clone() })
+            .collect()
+    }
+
+    /// The inclusions summands[k] -> M, in summand order.
+    #[getter]
+    fn inclusions(&self) -> Vec<PyMorphism> {
+        self.inner
+            .split()
+            .inclusions()
+            .iter()
+            .map(|f| PyMorphism { inner: f.clone() })
+            .collect()
+    }
+
+    /// The projections M -> summands[k], in summand order.
+    #[getter]
+    fn projections(&self) -> Vec<PyMorphism> {
+        self.inner
+            .split()
+            .projections()
+            .iter()
+            .map(|f| PyMorphism { inner: f.clone() })
+            .collect()
+    }
+
+    /// One Certificate per summand, in summand order.
+    #[getter]
+    fn certificates(&self) -> Vec<PyCertificate> {
+        self.inner
+            .certificates()
+            .iter()
+            .map(|&inner| PyCertificate { inner })
+            .collect()
+    }
+
+    fn __repr__(&self) -> String {
+        let kinds: Vec<&'static str> = self
+            .certificates()
+            .iter()
+            .map(PyCertificate::kind)
+            .collect();
+        format!(
+            "Decomposition(summands={}, certificates={kinds:?})",
+            self.inner.summands().len(),
+        )
+    }
+}
+
+/// The outcome of Module.krull_schmidt.
+///
+/// Exactly one of `classes` and `reason` is set: `classes` lists
+/// (representative Module, multiplicity) pairs (a multiset unique up to
+/// isomorphism by Krull–Schmidt) when every summand was certified
+/// indecomposable, and `reason` says why grouping failed otherwise (no
+/// partial grouping is ever claimed). Instances are immutable and come only
+/// from Module.krull_schmidt.
+#[pyclass(name = "KrullSchmidtResult", module = "auslander", frozen)]
+struct PyKrullSchmidtResult {
+    outcome: KrullSchmidtOutcome,
+}
+
+#[pymethods]
+impl PyKrullSchmidtResult {
+    /// The isomorphism classes as (representative Module, multiplicity)
+    /// pairs, or None when a summand stayed undetermined.
+    #[getter]
+    fn classes(&self) -> Option<Vec<(PyRightModule, usize)>> {
+        match &self.outcome {
+            KrullSchmidtOutcome::Classes(classes) => Some(
+                classes
+                    .iter()
+                    .map(|c| {
+                        (
+                            PyRightModule {
+                                inner: c.representative.clone(),
+                            },
+                            c.multiplicity,
+                        )
+                    })
+                    .collect(),
+            ),
+            KrullSchmidtOutcome::Unknown { .. } => None,
+        }
+    }
+
+    /// Why grouping failed, or None when `classes` is set.
+    #[getter]
+    fn reason(&self) -> Option<String> {
+        match &self.outcome {
+            KrullSchmidtOutcome::Classes(_) => None,
+            KrullSchmidtOutcome::Unknown { reason } => Some(reason.clone()),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        match &self.outcome {
+            KrullSchmidtOutcome::Classes(classes) => {
+                let entries: Vec<(Vec<usize>, usize)> = classes
+                    .iter()
+                    .map(|c| (c.representative.dim_vector().to_vec(), c.multiplicity))
+                    .collect();
+                format!("KrullSchmidtResult(classes={entries:?})")
+            }
+            KrullSchmidtOutcome::Unknown { reason } => {
+                format!("KrullSchmidtResult(reason={reason:?})")
+            }
+        }
+    }
+}
+
 /// How a computed resolution prefix ended: FINITE (reached zero) or CUT (step
 /// budget ran out with the next syzygy nonzero).
 #[pyclass(name = "ResolutionKind", module = "auslander", frozen, eq)]
@@ -539,11 +974,11 @@ enum PyResolutionKind {
     Cut,
 }
 
-/// How a resolution prefix ended, never overclaiming: kind FINITE with at None
-/// means the resolution reached zero; kind CUT with at = n means exactly n
-/// differentials were computed and the (n+1)-st syzygy is nonzero, with nothing
-/// claimed beyond it. The invariant kind == FINITE iff at is None is enforced
-/// at construction, and instances are immutable.
+/// How a resolution prefix ended: kind FINITE with at = None means the
+/// resolution reached zero; kind CUT with at = n means exactly n differentials
+/// were computed and the (n+1)-st syzygy is nonzero, with nothing claimed
+/// beyond it. The invariant kind == FINITE iff at is None is enforced at
+/// construction, and instances are immutable.
 #[pyclass(name = "ResolutionStatus", module = "auslander", frozen, eq)]
 #[derive(PartialEq)]
 struct PyResolutionStatus {
@@ -604,21 +1039,56 @@ impl PyResolutionStatus {
 
 /// A minimal projective resolution prefix ... -> P_1 -> P_0 -> M -> 0.
 ///
-/// `terms_dims[k]` is the dimension vector of P_k. `status` says how the computed
-/// prefix ended and never overclaims; see ResolutionStatus.
+/// `terms[k]` is P_k and `maps[k]` the differential from terms[k + 1] to
+/// terms[k], so there is one map fewer than there are terms; `augmentation` is
+/// the projective cover P_0 -> M. `status` says how the computed prefix ended;
+/// see ResolutionStatus. Minimality: every differential lands in the radical
+/// of its target, dual to the shape InjectiveCoresolution reports.
 #[pyclass(name = "Resolution", module = "auslander")]
 struct PyResolution {
     module: Module,
-    terms_dims: Vec<Vec<usize>>,
-    end: ResolutionEnd,
+    inner: ProjectiveResolution,
 }
 
 #[pymethods]
 impl PyResolution {
+    /// The terms P_0, P_1, ... as Modules over the same algebra object as the
+    /// resolved module.
+    #[getter]
+    fn terms(&self) -> Vec<PyRightModule> {
+        self.inner
+            .terms
+            .iter()
+            .map(|m| PyRightModule { inner: m.clone() })
+            .collect()
+    }
+
     /// Dimension vectors of the terms: terms_dims[k] is the dim vector of P_k.
     #[getter]
     fn terms_dims(&self) -> Vec<Vec<usize>> {
-        self.terms_dims.clone()
+        self.inner
+            .terms
+            .iter()
+            .map(|t| t.dim_vector().to_vec())
+            .collect()
+    }
+
+    /// The differentials, maps[k] going from terms[k + 1] to terms[k].
+    #[getter]
+    fn maps(&self) -> Vec<PyMorphism> {
+        self.inner
+            .maps
+            .iter()
+            .map(|f| PyMorphism { inner: f.clone() })
+            .collect()
+    }
+
+    /// The augmentation P_0 -> M, the projective cover of the resolved module.
+    #[getter]
+    fn augmentation(&self) -> PyMorphism {
+        PyMorphism {
+            inner: self.inner.augmentation.clone(),
+        }
     }
 
     /// How the prefix ended, as an immutable ResolutionStatus: kind FINITE (the
@@ -627,7 +1097,9 @@ impl PyResolution {
     /// syzygy nonzero).
     #[getter]
     fn status(&self) -> PyResolutionStatus {
-        PyResolutionStatus { end: self.end }
+        PyResolutionStatus {
+            end: self.inner.end,
+        }
     }
 
     /// The projective dimension of the resolved module, decided up to `bound`
@@ -641,13 +1113,91 @@ impl PyResolution {
     }
 
     fn __repr__(&self) -> String {
-        let status = match self.end {
+        let status = match self.inner.end {
             ResolutionEnd::Finite => "finite".to_string(),
             ResolutionEnd::Cut { at } => format!("('cut', {at})"),
         };
         format!(
             "Resolution(terms={}, status={status})",
-            self.terms_dims.len()
+            self.inner.terms.len()
+        )
+    }
+}
+
+/// A minimal injective coresolution prefix 0 -> M -> I^0 -> I^1 -> ...
+///
+/// `terms[k]` is I^k and `maps[k]` the differential d^k from I^k to I^{k+1}, so
+/// there is one map fewer than there are terms; `coaugmentation` is the
+/// injective envelope M -> I^0. `status` says how the computed prefix ended, in
+/// the same ResolutionStatus shape a projective resolution reports. Minimality
+/// is the dual of "differentials land in the radical": soc I^k lies in the
+/// kernel of d^k at every step.
+#[pyclass(name = "InjectiveCoresolution", module = "auslander")]
+struct PyInjectiveCoresolution {
+    inner: InjectiveCoresolution,
+}
+
+#[pymethods]
+impl PyInjectiveCoresolution {
+    /// The terms I^0, I^1, ... as Modules over the same algebra object as the
+    /// coresolved module.
+    #[getter]
+    fn terms(&self) -> Vec<PyRightModule> {
+        self.inner
+            .terms
+            .iter()
+            .map(|m| PyRightModule { inner: m.clone() })
+            .collect()
+    }
+
+    /// Dimension vectors of the terms: terms_dims[k] is the dim vector of I^k.
+    #[getter]
+    fn terms_dims(&self) -> Vec<Vec<usize>> {
+        self.inner
+            .terms
+            .iter()
+            .map(|t| t.dim_vector().to_vec())
+            .collect()
+    }
+
+    /// The differentials, maps[k] going from terms[k] to terms[k + 1].
+    #[getter]
+    fn maps(&self) -> Vec<PyMorphism> {
+        self.inner
+            .maps
+            .iter()
+            .map(|f| PyMorphism { inner: f.clone() })
+            .collect()
+    }
+
+    /// The coaugmentation M -> I^0, the injective envelope of the coresolved
+    /// module.
+    #[getter]
+    fn coaugmentation(&self) -> PyMorphism {
+        PyMorphism {
+            inner: self.inner.coaugmentation.clone(),
+        }
+    }
+
+    /// How the prefix ended, as an immutable ResolutionStatus: kind FINITE (the
+    /// coresolution reached zero, so id M = len(terms_dims) - 1 for nonzero M)
+    /// or kind CUT with at = n (exactly n differentials computed, the (n+1)-st
+    /// cosyzygy nonzero).
+    #[getter]
+    fn status(&self) -> PyResolutionStatus {
+        PyResolutionStatus {
+            end: self.inner.end,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        let status = match self.inner.end {
+            ResolutionEnd::Finite => "finite".to_string(),
+            ResolutionEnd::Cut { at } => format!("('cut', {at})"),
+        };
+        format!(
+            "InjectiveCoresolution(terms={}, status={status})",
+            self.inner.terms.len()
         )
     }
 }
@@ -707,6 +1257,405 @@ fn global_dimension(algebra: &PyAlgebra, field: &PyPrimeField, bound: usize) -> 
     }
 }
 
+/// Every indecomposable right module of a Nakayama algebra, as
+/// (Module, Certificate) pairs: the uniserial quotients P_i / rad^l P_i for
+/// 1 <= l <= dim P_i, ordered by vertex then by length l, so the count is
+/// dim_k A (the sum of the Kupisch series). Every certificate has kind
+/// "indecomposable": it comes from the exact decomposition machinery, which
+/// must certify a uniserial module. Raises ValueError when a vertex has more
+/// than one incoming or outgoing arrow, i.e. the algebra is not Nakayama and
+/// the list would not be exhaustive.
+#[pyfunction]
+#[pyo3(text_signature = "(algebra, field)")]
+fn nakayama_indecomposables(
+    algebra: &PyAlgebra,
+    field: &PyPrimeField,
+) -> PyResult<Vec<(PyRightModule, PyCertificate)>> {
+    Ok(
+        enumerate::nakayama_indecomposables(&algebra.inner, field.inner)
+            .map_err(value_error)?
+            .into_iter()
+            .map(|(inner, c)| (PyRightModule { inner }, PyCertificate { inner: c }))
+            .collect(),
+    )
+}
+
+/// One of the five simply laced diagram families. A and D are parametrized by
+/// an integer; E6, E7 and E8 each name a single diagram.
+#[pyclass(name = "DiagramFamily", module = "auslander", frozen, eq)]
+#[derive(Clone, Copy, PartialEq)]
+enum PyDiagramFamily {
+    A,
+    D,
+    E6,
+    E7,
+    E8,
+}
+
+/// A simply laced Dynkin diagram: A(n) for n >= 1, D(n) for n >= 4, E6, E7, E8.
+///
+/// The parameter constraints are enforced at construction, as is the invariant
+/// that n is an integer for the A and D families and None for E6, E7 and E8, so
+/// `num_vertices` and `indecomposable_count` are exact for every instance.
+/// Instances are immutable and compare by family and parameter. str() gives the
+/// usual name ("A_3", "D_4", "E_6").
+#[pyclass(name = "DynkinType", module = "auslander", frozen, eq)]
+#[derive(PartialEq)]
+struct PyDynkinType {
+    inner: DynkinType,
+}
+
+#[pymethods]
+impl PyDynkinType {
+    /// DynkinType(family, n=None); raises ValueError unless A comes with an
+    /// integer n >= 1, D with an integer n >= 4, and E6, E7, E8 with n=None.
+    #[new]
+    #[pyo3(signature = (family, n = None), text_signature = "(family, n=None)")]
+    fn new(family: PyDiagramFamily, n: Option<usize>) -> PyResult<Self> {
+        let inner = match (family, n) {
+            (PyDiagramFamily::A, Some(n)) if n >= 1 => DynkinType::A(n),
+            (PyDiagramFamily::D, Some(n)) if n >= 4 => DynkinType::D(n),
+            (PyDiagramFamily::E6, None) => DynkinType::E6,
+            (PyDiagramFamily::E7, None) => DynkinType::E7,
+            (PyDiagramFamily::E8, None) => DynkinType::E8,
+            (PyDiagramFamily::A, _) => {
+                return Err(PyValueError::new_err(
+                    "DynkinType: A needs an integer n >= 1",
+                ));
+            }
+            (PyDiagramFamily::D, _) => {
+                return Err(PyValueError::new_err(
+                    "DynkinType: D needs an integer n >= 4",
+                ));
+            }
+            (_, Some(_)) => {
+                return Err(PyValueError::new_err(
+                    "DynkinType: E6, E7 and E8 take n=None",
+                ));
+            }
+        };
+        // The getters are total on constructed instances, so a parameter whose
+        // vertex count or root count exceeds usize is rejected here rather than
+        // panicking later.
+        if inner.num_vertices().is_none() || inner.indecomposable_count().is_none() {
+            return Err(PyOverflowError::new_err(
+                "DynkinType: n is too large for its vertex count and root count to be represented",
+            ));
+        }
+        Ok(PyDynkinType { inner })
+    }
+
+    /// DiagramFamily.A, D, E6, E7 or E8.
+    #[getter]
+    fn family(&self) -> PyDiagramFamily {
+        match self.inner {
+            DynkinType::A(_) => PyDiagramFamily::A,
+            DynkinType::D(_) => PyDiagramFamily::D,
+            DynkinType::E6 => PyDiagramFamily::E6,
+            DynkinType::E7 => PyDiagramFamily::E7,
+            DynkinType::E8 => PyDiagramFamily::E8,
+        }
+    }
+
+    /// The parameter of the A and D families; None for E6, E7 and E8.
+    #[getter]
+    fn n(&self) -> Option<usize> {
+        match self.inner {
+            DynkinType::A(n) | DynkinType::D(n) => Some(n),
+            DynkinType::E6 | DynkinType::E7 | DynkinType::E8 => None,
+        }
+    }
+
+    /// The number of vertices of the diagram.
+    #[getter]
+    fn num_vertices(&self) -> usize {
+        self.inner
+            .num_vertices()
+            .expect("a constructed DynkinType names a diagram")
+    }
+
+    /// The number of positive roots, equal by Gabriel's theorem to the number of
+    /// isomorphism classes of indecomposable representations of any quiver with
+    /// this underlying graph: n(n + 1)/2 for A_n, n(n - 1) for D_n, and 36, 63,
+    /// 120 for E6, E7, E8.
+    #[getter]
+    fn indecomposable_count(&self) -> usize {
+        self.inner
+            .indecomposable_count()
+            .expect("a constructed DynkinType names a diagram")
+    }
+
+    fn __str__(&self) -> String {
+        self.inner.to_string()
+    }
+
+    fn __repr__(&self) -> String {
+        match self.inner {
+            DynkinType::A(n) => format!("DynkinType(DiagramFamily.A, n={n})"),
+            DynkinType::D(n) => format!("DynkinType(DiagramFamily.D, n={n})"),
+            DynkinType::E6 => "DynkinType(DiagramFamily.E6)".to_string(),
+            DynkinType::E7 => "DynkinType(DiagramFamily.E7)".to_string(),
+            DynkinType::E8 => "DynkinType(DiagramFamily.E8)".to_string(),
+        }
+    }
+}
+
+/// A simply laced Euclidean (affine) diagram: A(n) for n >= 1, D(n) for n >= 4,
+/// E6, E7, E8.
+///
+/// The subscript is the rank of the finite diagram the affine one extends, so
+/// the diagram itself has one vertex more. The parameter constraints are
+/// enforced at construction, so `num_vertices` is exact for every instance.
+/// Instances are immutable and compare by family and parameter. str() gives the
+/// usual name ("affine A_1", "affine D_4").
+#[pyclass(name = "EuclideanType", module = "auslander", frozen, eq)]
+#[derive(PartialEq)]
+struct PyEuclideanType {
+    inner: EuclideanType,
+}
+
+#[pymethods]
+impl PyEuclideanType {
+    /// EuclideanType(family, n=None); raises ValueError unless A comes with an
+    /// integer n >= 1, D with an integer n >= 4, and E6, E7, E8 with n=None.
+    #[new]
+    #[pyo3(signature = (family, n = None), text_signature = "(family, n=None)")]
+    fn new(family: PyDiagramFamily, n: Option<usize>) -> PyResult<Self> {
+        let inner = match (family, n) {
+            (PyDiagramFamily::A, Some(n)) if n >= 1 => EuclideanType::A(n),
+            (PyDiagramFamily::D, Some(n)) if n >= 4 => EuclideanType::D(n),
+            (PyDiagramFamily::E6, None) => EuclideanType::E6,
+            (PyDiagramFamily::E7, None) => EuclideanType::E7,
+            (PyDiagramFamily::E8, None) => EuclideanType::E8,
+            (PyDiagramFamily::A, _) => {
+                return Err(PyValueError::new_err(
+                    "EuclideanType: A needs an integer n >= 1",
+                ));
+            }
+            (PyDiagramFamily::D, _) => {
+                return Err(PyValueError::new_err(
+                    "EuclideanType: D needs an integer n >= 4",
+                ));
+            }
+            (_, Some(_)) => {
+                return Err(PyValueError::new_err(
+                    "EuclideanType: E6, E7 and E8 take n=None",
+                ));
+            }
+        };
+        // `num_vertices` is total on constructed instances, so a parameter whose
+        // vertex count exceeds usize is rejected here rather than panicking
+        // later.
+        if inner.num_vertices().is_none() {
+            return Err(PyOverflowError::new_err(
+                "EuclideanType: n is too large for its vertex count to be represented",
+            ));
+        }
+        Ok(PyEuclideanType { inner })
+    }
+
+    /// DiagramFamily.A, D, E6, E7 or E8.
+    #[getter]
+    fn family(&self) -> PyDiagramFamily {
+        match self.inner {
+            EuclideanType::A(_) => PyDiagramFamily::A,
+            EuclideanType::D(_) => PyDiagramFamily::D,
+            EuclideanType::E6 => PyDiagramFamily::E6,
+            EuclideanType::E7 => PyDiagramFamily::E7,
+            EuclideanType::E8 => PyDiagramFamily::E8,
+        }
+    }
+
+    /// The parameter of the A and D families; None for E6, E7 and E8.
+    #[getter]
+    fn n(&self) -> Option<usize> {
+        match self.inner {
+            EuclideanType::A(n) | EuclideanType::D(n) => Some(n),
+            EuclideanType::E6 | EuclideanType::E7 | EuclideanType::E8 => None,
+        }
+    }
+
+    /// The number of vertices of the diagram, one more than the subscript for
+    /// the A and D families.
+    #[getter]
+    fn num_vertices(&self) -> usize {
+        self.inner
+            .num_vertices()
+            .expect("a constructed EuclideanType names a diagram")
+    }
+
+    fn __str__(&self) -> String {
+        self.inner.to_string()
+    }
+
+    fn __repr__(&self) -> String {
+        match self.inner {
+            EuclideanType::A(n) => format!("EuclideanType(DiagramFamily.A, n={n})"),
+            EuclideanType::D(n) => format!("EuclideanType(DiagramFamily.D, n={n})"),
+            EuclideanType::E6 => "EuclideanType(DiagramFamily.E6)".to_string(),
+            EuclideanType::E7 => "EuclideanType(DiagramFamily.E7)".to_string(),
+            EuclideanType::E8 => "EuclideanType(DiagramFamily.E8)".to_string(),
+        }
+    }
+}
+
+create_exception!(
+    auslander,
+    TauAgreementUnknown,
+    PyRuntimeError,
+    "The two tau routes were computed but the isomorphism test could not certify \
+     them equal or unequal. This is a limit of that test, not evidence that the \
+     routes disagree; a certified disagreement raises RuntimeError itself."
+);
+
+create_exception!(
+    auslander,
+    DynkinError,
+    PyValueError,
+    "Base of the two rejections of dynkin_indecomposables; the variant is the \
+     subclass, NonzeroIdealError or NotDynkinError."
+);
+
+create_exception!(
+    auslander,
+    NonzeroIdealError,
+    DynkinError,
+    "The algebra is a proper quotient of kQ, so Gabriel's theorem does not list \
+     its indecomposables. `forbidden_words` is the number of minimal forbidden \
+     words the algebra carries."
+);
+
+create_exception!(
+    auslander,
+    NotDynkinError,
+    DynkinError,
+    "The underlying graph of the quiver is no Dynkin diagram, so kQ is not \
+     representation finite. `euclidean` is the EuclideanType of that graph when \
+     it has one and None otherwise."
+);
+
+/// The rejection as an exception of the matching subclass, its payload attached
+/// as attributes so the variant survives the boundary.
+fn dynkin_error(py: Python<'_>, e: dynkin::DynkinError) -> PyErr {
+    let err = match e {
+        dynkin::DynkinError::NonzeroIdeal { .. } => NonzeroIdealError::new_err(e.to_string()),
+        dynkin::DynkinError::NotDynkin { .. } => NotDynkinError::new_err(e.to_string()),
+    };
+    let attached = match e {
+        dynkin::DynkinError::NonzeroIdeal { forbidden_words } => {
+            err.value(py).setattr("forbidden_words", forbidden_words)
+        }
+        dynkin::DynkinError::NotDynkin { euclidean } => err.value(py).setattr(
+            "euclidean",
+            euclidean.map(|inner| PyEuclideanType { inner }),
+        ),
+    };
+    match attached {
+        Ok(()) => err,
+        Err(failure) => failure,
+    }
+}
+
+/// The Dynkin type of the quiver's underlying graph, or None when that graph is
+/// no Dynkin diagram.
+///
+/// The None is a definite answer about the graph, not partiality: recognition is
+/// an exact integer computation. The type depends only on the underlying graph,
+/// never on the orientation and never on an ideal of relations, so this takes a
+/// Quiver; pass `algebra.quiver` to classify an algebra.
+#[pyfunction]
+#[pyo3(text_signature = "(quiver)")]
+fn dynkin_type(quiver: &PyQuiver) -> Option<PyDynkinType> {
+    dynkin::dynkin_type(&quiver.inner).map(|inner| PyDynkinType { inner })
+}
+
+/// The Euclidean (affine) type of the quiver's underlying graph, or None when
+/// that graph is no Euclidean diagram; the None is a definite answer about the
+/// graph, as for `dynkin_type`.
+#[pyfunction]
+#[pyo3(text_signature = "(quiver)")]
+fn euclidean_type(quiver: &PyQuiver) -> Option<PyEuclideanType> {
+    dynkin::euclidean_type(&quiver.inner).map(|inner| PyEuclideanType { inner })
+}
+
+/// The generalized Cartan matrix of the quiver's underlying graph: 2 on the
+/// diagonal and minus the number of edges joining i and j off it. None exactly
+/// when the quiver has a loop, since a vertex carrying a loop contributes no row
+/// with diagonal entry 2.
+#[pyfunction]
+#[pyo3(text_signature = "(quiver)")]
+fn generalized_cartan_matrix(quiver: &PyQuiver) -> Option<Vec<Vec<i64>>> {
+    dynkin::generalized_cartan_matrix(&quiver.inner)
+}
+
+/// The positive roots of the quiver's underlying graph, in the quiver's own
+/// vertex indexing, ordered by height and then lexicographically; None when the
+/// graph is no Dynkin diagram, where the list would be infinite or undefined.
+#[pyfunction]
+#[pyo3(text_signature = "(quiver)")]
+fn positive_roots(quiver: &PyQuiver) -> Option<Vec<Vec<usize>>> {
+    dynkin::positive_roots(&quiver.inner)
+}
+
+/// A quiver whose underlying graph is the named Dynkin diagram, oriented away
+/// from the branch vertex. The abstract diagram is unbounded, but a Quiver
+/// indexes its vertices by u32; raises ValueError when the diagram's vertex
+/// count exceeds that limit.
+#[pyfunction]
+#[pyo3(text_signature = "(diagram)")]
+fn dynkin_quiver(diagram: &PyDynkinType) -> PyResult<PyQuiver> {
+    dynkin::dynkin_quiver(diagram.inner)
+        .map(|inner| PyQuiver { inner })
+        .ok_or_else(|| {
+            PyValueError::new_err(
+                "dynkin_quiver: the diagram's vertex count exceeds the u32 limit of Quiver",
+            )
+        })
+}
+
+/// A quiver whose underlying graph is the named Euclidean diagram. The cyclic
+/// cases are oriented acyclically, so their path algebras are finite
+/// dimensional. The abstract diagram is unbounded, but a Quiver indexes its
+/// vertices by u32; raises ValueError when the diagram's vertex count exceeds
+/// that limit.
+#[pyfunction]
+#[pyo3(text_signature = "(diagram)")]
+fn euclidean_quiver(diagram: &PyEuclideanType) -> PyResult<PyQuiver> {
+    dynkin::euclidean_quiver(diagram.inner)
+        .map(|inner| PyQuiver { inner })
+        .ok_or_else(|| {
+            PyValueError::new_err(
+                "euclidean_quiver: the diagram's vertex count exceeds the u32 limit of Quiver",
+            )
+        })
+}
+
+/// Every indecomposable right module of a hereditary path algebra kQ with Q of
+/// Dynkin type, one per positive root of the underlying graph (Gabriel), as
+/// (Module, Certificate) pairs ordered as `positive_roots` orders the roots.
+///
+/// Each module is built from a simple one by a chain of Bernstein-Gelfand-
+/// Ponomarev reflection functors, so nothing is enumerated over the field and
+/// the count is the number of positive roots for every prime. Every certificate
+/// has kind "indecomposable": it comes from the exact decomposition machinery
+/// and independently confirms what the construction proves. Raises
+/// NonzeroIdealError, carrying `forbidden_words`, when the algebra is a proper
+/// quotient of kQ, and NotDynkinError, carrying `euclidean`, when the underlying
+/// graph is no Dynkin diagram.
+#[pyfunction]
+#[pyo3(text_signature = "(algebra, field)")]
+fn dynkin_indecomposables(
+    py: Python<'_>,
+    algebra: &PyAlgebra,
+    field: &PyPrimeField,
+) -> PyResult<Vec<(PyRightModule, PyCertificate)>> {
+    Ok(dynkin::dynkin_indecomposables(&algebra.inner, field.inner)
+        .map_err(|e| dynkin_error(py, e))?
+        .into_iter()
+        .map(|(inner, c)| (PyRightModule { inner }, PyCertificate { inner: c }))
+        .collect())
+}
+
 /// Finite-dimensional basic algebras kQ/I over a checked prime field, where I is
 /// an admissible monomial ideal, and their finite-dimensional right modules.
 /// Convention: paths compose left to right, and modules are right modules whose
@@ -718,10 +1667,33 @@ fn auslander_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyAlgebra>()?;
     m.add_class::<PyRightModule>()?;
     m.add_class::<PyMorphism>()?;
+    m.add_class::<PyIsoResult>()?;
+    m.add_class::<PyCertificate>()?;
+    m.add_class::<PyDecomposition>()?;
+    m.add_class::<PyKrullSchmidtResult>()?;
     m.add_class::<PyResolutionKind>()?;
     m.add_class::<PyResolutionStatus>()?;
     m.add_class::<PyResolution>()?;
+    m.add_class::<PyInjectiveCoresolution>()?;
     m.add_class::<PyBounded>()?;
+    m.add_class::<PyDiagramFamily>()?;
+    m.add_class::<PyDynkinType>()?;
+    m.add_class::<PyEuclideanType>()?;
+    m.add(
+        "TauAgreementUnknown",
+        m.py().get_type::<TauAgreementUnknown>(),
+    )?;
+    m.add("DynkinError", m.py().get_type::<DynkinError>())?;
+    m.add("NonzeroIdealError", m.py().get_type::<NonzeroIdealError>())?;
+    m.add("NotDynkinError", m.py().get_type::<NotDynkinError>())?;
     m.add_function(wrap_pyfunction!(global_dimension, m)?)?;
+    m.add_function(wrap_pyfunction!(nakayama_indecomposables, m)?)?;
+    m.add_function(wrap_pyfunction!(dynkin_type, m)?)?;
+    m.add_function(wrap_pyfunction!(euclidean_type, m)?)?;
+    m.add_function(wrap_pyfunction!(generalized_cartan_matrix, m)?)?;
+    m.add_function(wrap_pyfunction!(positive_roots, m)?)?;
+    m.add_function(wrap_pyfunction!(dynkin_quiver, m)?)?;
+    m.add_function(wrap_pyfunction!(euclidean_quiver, m)?)?;
+    m.add_function(wrap_pyfunction!(dynkin_indecomposables, m)?)?;
     Ok(())
 }

@@ -2,17 +2,16 @@
 //!
 //! `Ext^k(M, N)` is the cohomology of `Hom_A(P_•, N)` for a projective resolution
 //! `P_• → M`. Every term produced by [`projective_cover`](crate::resolution::projective_cover) is `⊕_v P_v^{t_v}` in a
-//! canonical layout, and Yoneda gives `Hom_A(e_v A, N) ≅ N_v`, so `Hom_A(P, N)` has
-//! an explicit basis indexed by (generator, basis vector of `N` at its vertex): the
+//! canonical layout, and Yoneda gives `Hom_A(e_v A, N) ≅ N_v`. So `Hom_A(P, N)` has
+//! an explicit basis indexed by (generator, basis vector of `N` at its vertex). The
 //! element for generator `g` at `v` and index `j` sends the summand basis path
 //! `p: v → w` to the `j`-th row of `N(p)`. Coordinates of any morphism in this basis
-//! are read off its generator rows; no linear system is solved.
+//! are read off its generator rows. No linear system is solved.
 //!
 //! Sign convention: the induced cochain maps are `δ^i(f) = f ∘ d_{i+1}` with no
 //! signs. Alternating signs only normalize `δ² = 0` under other differentials'
-//! conventions; here `δ² = 0` already follows from `d² = 0`, and any sign choice
-//! rescales basis vectors without changing ranks, so dimension computations are
-//! sign-free.
+//! conventions. Here `δ² = 0` follows from `d² = 0`. Any sign choice rescales basis
+//! vectors without changing ranks, so dimension computations are sign-free.
 //!
 //! Exactness: [`ext_dim`]`(m, n, k)` resolves `m` for `k + 1` steps. The result is
 //! either a complete finite resolution or a prefix with differentials
@@ -52,7 +51,7 @@ impl fmt::Display for ExtError {
 impl std::error::Error for ExtError {}
 
 /// Summand layout of a projective term `⊕_v P_v^{t_v}` built by [`projective_cover`](crate::resolution::projective_cover):
-/// generators ordered by vertex then copy, and at each vertex the term's basis is the
+/// generators are ordered by vertex then copy. At each vertex the term's basis is the
 /// concatenation of the summands' path bases in generator order.
 struct Layout {
     /// Vertex of each generator, in canonical order.
@@ -62,7 +61,7 @@ struct Layout {
 }
 
 /// Recovers the layout from the term alone: `t_v = dim (top P)_v` because
-/// `top P_v = S_v`. The block-total assertion fails only if the term was not built
+/// `top P_v = S_v`. The block-total assertion fails only if the term is not built
 /// by [`projective_cover`](crate::resolution::projective_cover), which never happens inside this module.
 fn layout(term: &Module) -> Layout {
     let algebra = term.algebra();
@@ -256,7 +255,7 @@ mod tests {
     // Right modules over linearly oriented A_3 (arrows a: 0 → 1, b: 1 → 2). The
     // nonsplit extension realized by arrow a is 0 → S_1 → M → S_0 → 0 with
     // M = P_0/rad² of dimension vector (1, 1, 0), top S_0 and socle S_1, so the
-    // nonzero Ext group is Ext¹(S_0, S_1), and generally dim Ext¹(S_i, S_j) equals
+    // nonzero Ext group is Ext¹(S_0, S_1). In general dim Ext¹(S_i, S_j) equals
     // the number of arrows i → j (same pairing as for left modules over A^op read
     // backwards; ASS III.2.12 states it for right modules).
     #[test]
@@ -289,10 +288,9 @@ mod tests {
     // Ext¹(S_i, S_j) = #arrows i → j gives Ext¹(S_0, S_1) = Ext¹(S_1, S_2) = 1;
     // Ext² is detected by the relation, on the ordered pair (source, target) of the
     // forbidden path: Hom(P_2, S_2) = k sits in degree 2 of the resolution of S_0
-    // with zero δ on both sides, so Ext²(S_0, S_2) = 1. This matches the
-    // QPA-verified facts from the old repo (Ext¹(S_0, S_1) = 1, Ext²(S_0, S_2) = 1)
-    // with no right-vs-left ordered-pair discrepancy: our derivation lands on the
-    // same pairs.
+    // with zero δ on both sides, so Ext²(S_0, S_2) = 1. These values match the
+    // QPA-verified facts (Ext¹(S_0, S_1) = 1, Ext²(S_0, S_2) = 1) on the same
+    // ordered pairs, with no right-vs-left discrepancy.
     #[test]
     fn a3_mod_ab_ext_1_and_2_among_simples() {
         let algebra = an_with_relations(3, &[(0, 2)]).unwrap();
@@ -415,8 +413,7 @@ mod tests {
 
     // The Yoneda basis must agree with the generic commuting-square solver: same
     // dimension for Hom(P, N) on every resolution term, and the canonical
-    // coordinates of the Yoneda basis form the identity matrix (a genuine basis
-    // with reflexive coordinates).
+    // coordinates of the Yoneda basis form the identity matrix.
     #[test]
     fn yoneda_basis_agrees_with_generic_hom_on_resolution_terms() {
         let field = f5();

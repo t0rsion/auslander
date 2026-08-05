@@ -6,11 +6,11 @@
 //! acting sends a row vector `x ∈ M_{s(a)}` to `x f_{s(a)} N(a)`, while acting and
 //! then applying `f` sends it to `x M(a) f_{t(a)}`.
 //!
-//! Design: a [`Morphism`] carries its source and target [`Module`]s (cheap clones)
-//! alongside its vertex matrices; [`Morphism::new`] checks the squares against them,
-//! so a `Morphism` obtained from a constructor here is A-linear for the modules it
-//! was built with, and composition and kernels/images/cokernels take their endpoints
-//! from the morphism itself. Endpoints are compared by the nominal identity of
+//! A [`Morphism`] carries its source and target [`Module`]s (cheap clones) alongside
+//! its vertex matrices. [`Morphism::new`] checks the squares against those modules, so
+//! a `Morphism` from a constructor in this module is A-linear for the modules it was
+//! built with. Composition, kernels, images, and cokernels take their endpoints from
+//! the morphism itself. Endpoints compare by the nominal identity of
 //! [`Module::ptr_eq`], never structurally.
 
 use std::fmt;
@@ -90,9 +90,9 @@ pub struct Morphism {
     maps: Vec<DenseMat>,
 }
 
-/// Equality is pointer-identical endpoints (see [`Module::ptr_eq`]) and equal
-/// vertex matrices; parallel morphisms between separately constructed copies of
-/// the same modules never compare equal.
+/// Two morphisms are equal when their endpoints are pointer-identical (see
+/// [`Module::ptr_eq`]) and their vertex matrices are equal. Parallel morphisms
+/// between separately constructed copies of the same modules never compare equal.
 impl PartialEq for Morphism {
     fn eq(&self, other: &Morphism) -> bool {
         self.source.ptr_eq(&other.source)
@@ -580,7 +580,7 @@ mod tests {
         let p0 = Module::projective(&algebra, field, 0);
         let s0 = Module::simple(&algebra, field, 0);
         let f = hom(&p0, &s0).unwrap().remove(0);
-        // A separately constructed copy of S_0 is a different module nominally.
+        // A separately constructed copy of S_0 is nominally a different module.
         let s0_copy = Module::simple(&algebra, field, 0);
         assert_eq!(
             f.then(&identity(&s0_copy)).unwrap_err(),
@@ -709,8 +709,8 @@ mod tests {
                     f.then(&coker_proj).unwrap(),
                     zero_morphism(m, &coker).unwrap()
                 );
-                // The corestriction c: m → im with c.then(im_incl) == f recovers f,
-                // certifying that im really carries the image with its inclusion.
+                // The corestriction c: m → im recovers f as c.then(im_incl). This
+                // certifies that im carries the image with its inclusion.
                 let corestriction_maps = (0..m.algebra().quiver().num_vertices())
                     .map(|v| express_in_row_basis(im_incl.map_at(v), f.map_at(v), &field))
                     .collect();

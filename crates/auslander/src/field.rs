@@ -22,10 +22,10 @@ impl std::error::Error for FieldError {}
 
 /// An element of a prime field, stored as its canonical representative in `0..p`.
 ///
-/// Elements are opaque and always reduced. They are created through
-/// [`PrimeField::elem`], [`PrimeField::zero`], or [`PrimeField::one`] and
-/// combined through the arithmetic methods on [`PrimeField`]. An `Fp` carries
-/// no reference to its field; mixing elements of different fields is a logic
+/// Elements are opaque and always reduced. Create them with
+/// [`PrimeField::elem`], [`PrimeField::zero`], or [`PrimeField::one`], and
+/// combine them with the arithmetic methods on [`PrimeField`]. An `Fp` carries
+/// no reference to its field. Mixing elements of different fields is a logic
 /// error the types do not catch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Fp(u64);

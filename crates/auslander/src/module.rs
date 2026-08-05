@@ -80,8 +80,8 @@ impl std::error::Error for ModuleError {}
 /// Identity is nominal, matching the algebra [`Arc`] policy: clones share the
 /// underlying representation and compare equal under [`Module::ptr_eq`], while
 /// two modules constructed separately are distinct even when entrywise
-/// identical. Morphism endpoints are compared by this identity, and no
-/// structural equality is provided. Cloning is cheap (a reference count bump).
+/// identical. Morphism endpoints use this identity. There is no structural
+/// equality. Cloning is cheap (a reference count bump).
 #[derive(Clone, Debug)]
 pub struct Module(Arc<ModuleInner>);
 
@@ -99,9 +99,8 @@ fn is_zero_mat(m: &DenseMat) -> bool {
 }
 
 impl Module {
-    /// Builds a module after checking shapes, that every matrix entry is a
-    /// canonical representative for `field`, and that every minimal forbidden
-    /// word acts as zero.
+    /// Builds a module after checking map shapes, entry canonicity for `field`,
+    /// and that every minimal forbidden word acts as zero.
     pub fn new(
         algebra: Arc<MonomialAlgebra>,
         field: PrimeField,
@@ -527,9 +526,8 @@ mod tests {
         }
     }
 
-    // Cartan orientation, fixed once and for all: c[i][j] = dim e_i A e_j, so row i is
-    // the dimension vector of P_i = e_i A and column j is the dimension vector of
-    // I_j = D(A e_j).
+    // Cartan orientation: c[i][j] = dim e_i A e_j, so row i is the dimension vector of
+    // P_i = e_i A and column j is the dimension vector of I_j = D(A e_j).
     #[test]
     fn projective_dim_vectors_are_cartan_rows() {
         let field = f5();

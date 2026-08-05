@@ -3,11 +3,12 @@
 //! Two matrix types share one set of operations: [`DenseMat`] (row-major
 //! contiguous, the default at module scale) and [`SparseMat`] (sorted rows,
 //! Markowitz-pivoted elimination). Matrices are plain data and do not store
-//! their field; every arithmetic operation takes the [`PrimeField`] as an
+//! their field. Every arithmetic operation takes the [`PrimeField`] as an
 //! argument, and all entries of the operands must belong to that field.
-//! Direct callers must supply canonical matrices: every entry the reduced
-//! representative of the field passed, as produced by [`PrimeField::elem`];
-//! the field arithmetic debug-asserts this and does not re-reduce.
+//! Direct callers must supply canonical matrices: every entry must be the
+//! reduced representative for the field passed, as produced by
+//! [`PrimeField::elem`]. The field arithmetic debug-asserts this and does
+//! not re-reduce.
 //!
 //! Basis-returning operations (`kernel_basis`, `row_space_basis`,
 //! `image_basis`) return a matrix whose rows are the basis vectors, derived
@@ -330,8 +331,8 @@ impl DenseMat {
     }
 
     /// The position of the first entry whose stored representative is not
-    /// canonical for `f` (that is, not below `f.modulus()`), scanning row by
-    /// row, or `None` when every entry is canonical.
+    /// canonical for `f` (that is, not below `f.modulus()`), or `None` when
+    /// every entry is canonical. Entries are scanned row by row.
     pub(crate) fn first_noncanonical(&self, f: &PrimeField) -> Option<(usize, usize)> {
         self.data
             .iter()
@@ -654,8 +655,7 @@ impl SparseMat {
 
     // Markowitz pivoting: among rows leading in the current column, the one
     // with the fewest entries becomes the pivot. The pivot row is normalized
-    // first, so each elimination factor is just the negated leading
-    // coefficient.
+    // first, so each elimination factor is the negated leading coefficient.
     fn echelon_in_place(&mut self, f: &PrimeField) -> Vec<usize> {
         let mut pivots = Vec::new();
         let mut pr = 0;

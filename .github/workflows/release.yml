@@ -19,6 +19,29 @@ jobs:
             grep -q "^version = \"$TAG\"$" "$f" || { echo "$f does not declare version $TAG"; exit 1; }
           done
 
+  preflight:
+    needs: check-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require the tag to lie on the tested main history
+        run: |
+          git fetch origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+      - uses: dtolnay/rust-toolchain@1.92.0
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - name: Test the workspace at the tag
+        run: cargo +1.92.0 test --workspace --locked
+      - name: Package and test inside the extracted package
+        run: |
+          cargo +1.92.0 package -p auslander
+          mkdir -p "$RUNNER_TEMP/pkg"
+          tar xzf target/package/auslander-*.crate -C "$RUNNER_TEMP/pkg"
+          cd "$RUNNER_TEMP"/pkg/auslander-*
+          cargo +1.88.0 test
+
   wheels:
     needs: check-version
     strategy:
@@ -66,7 +89,9 @@ jobs:
           path: crates/auslander-py/dist
 
   crates-io:
-    needs: check-version
+    # Publication is irreversible, so every fallible build and test job runs
+    # first; a wheel failure must not leave crates.io ahead of PyPI.
+    needs: [preflight, wheels, sdist]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -83,7 +108,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   pypi:
-    needs: [crates-io, wheels, sdist]
+    needs: [preflight, crates-io, wheels, sdist]
     runs-on: ubuntu-latest
     permissions:
       id-token: write
