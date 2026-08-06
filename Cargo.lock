@@ -4,14 +4,14 @@ version = 4
 
 [[package]]
 name = "auslander"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "rustc-hash",
 ]
 
 [[package]]
 name = "auslander-py"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "auslander",
  "pyo3",

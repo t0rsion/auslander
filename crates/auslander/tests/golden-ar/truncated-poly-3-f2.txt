@@ -1,0 +1,7 @@
+v0 dim=1 res=1 proj=false inj=false
+v1 dim=2 res=1 proj=false inj=false
+v2 dim=3 res=1 proj=true inj=true
+a0->1 base=1 src=1 tgt=1
+a1->0 base=1 src=1 tgt=1
+a1->2 base=1 src=1 tgt=1
+a2->1 base=1 src=1 tgt=1

@@ -99,13 +99,42 @@ cohomology, tilting and tau-tilting, module Gröbner resolution backends,
 user-defined orders, one-sided Gröbner bases, infinite-dimensional
 quotients, string and gentle enumeration, characteristic zero.
 
-## v0.4 and later
+## v0.4: the Auslander-Reiten layer, witnessed
 
-- Ext representatives and Yoneda products; non-split extension construction.
-- Category radical, irreducible morphisms, almost-split sequences with
-  checkable criteria.
-- Chain complexes and bar Hochschild cohomology.
-- Tilting and tau-tilting after that.
+One theme, end to end: the homological layer moves from dimensions to
+objects with checkable witnesses. Ext classes, actual extensions, the
+distinguished AR class, almost-split sequences, irreducible morphisms,
+valued AR quivers. The binding specification is `docs/v0.4-design.md`.
+
+- `HomSpace` with subspaces, quotients, deterministic complements, and
+  coordinates; `IndecomposableModule` tied to its End-locality proof.
+- `ExtSpace` and `ExtClass` with recheckable representative data; Yoneda
+  products through stored chain lifts, composed with `then`.
+- Checked `ShortExactSequence`; construction from an Ext^1 class; class
+  recovery; split witnesses; non-split dual-vector inconsistency
+  witnesses.
+- Stable Hom, the AR socle construction, and `AlmostSplitSequence`
+  constructible only through an explicit witness: the AR-duality route or
+  the exhaustive-catalog factorization route.
+- Category radical, typed exhaustive catalogs (Nakayama and zero-ideal
+  Dynkin only), catalog-exact rad^2, and valued AR quivers that state
+  dimensions over both residue fields instead of overclaiming plain
+  multiplicities.
+- Gates: product laws tested exhaustively on bounded fixture degrees; a
+  mutation corpus rejecting tampered witnesses; fresh-process determinism
+  with golden AR-quiver snapshots; QPA oracle schema v6 frozen only after
+  a capability spike; the acceptance matrix split honestly between the
+  general tier and the catalog tier.
+
+## v0.5 and later
+
+- v0.5: witnessed tilting and support tau-tilting. Candidate verification
+  is general; enumeration claims require a certified closed mutation graph
+  or a tau-tilting-finite domain.
+- v0.6: checked chain complexes and bar Hochschild cohomology with a real
+  budget model.
+- Later: derived equivalence certificates, Ext algebras, A-infinity
+  minimal models, each only with the same witness discipline.
 
 ## sylvester
 

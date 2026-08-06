@@ -1,0 +1,12 @@
+v0 dim=0,0,1 res=1 proj=true inj=false
+v1 dim=0,1,0 res=1 proj=false inj=false
+v2 dim=1,0,0 res=1 proj=false inj=true
+v3 dim=0,1,1 res=1 proj=true inj=false
+v4 dim=1,1,0 res=1 proj=false inj=true
+v5 dim=1,1,1 res=1 proj=true inj=true
+a0->3 base=1 src=1 tgt=1
+a1->4 base=1 src=1 tgt=1
+a3->1 base=1 src=1 tgt=1
+a3->5 base=1 src=1 tgt=1
+a4->2 base=1 src=1 tgt=1
+a5->4 base=1 src=1 tgt=1

@@ -34,10 +34,13 @@ Construction runs noncommutative completion and then verifies the emitted
 certificate independently before the algebra exists, so `dim` and the Cartan
 matrix are exact. Rejected input raises `ValueError`: a malformed relation,
 or an infinite-dimensional quotient whose message carries a cyclic word
-witness. An exhausted completion budget raises `TruncationError`, a
-`RuntimeError` carrying `basis_len`, `pending_ambiguities`, `steps_used` and
-`reason` as attributes; the keywords `max_basis`, `max_word_len` and
-`max_steps` of `from_relations` set the budgets.
+witness. An exhausted completion budget raises `TruncationError`, which
+carries `basis_len`, `pending_ambiguities`, `steps_used` and `reason` as
+attributes; the keywords `max_basis`, `max_word_len` and `max_steps` of
+`from_relations` set the budgets. Since v0.4 `TruncationError` subclasses
+`BudgetExhaustedError`, the base of every budget exhaustion, which subclasses
+`RuntimeError`; the class stays a `RuntimeError`, so existing `except` clauses
+keep working.
 
 Certificates: `algebra.certificate_json()` returns the canonical JSON bytes
 of the verified completion certificate, and
@@ -138,6 +141,93 @@ Injectives: `M.injective_envelope()` returns the pair `(I(M), M -> I(M))`,
 reports, and `M.injective_dimension(bound)` a `Bounded` whose
 `AtLeast(bound + 1)` is a genuine lower bound because the coresolution is
 minimal.
+
+Ext spaces: `M.ext_space(N, k)` returns an `ExtSpace` with the data
+`ext_dim` throws away. It has `dim` (equal to `M.ext_dim(N, k)`), `source`,
+`target`, `degree`, a `basis()` of `ExtClass` objects, `zero_class()`,
+`class_from_coordinates(coords)`, and `identity_class()` on a degree-0
+self-space, which is the Yoneda unit. Degree 0 is not special-cased:
+`Ext^0(M, N)` is `Hom(M, N)`. An `ExtClass` exposes `source`, `target`,
+`degree`, `coordinates` (over the space's basis), `is_zero`,
+`representative()` (a cocycle `P_k -> N` as a `Morphism`), `+`, unary `-`,
+multiplication by an integer scalar on either side, `then(other)` (the Yoneda
+product `Ext^m(M, N) x Ext^n(N, L) -> Ext^{m+n}(M, L)`, in the endpoint order
+of morphism composition), and `extension()` in degree 1. Classes combine and
+compare only inside one space, which means the same source object, the same
+target object and equal degrees; incompatible operands raise
+`IncompatibleSpacesError`, a `ValueError` subclass. Comparison raises it too
+rather than answering `False`, which would claim the two classes differ.
+
+Extensions: `ExtClass.extension()` returns the `ShortExactSequence`
+`0 -> target -> middle -> source -> 0` realizing a degree-1 class, and the
+zero class gives the split sequence. The sequence exposes `sub`, `middle`,
+`quotient`, `inclusion`, `projection`, and `ext1_class()`, which recovers the
+class in a freshly built `Ext^1(quotient, sub)`; the round trip returns the
+coordinates it started from. Exactness was checked per vertex at
+construction, so holding the object is proof. `is_split` decides splitting by
+solving the retraction system, and `split_status` carries the proof either
+way: a `SplitWitness` with `retraction` and `section`, or a
+`NonSplitWitness` whose `dual` vector proves the retraction system unsolvable
+by multiplication alone. `verify()` rechecks exactness and the witness.
+
+Almost-split sequences: `M.almost_split()` returns an `AlmostSplitSequence`
+`0 -> start -> middle -> end -> 0` with `start` the AR translate of `end = M`,
+or the member `AlmostSplitOutcome.PROJECTIVE` when M is projective. That
+member is an outcome, not a failure and not `None`; the returned object is the
+member itself, so `is` decides the case. The module first passes the
+indecomposability gate: the zero module, a decomposable module, and a module
+the gate could not decide raise `NotIndecomposableError`, a `ValueError`
+subclass carrying `kind` ("zero", "decomposable" or "undetermined"),
+`summands` and `attempts`. The sequence exposes `inclusion`, `projection`,
+`ext1_class()` (the chosen AR class, deterministic and not canonical),
+`witness_route` (`"ar_duality"`), `verify()`, which rechecks every gate
+against freshly recomputed data, and `verification_summary()`, which reports
+the gates one by one as a dict with the keys `action_traces`,
+`socle_membership`, `duality_dimensions`, `socle_dimension`, `non_split` and
+`sequence_exact`. A failed internal cross-check raises `DefectError`, a
+`RuntimeError` subclass: it reports a bug in this library, never bad input.
+
+The module category and its AR quiver: `M.category_radical(N)` returns the
+radical `rad(M, N)` as an object with `dim` and a `basis()` of `Morphism`
+objects. Both endpoints must pass the indecomposability gate, so both can
+raise `NotIndecomposableError`. `algebra.ar_quiver(field)` builds the valued
+Auslander-Reiten quiver: `vertices()` gives `ArVertex` objects with `id`,
+`module`, `residue_degree`, `projective` and `injective`, and `arrows()` gives
+`ArArrow` objects with `source`, `target`, `base_field_dim`,
+`dim_over_source_residue`, `dim_over_target_residue` and `representatives()`.
+`plain_multiplicity` is the arrow multiplicity of an unvalued AR quiver. It
+raises `ValuedArrowError` when a residue degree exceeds 1, where the three
+dimensions differ and no single integer is the multiplicity. The quiver is
+complete for its domain: it comes from a classification theorem (Nakayama or
+Gabriel) and no budget cuts it short, so there is no partial AR quiver. Any
+other algebra raises `UnsupportedDomainError` naming both failed routes. A
+monomial presentation is field-free, so it needs the `field` argument; a
+general-relation algebra carries its own.
+
+An end-to-end AR example over k[x]/(x^3) (mirrored by `test_readme_ar_example`
+in `tests/test_v04.py`):
+
+```python
+import auslander
+
+F = auslander.PrimeField(5)
+A = auslander.Algebra.truncated_poly(3)
+S = A.simple(F, 0)
+assert S.ext_space(S, 1).dim == 1
+
+# The almost-split sequence 0 -> S -> P/rad^2 -> S -> 0.
+sequence = S.almost_split()
+print(sequence.start.dims, sequence.middle.dims, sequence.end.dims)
+assert sequence.middle.dims == [2]
+assert sequence.witness_route == "ar_duality"
+assert sequence.verify()
+assert all(sequence.verification_summary().values())
+
+# Three indecomposables, four arrows, every arrow plain.
+quiver = A.ar_quiver(F)
+assert len(quiver.vertices()) == 3
+assert [a.plain_multiplicity for a in quiver.arrows()] == [1, 1, 1, 1]
+```
 
 Dynkin and Euclidean diagrams: `dynkin_type(quiver)` and
 `euclidean_type(quiver)` recognize the underlying graph and return a frozen

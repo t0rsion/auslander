@@ -1,5 +1,5 @@
-# Builds every auslander v0.3 fixture algebra in QPA and writes fixtures_qpa.json
-# with schema auslander-qpa-oracle-v5. Each fixture carries its own prime field
+# Builds every auslander fixture algebra in QPA and writes fixtures_qpa.json
+# with schema auslander-qpa-oracle-v6. Each fixture carries its own prime field
 # and its full presentation: the quiver, and relations as integer combinations
 # of paths given by arrow indices. The results per fixture: algebra dimension,
 # dimension vectors of the indecomposable projectives (the Cartan rows) and
@@ -8,6 +8,19 @@
 # decomposition of the direct sum of the nonzero radicals of the indecomposable
 # projectives (summand dimension vectors with multiplicities, sorted), and
 # dim Ext^k(S_i, S_j) for k = 0..4.
+#
+# Schema v6 adds the Auslander-Reiten layer on a fixed list of designated
+# modules: every simple, then every indecomposable projective, then every
+# indecomposable injective, each named by kind and 0-based vertex index. The
+# list is built from those three QPA constructors directly, so a module is never
+# identified by its dimension vector; on kronecker-2 the dimension vector is not
+# an isomorphism invariant. The added results are the almost-split sequence of
+# each designated module (typed projective marker or tau, middle term and its
+# Krull-Schmidt summands), the irreducible morphisms into and out of it with
+# valuations, the Ext algebra of A/rad up to degree 4, the ranks of the Yoneda
+# products Ext^1(S_i, S_j) x Ext^1(S_j, S_k) -> Ext^2(S_i, S_k), the stable Hom
+# dimensions between all designated modules, the tau-rigid and rigid flags, and
+# the tau period bounded at 6 (typed).
 #
 # Writes into the current working directory; run under GAP with QPA loadable
 # (discovery order in README.md):
@@ -31,6 +44,7 @@ LoadPackage("qpa");
 MAX_EXT := 4;
 PROJDIM_BOUND := 6;
 INJDIM_BOUND := 6;
+TAU_PERIOD_BOUND := 6;
 ORDER_ID := "deglex-arrowid-v1";
 OUT := "fixtures_qpa.json";
 
@@ -75,29 +89,213 @@ BoundedJson := function(d, bound)
   return Concatenation("{\"finite\": ", String(d), "}");
 end;
 
-# The designated test module is the direct sum of the nonzero radicals of the
-# indecomposable projectives. Summands are reported as [dimvec, multiplicity]
-# pairs, sorted by dimension vector lexicographically and merged on equal
-# dimension vectors, so QPA's decomposition order never reaches the file.
-DecompositionPairs := function(projs)
-  local rads, pairs, merged, d, i, pr;
-  rads := Filtered(List(projs, RadicalOfModule), M -> Dimension(M) > 0);
-  if Length(rads) = 0 then
-    return [];
-  fi;
-  d := DecomposeModuleWithMultiplicities(DirectSumOfQPAModules(rads));
-  pairs := List([1 .. Length(d[1])],
-      i -> [ShallowCopy(DimensionVector(d[1][i])), d[2][i]]);
+# [dimvec, multiplicity] pairs, sorted by dimension vector lexicographically and
+# merged on equal dimension vectors, so QPA's internal order never reaches the
+# file. Every list of summands in the output goes through this.
+MergedPairs := function(pairs)
+  local merged, pr;
   Sort(pairs);
   merged := [];
   for pr in pairs do
     if Length(merged) > 0 and merged[Length(merged)][1] = pr[1] then
       merged[Length(merged)][2] := merged[Length(merged)][2] + pr[2];
     else
-      Add(merged, pr);
+      Add(merged, ShallowCopy(pr));
     fi;
   od;
   return merged;
+end;
+
+# The designated test module is the direct sum of the nonzero radicals of the
+# indecomposable projectives.
+DecompositionPairs := function(projs)
+  local rads, d, i;
+  rads := Filtered(List(projs, RadicalOfModule), M -> Dimension(M) > 0);
+  if Length(rads) = 0 then
+    return [];
+  fi;
+  d := DecomposeModuleWithMultiplicities(DirectSumOfQPAModules(rads));
+  return MergedPairs(List([1 .. Length(d[1])],
+      i -> [ShallowCopy(DimensionVector(d[1][i])), d[2][i]]));
+end;
+
+# The fixed list every v6 result field runs over: each simple, each
+# indecomposable projective, each indecomposable injective, in vertex order.
+# Each entry keeps its kind and its 0-based vertex index, so a module is named
+# by construction. A dimension vector never identifies a module here: on
+# kronecker-2 two non-isomorphic modules share the dimension vector [1, 1].
+DesignatedModules := function(simples, projs, injs)
+  local out, i;
+  out := [];
+  for i in [1 .. Length(simples)] do
+    Add(out, rec(kind := "simple", index := i - 1, module := simples[i]));
+  od;
+  for i in [1 .. Length(projs)] do
+    Add(out, rec(kind := "projective", index := i - 1, module := projs[i]));
+  od;
+  for i in [1 .. Length(injs)] do
+    Add(out, rec(kind := "injective", index := i - 1, module := injs[i]));
+  od;
+  return out;
+end;
+
+# AlmostSplitSequence(M, "r") returns fail exactly on the projectives, so the
+# typed projective marker comes from QPA's own refusal. ass[1] is the mono
+# tau M -> E; its source must be DTr M, which the assertion pins.
+ArRecord := function(M)
+  local ass, mid, merged, d, i, pr;
+  ass := AlmostSplitSequence(M, "r");
+  if ass = fail then
+    return rec(projective := true);
+  fi;
+  mid := Range(ass[1]);
+  d := DecomposeModuleWithMultiplicities(mid);
+  merged := MergedPairs(List([1 .. Length(d[1])],
+      i -> [ShallowCopy(DimensionVector(d[1][i])), d[2][i]]));
+  if DimensionVector(Source(ass[1])) <> DimensionVector(DTr(M)) then
+    Error("AlmostSplitSequence source disagrees with DTr");
+  fi;
+  return rec(projective := false,
+             tau := ShallowCopy(DimensionVector(Source(ass[1]))),
+             middle_dimvec := ShallowCopy(DimensionVector(mid)),
+             middle := merged,
+             num_middle_summands := Sum(merged, pr -> pr[2]));
+end;
+
+# IrreducibleMorphismsEndingIn errors on a projective with zero radical, and
+# IrreducibleMorphismsStartingIn errors on an injective equal to its socle.
+# The guards predict both cases from the module itself. A caught error still
+# prints its message, so catching is not an option here.
+HasIrrIn := function(M)
+  return not (IsProjectiveModule(M) and Dimension(RadicalOfModule(M)) = 0);
+end;
+
+HasIrrOut := function(M)
+  return not (IsInjectiveModule(M) and Dimension(SocleOfModule(M)) = Dimension(M));
+end;
+
+# Each irreducible morphism contributes its endpoint dimension vector; equal
+# dimension vectors merge and the merged count is the valuation.
+IrrPairs := function(maps, endpoint)
+  local f;
+  return MergedPairs(List(maps,
+      f -> [ShallowCopy(DimensionVector(endpoint(f))), 1]));
+end;
+
+IrrRecord := function(M)
+  local into, out_of, maps;
+  if HasIrrIn(M) then
+    maps := IrreducibleMorphismsEndingIn(M);
+    into := rec(present := true, total := Length(maps),
+                pairs := IrrPairs(maps, Source));
+  else
+    into := rec(present := false, total := 0, pairs := []);
+  fi;
+  if HasIrrOut(M) then
+    maps := IrreducibleMorphismsStartingIn(M);
+    out_of := rec(present := true, total := Length(maps),
+                  pairs := IrrPairs(maps, Range));
+  else
+    out_of := rec(present := false, total := 0, pairs := []);
+  fi;
+  return rec(into := into, out_of := out_of);
+end;
+
+# The Ext algebra of A/rad, the direct sum of all simples. rad End(A/rad) = 0,
+# so the minimal generators ExtAlgebraGenerators reports are the genuine
+# generators of the Yoneda algebra and dims - min_generators is the rank of the
+# multiplication into each degree.
+ExtAlgebraRecord := function(simples)
+  local r;
+  r := ExtAlgebraGenerators(DirectSumOfQPAModules(simples), MAX_EXT);
+  return rec(dims := r[1], min_generators := r[2],
+             product_rank := r[1] - r[2]);
+end;
+
+# Rank of the Yoneda product Ext^1(M, N) x Ext^1(N, L) -> Ext^2(M, L), computed
+# the way QPA's own ExtAlgebraGenerators forms products: lift a class through
+# the projective cover of N and restrict to the second syzygy. ExtOverAlgebra
+# returns the Ext^1 basis in position 2 and the map to coordinates in
+# position 3; Ext^2(M, L) is Ext^1(Omega M, L).
+YonedaRank11 := function(M, N, L)
+  local pM, OM, pOM, pN, e1, e2, e3, K, alpha, beta, lift, om, prods, V, W;
+  pM := ProjectiveCover(M);
+  OM := Kernel(pM);
+  pOM := ProjectiveCover(OM);
+  pN := ProjectiveCover(N);
+  e1 := ExtOverAlgebra(M, N)[2];
+  e2 := ExtOverAlgebra(N, L)[2];
+  e3 := ExtOverAlgebra(OM, L);
+  if Length(e1) = 0 or Length(e2) = 0 or Length(e3[2]) = 0 then
+    return [Length(e1), Length(e2), Length(e3[2]), 0];
+  fi;
+  K := LeftActingDomain(M);
+  prods := [];
+  for alpha in e1 do
+    lift := LiftingMorphismFromProjective(pN, pOM * alpha);
+    om := MorphismOnKernel(pOM, pN, lift, alpha);
+    for beta in e2 do
+      Add(prods, e3[3](om * beta));
+    od;
+  od;
+  prods := Filtered(prods, x -> x <> Zero(x));
+  if Length(prods) = 0 then
+    return [Length(e1), Length(e2), Length(e3[2]), 0];
+  fi;
+  W := FullRowSpace(K, Length(e3[2]));
+  V := Subspace(W, prods);
+  return [Length(e1), Length(e2), Length(e3[2]), Dimension(V)];
+end;
+
+# Every ordered triple of simples whose two Ext^1 factors are both nonzero.
+# ext[i][j][2] is dim Ext^1(S_i, S_j): the stored degrees run 0 .. MAX_EXT.
+YonedaTriples := function(simples, ext)
+  local out, i, j, k, r;
+  out := [];
+  for i in [1 .. Length(simples)] do
+    for j in [1 .. Length(simples)] do
+      if ext[i][j][2] > 0 then
+        for k in [1 .. Length(simples)] do
+          if ext[j][k][2] > 0 then
+            r := YonedaRank11(simples[i], simples[j], simples[k]);
+            Add(out, rec(i := i - 1, j := j - 1, k := k - 1,
+                         dim_ext1_ij := r[1], dim_ext1_jk := r[2],
+                         dim_ext2_ik := r[3], yoneda_map_rank := r[4]));
+          fi;
+        od;
+      fi;
+    od;
+  od;
+  return out;
+end;
+
+StableHomDim := function(M, N)
+  return Length(HomOverAlgebra(M, N))
+      - Length(HomFactoringThroughProjOverAlgebra(M, N));
+end;
+
+# IsTauPeriodic iterates DTr up to the bound and compares each step with M, so
+# its cost follows the tau orbit. On inclusion-ambiguity over F_2 the orbit of
+# the simple module grows 1, 8, 26, 86, 284, and the fifth step alone costs over
+# a minute; the bound there is 3. Every other fixture keeps TAU_PERIOD_BOUND.
+# The bound reached is written into the result, so a value never claims more
+# than it checked.
+TauPeriodBound := function(spec)
+  if spec.family = "inclusion-ambiguity" then
+    return 3;
+  fi;
+  return TAU_PERIOD_BOUND;
+end;
+
+# IsTauPeriodic returns the period, or false when no period up to the bound
+# exists; both outcomes are written as typed records.
+TauPeriodJson := function(M, bound)
+  local i;
+  i := IsTauPeriodic(M, bound);
+  if i = false then
+    return Concatenation("{\"none_up_to\": ", String(bound), "}");
+  fi;
+  return Concatenation("{\"period\": ", String(i), "}");
 end;
 
 # spec: family, case name, prime, presentation id, ideal id, vertex count,
@@ -128,7 +326,8 @@ BuildAlgebra := function(spec)
 end;
 
 FixtureRecord := function(spec)
-  local A, simples, projs, injs, i, j, ext, row;
+  local A, simples, projs, injs, i, j, ext, row, designated, d, e,
+        ar, irr, extalg, yoneda, stable, taurigid, rigid, tauperiod;
   A := BuildAlgebra(spec);
   simples := SimpleModules(A);
   projs := IndecProjectiveModules(A);
@@ -141,7 +340,27 @@ FixtureRecord := function(spec)
     od;
     Add(ext, row);
   od;
+  designated := DesignatedModules(simples, projs, injs);
+  ar := List(designated, d -> ArRecord(d.module));
+  irr := List(designated, d -> IrrRecord(d.module));
+  extalg := ExtAlgebraRecord(simples);
+  yoneda := YonedaTriples(simples, ext);
+  stable := List(designated,
+      d -> List(designated, e -> StableHomDim(d.module, e.module)));
+  taurigid := List(designated, d -> IsTauRigidModule(d.module));
+  rigid := List(designated, d -> IsRigidModule(d.module));
+  tauperiod := List(designated,
+      d -> TauPeriodJson(d.module, TauPeriodBound(spec)));
   return rec(spec := spec,
+             designated := designated,
+             ar_sequences := ar,
+             irreducible_maps := irr,
+             ext_algebra := extalg,
+             yoneda := yoneda,
+             stable_hom := stable,
+             tau_rigid := taurigid,
+             rigid := rigid,
+             tau_period := tauperiod,
              dim := Dimension(A),
              cartan := List(projs, DimensionVector),
              injectives := List(injs, DimensionVector),
@@ -184,6 +403,77 @@ end;
 JsonSummand := function(pr)
   return Concatenation("{\"dimvec\": ", JsonIntList(pr[1]),
       ", \"multiplicity\": ", String(pr[2]), "}");
+end;
+
+JsonBool := function(b)
+  if b then
+    return "true";
+  fi;
+  return "false";
+end;
+
+JsonBoolList := function(l)
+  return Concatenation("[", JoinStringsWithSeparator(List(l, JsonBool), ", "), "]");
+end;
+
+JsonModuleRef := function(d)
+  return Concatenation("{\"kind\": \"", d.kind, "\", \"index\": ",
+      String(d.index), "}");
+end;
+
+JsonValuation := function(pr)
+  return Concatenation("{\"dimvec\": ", JsonIntList(pr[1]),
+      ", \"valuation\": ", String(pr[2]), "}");
+end;
+
+JsonArEntry := function(d, ar)
+  local s;
+  s := Concatenation("{\"module\": ", JsonModuleRef(d), ", \"projective\": ",
+      JsonBool(ar.projective));
+  if ar.projective then
+    return Concatenation(s, "}");
+  fi;
+  return Concatenation(s, ", \"tau\": ", JsonIntList(ar.tau),
+      ", \"middle_dimvec\": ", JsonIntList(ar.middle_dimvec),
+      ", \"middle\": ", JsonFragmentList(List(ar.middle, JsonSummand)),
+      ", \"num_middle_summands\": ", String(ar.num_middle_summands), "}");
+end;
+
+JsonIrrSide := function(side, key)
+  return Concatenation("{\"present\": ", JsonBool(side.present),
+      ", \"total\": ", String(side.total), ", \"", key, "\": ",
+      JsonFragmentList(List(side.pairs, JsonValuation)), "}");
+end;
+
+JsonIrrEntry := function(d, irr)
+  return Concatenation("{\"module\": ", JsonModuleRef(d),
+      ", \"into\": ", JsonIrrSide(irr.into, "sources"),
+      ", \"out_of\": ", JsonIrrSide(irr.out_of, "targets"), "}");
+end;
+
+JsonYoneda := function(y)
+  return Concatenation("{\"i\": ", String(y.i), ", \"j\": ", String(y.j),
+      ", \"k\": ", String(y.k),
+      ", \"dim_ext1_ij\": ", String(y.dim_ext1_ij),
+      ", \"dim_ext1_jk\": ", String(y.dim_ext1_jk),
+      ", \"dim_ext2_ik\": ", String(y.dim_ext2_ik),
+      ", \"yoneda_map_rank\": ", String(y.yoneda_map_rank), "}");
+end;
+
+# One JSON fragment per line, so a diff of two generated files points at the
+# entry that changed.
+EmitFragmentLines := function(out, name, items)
+  local j, rowcomma;
+  if Length(items) = 0 then
+    AppendTo(out, "      \"", name, "\": [],\n");
+    return;
+  fi;
+  AppendTo(out, "      \"", name, "\": [\n");
+  for j in [1 .. Length(items)] do
+    if j < Length(items) then rowcomma := ","; else rowcomma := ""; fi;
+    AppendTo(out, "        ", items[j], rowcomma, "\n");
+  od;
+  AppendTo(out, "      ],\n");
 end;
 
 EmitFixture := function(out, fx, last)
@@ -229,7 +519,25 @@ EmitFixture := function(out, fx, last)
     if j < Length(fx.ext) then rowcomma := ","; else rowcomma := ""; fi;
     AppendTo(out, "        ", JsonIntMatrix(fx.ext[j]), rowcomma, "\n");
   od;
-  AppendTo(out, "      ]\n");
+  AppendTo(out, "      ],\n");
+  EmitFragmentLines(out, "designated_modules",
+      List(fx.designated, JsonModuleRef));
+  EmitFragmentLines(out, "ar_sequences",
+      List([1 .. Length(fx.designated)],
+          t -> JsonArEntry(fx.designated[t], fx.ar_sequences[t])));
+  EmitFragmentLines(out, "irreducible_maps",
+      List([1 .. Length(fx.designated)],
+          t -> JsonIrrEntry(fx.designated[t], fx.irreducible_maps[t])));
+  AppendTo(out, "      \"ext_algebra\": {\"module\": \"sum-of-simples\", ",
+      "\"max_degree\": ", String(MAX_EXT),
+      ", \"dims\": ", JsonIntList(fx.ext_algebra.dims),
+      ", \"min_generators\": ", JsonIntList(fx.ext_algebra.min_generators),
+      ", \"product_rank\": ", JsonIntList(fx.ext_algebra.product_rank), "},\n");
+  EmitFragmentLines(out, "yoneda_products", List(fx.yoneda, JsonYoneda));
+  AppendTo(out, "      \"stable_hom\": ", JsonIntMatrix(fx.stable_hom), ",\n");
+  AppendTo(out, "      \"tau_rigid\": ", JsonBoolList(fx.tau_rigid), ",\n");
+  AppendTo(out, "      \"rigid\": ", JsonBoolList(fx.rigid), ",\n");
+  AppendTo(out, "      \"tau_period\": ", JsonFragmentList(fx.tau_period), "\n");
   if last then comma := ""; else comma := ","; fi;
   AppendTo(out, "    }", comma, "\n");
 end;
@@ -239,7 +547,7 @@ EmitJson := function(fixtures)
   out := OutputTextFile(OUT, false);
   SetPrintFormattingStatus(out, false);
   AppendTo(out, "{\n");
-  AppendTo(out, "  \"schema\": \"auslander-qpa-oracle-v5\",\n");
+  AppendTo(out, "  \"schema\": \"auslander-qpa-oracle-v6\",\n");
   AppendTo(out, "  \"convention\": \"right\",\n");
   AppendTo(out, "  \"max_ext_degree\": ", String(MAX_EXT), ",\n");
   AppendTo(out, "  \"projdim_bound\": ", String(PROJDIM_BOUND), ",\n");

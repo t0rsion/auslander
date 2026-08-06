@@ -28,10 +28,13 @@ use auslander::algebra::{
     Algebra, MonomialPresentation, an_with_relations, cyclic_nakayama, dual_numbers, kronecker,
     linear_an, linear_nakayama, radical_square_zero_cycle, truncated_poly,
 };
+use auslander::almost_split::{AlmostSplitOutcome, AlmostSplitWitness, almost_split};
+use auslander::arquiver::ar_quiver;
 use auslander::completion::CompletionLimits;
 use auslander::decompose::{Certificate, decompose};
 use auslander::ext::{ext_table, global_dimension};
 use auslander::field::PrimeField;
+use auslander::indec::IndecomposableModule;
 use auslander::module::{Module, direct_sum};
 use auslander::quiver::{ArrowId, Quiver};
 use auslander::radical::radical_series;
@@ -490,4 +493,27 @@ fn readme_decomposition_example() {
             .iter()
             .all(|c| *c == Certificate::Indecomposable)
     );
+}
+
+// Mirrors the AR-layer example in the repo README. Keep the two in sync.
+#[test]
+fn readme_ar_example() {
+    let field = PrimeField::new(5).unwrap();
+    let algebra = truncated_poly(3, field).unwrap();
+    let s = IndecomposableModule::new(&Module::simple(&algebra, 0)).unwrap();
+
+    let AlmostSplitOutcome::Sequence(sequence) = almost_split(&s).unwrap() else {
+        panic!("S is not projective");
+    };
+    println!("middle: {:?}", sequence.sequence().middle().dim_vector());
+    assert_eq!(sequence.sequence().middle().dim_vector(), &[2]);
+
+    let AlmostSplitWitness::ArDuality(witness) = sequence.witness() else {
+        panic!("almost_split certifies through AR duality");
+    };
+    assert!(witness.verify(&s, sequence.sequence(), sequence.chosen_ar_class()));
+
+    let quiver = ar_quiver(&algebra).unwrap();
+    assert_eq!(quiver.vertices().len(), 3);
+    assert_eq!(quiver.arrows().len(), 4);
 }

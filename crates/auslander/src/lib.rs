@@ -4,7 +4,9 @@
 //! Groebner basis and independent verification of the emitted certificate.
 
 pub mod algebra;
+pub mod almost_split;
 pub mod ar;
+pub mod arquiver;
 pub mod certificate;
 pub mod completion;
 pub mod decompose;
@@ -14,6 +16,8 @@ pub mod enumerate;
 pub mod ext;
 pub mod field;
 pub mod hom;
+pub mod homspace;
+pub mod indec;
 pub mod injective;
 pub mod iso;
 pub mod linalg;
@@ -24,4 +28,5 @@ pub mod quiver;
 pub mod radical;
 pub mod relation;
 pub mod resolution;
+pub mod sequence;
 pub mod verify;

@@ -6,6 +6,128 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-08-06
+
+The Auslander-Reiten layer, witnessed. The homological layer moves from
+dimensions to objects that carry checkable witnesses: Ext classes, actual
+extensions, almost-split sequences, irreducible morphisms, and valued AR
+quivers. Every constructed object rechecks the claim its type makes, and no
+public field permits building an unchecked value.
+
+The release is additive. No public v0.3 API is removed or changed; `ext_dim`,
+`ext_table`, `tau`, and every other v0.3 entry point keep their signatures and
+behavior.
+
+### Added
+
+- `HomSpace`, `HomSubspace`, `HomQuotient`: `Hom_A(M, N)` as an explicit
+  vector space over the deterministic `hom` basis, with flat coordinates,
+  RREF subspace bases, membership witnesses, and quotients whose
+  representatives come from one crate-wide deterministic complement rule
+  (`homspace`).
+- `IndecomposableModule`: a checked wrapper that exists only together with
+  the locality proof of its endomorphism algebra, with `residue_degree`,
+  `is_projective`, and `is_injective`. Rejections are typed: the zero
+  module, a verified split with its summand count, or an honest
+  `Undetermined` (`indec`).
+- `ExtSpace` and `ExtClass`: `Ext^k(M, N)` as an explicit vector space over
+  the minimal resolution prefix, with RREF cocycle and coboundary bases, the
+  deterministic complement, and one representative cocycle per class.
+  Degree 0 is `Hom(M, N)` and carries the Yoneda unit; class arithmetic and
+  equality require compatible spaces, and incompatible operands are a typed
+  error rather than `false` (`ext`).
+- Yoneda products through stored chain lifts: `ExtClass::then` in the
+  endpoint order of `Morphism::then`, and `then_with_witness`, whose
+  `ProductWitness` rechecks the lift identities, the reduction by
+  multiplication and membership, and the product space's bases against a
+  fresh recomputation. The release gates split by level:
+  representative-level coboundary invariance of the product lift and
+  splicing agreement through the realized extension are in-module unit
+  gates in `ext.rs`; the class-level unit, bilinearity, and associativity
+  laws run in `tests/acceptance_ar.rs` on every basis tuple within the
+  acceptance degree bound (`ext`).
+- `ShortExactSequence`: exact per vertex by construction (mono, epi, zero
+  composite, and additive dimensions force exactness). `from_ext1` realizes
+  a degree-1 class as an extension, `ext1_class` recovers the class, and the
+  acceptance suite pins the round trip on every fixture basis class
+  (`sequence`).
+- `SplitStatus` with proof either way: a `SplitWitness` carrying a
+  retraction and section that recheck by multiplication, or a
+  `NonSplitWitness` carrying a dual vector that proves the retraction
+  system inconsistent, both over the same fixed equation order (`sequence`).
+- `stable_hom` and `stable_end`: Hom modulo the maps that factor through a
+  projective, computed through the projective cover and returned as a
+  deterministic quotient (`almost_split`).
+- `almost_split`: witnessed almost-split sequences through the AR socle
+  construction. `End(M)` acts on `Ext^1(M, tau M)`; the chosen class is the
+  first RREF row of the socle, deterministic and documented as not
+  canonical. A projective input is `AlmostSplitOutcome::Projective`, an
+  outcome rather than an error. Two witness routes: `ArDualityWitness`
+  stores the radical basis, action traces, socle RREF, dimension equalities,
+  and the non-split witness; `almost_split_via_catalog` stores factorization
+  data for `im(Hom(X, E) -> Hom(X, M)) = rad(X, M)` and the dual left check
+  against every entry of an exhaustive catalog. Both `verify` from stored
+  data plus the live modules, and the two routes must validate the same
+  sequence. Internal cross-check failures are `DefectKind` values, never
+  silent (`almost_split`).
+- The category radical: `rad(X, Y)` between certified indecomposables,
+  exact with no catalog. `IndecomposableCatalog` wraps the two complete
+  enumerations (Nakayama, zero-ideal Dynkin); a plain module list never
+  becomes a catalog. `radical_square_through_catalog` and
+  `irreducible_quotient` are catalog-exact (`arquiver`).
+- `ar_quiver`: the valued AR quiver on the catalog domains. Vertices carry
+  the module, residue degree, and projectivity and injectivity flags;
+  arrows carry `dim_Fp Irr(X, Y)` and its dimensions over both residue
+  fields, and `ArrowValuation` never reports a bare multiplicity where the
+  residue degrees make one ambiguous. The quiver is complete for its
+  domain; no budget cuts it short (`arquiver`).
+- The AR acceptance matrix (`tests/acceptance_ar.rs`), split into two
+  honest tiers: Ext spaces, product laws, extension round trips, stable
+  Hom, and AR-duality almost-split sequences on the full non-monomial
+  matrix; AR quivers, catalog witnesses, the middle-term cross-check
+  against arrow values, and valuations where an exhaustive catalog exists.
+  Hand-derived terms pin `k[x]/(x^3)`, linear A_3, the commutative square,
+  and preprojective A_3.
+- A mutation corpus for the AR layer (`tests/mutation_ar.rs`): every
+  checking constructor and witness verifier reachable from the public API
+  rejects tampered input. Witness fields no public constructor can set are
+  mutated field by field in the in-module unit tests of `ext.rs`,
+  `sequence.rs`, `almost_split.rs`, and `arquiver.rs`, which the corpus
+  file lists by name per design bullet.
+- Determinism gates for the AR layer (`tests/determinism_ar.rs`):
+  recomputed Ext bases are byte-identical, two fresh processes agree on a
+  fingerprint of Ext bases, chosen AR classes, and AR-quiver renderings,
+  and golden normalized renderings under `tests/golden-ar/` are compared
+  byte for byte.
+- QPA oracle schema v6: schema v5 unchanged plus Auslander-Reiten fields
+  per fixture, produced by a real GAP+QPA run over a fixed designated
+  module list (simples, indecomposable projectives, indecomposable
+  injectives): almost-split sequences with Krull-Schmidt middle terms,
+  irreducible morphisms with valuations, Ext algebra generator counts and
+  product ranks, Yoneda product ranks between simples, stable Hom
+  dimensions, tau-rigidity, and tau periods. Oracle fields stay
+  basis-independent invariants; the internal duality consistency checks
+  stay out of the schema.
+- Python: `Module.ext_space` with `ExtSpace` and `ExtClass` (arithmetic,
+  Yoneda `then`, `representative`, `extension` in degree 1),
+  `ShortExactSequence` with `split_status` and `verify`,
+  `Module.almost_split` returning a verifiable `AlmostSplitSequence` or
+  `AlmostSplitOutcome.PROJECTIVE`, `Module.category_radical`, and
+  `Algebra.ar_quiver` with valued arrows and a `plain_multiplicity` that
+  raises `ValuedArrowError` instead of guessing. New exception types follow
+  the taxonomy: `NotIndecomposableError`, `IncompatibleSpacesError`,
+  `ValuedArrowError`, and `UnsupportedDomainError` subclass `ValueError`;
+  `DefectError` subclasses `RuntimeError` and reports a library bug, never
+  bad input.
+
+### Changed
+
+- Python: `TruncationError` is re-parented under the new
+  `BudgetExhaustedError(RuntimeError)` base, so future operation-specific
+  budget errors share it. `TruncationError` remains a `RuntimeError`, so
+  every existing `except` clause keeps working; this is the only change to
+  the existing Python surface.
+
 ## [0.3.0] - 2026-08-06
 
 General admissible ideals, end to end. Every operation the crate offers now

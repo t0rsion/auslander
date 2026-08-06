@@ -16,16 +16,21 @@ use std::sync::{Arc, Mutex};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyOverflowError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::sync::GILOnceCell;
 
 use auslander::algebra::{self, Algebra, AlgebraBuildError, MonomialPresentation};
+use auslander::almost_split::{self, AlmostSplitError, AlmostSplitOutcome, AlmostSplitWitness};
 use auslander::ar::{self, Tau};
+use auslander::arquiver::{self, ArQuiver, ArQuiverError, ArrowValuation};
 use auslander::completion::{CompletionLimits, TruncationDiagnostics, TruncationReason};
 use auslander::decompose::{self, Certificate, KrullSchmidtOutcome};
 use auslander::dynkin::{self, DynkinType, EuclideanType};
 use auslander::enumerate;
-use auslander::ext;
-use auslander::field::PrimeField;
+use auslander::ext::{self, ExtClassError};
+use auslander::field::{Fp, PrimeField};
 use auslander::hom;
+use auslander::homspace::HomSubspace;
+use auslander::indec::{IndecError, IndecomposableModule};
 use auslander::injective::{self, InjectiveCoresolution};
 use auslander::iso::{self, IsoOutcome, Obstruction};
 use auslander::linalg::DenseMat;
@@ -36,6 +41,7 @@ use auslander::relation::{Presentation, Relation};
 use auslander::resolution::{
     Bounded, ProjectiveResolution, ResolutionEnd, projective_cover, projective_dimension, resolve,
 };
+use auslander::sequence::{self, SequenceError, SplitStatus};
 use auslander::verify;
 
 fn value_error(e: impl std::fmt::Display) -> PyErr {
@@ -101,6 +107,114 @@ fn downstream_build_error(e: AlgebraBuildError) -> PyErr {
         AlgebraBuildError::Truncated(d) => truncation_error(&d),
         other => engine_error(other),
     }
+}
+
+/// A failed AR translate, mapped as `Module.tau` documents: an exhausted
+/// budget is TruncationError, a certified disagreement is RuntimeError, and an
+/// undecided cross-check is TauAgreementUnknown.
+fn tau_error(e: ar::TauError) -> PyErr {
+    match e {
+        ar::TauError::Opposite(build) => downstream_build_error(build),
+        e @ ar::TauError::RoutesDisagree { .. } => PyRuntimeError::new_err(e.to_string()),
+        e @ ar::TauError::AgreementUnknown { .. } => TauAgreementUnknown::new_err(e.to_string()),
+    }
+}
+
+/// A module the indecomposability gate refused, as NotIndecomposableError with
+/// the gate's report attached: `kind` is "zero", "decomposable" or
+/// "undetermined", `summands` counts the certified summands of a decomposable
+/// module, and `attempts` counts the exhausted split attempts of an
+/// undetermined one. `what` names the rejected endpoint.
+fn indec_error(what: &str, e: IndecError) -> PyErr {
+    let kind = match e {
+        IndecError::Zero => "zero",
+        IndecError::Decomposable { .. } => "decomposable",
+        IndecError::Undetermined { .. } => "undetermined",
+    };
+    let summands = match e {
+        IndecError::Decomposable { summands } => Some(summands),
+        _ => None,
+    };
+    let attempts = match e {
+        IndecError::Undetermined { attempts } => Some(attempts),
+        _ => None,
+    };
+    let err =
+        NotIndecomposableError::new_err(format!("{what} is not certified indecomposable: {e}"));
+    Python::with_gil(|py| {
+        let value = err.value(py);
+        let attached = value
+            .setattr("kind", kind)
+            .and_then(|()| value.setattr("summands", summands))
+            .and_then(|()| value.setattr("attempts", attempts));
+        match attached {
+            Ok(()) => err,
+            Err(failure) => failure,
+        }
+    })
+}
+
+/// A rejected Ext class operation. Operands that do not share one space are
+/// IncompatibleSpacesError, so a comparison never quietly answers False;
+/// everything else is rejected input, so ValueError.
+fn ext_class_error(e: ExtClassError) -> PyErr {
+    match e {
+        ExtClassError::IncompatibleSpaces | ExtClassError::MiddleMismatch => {
+            IncompatibleSpacesError::new_err(e.to_string())
+        }
+        other => value_error(other),
+    }
+}
+
+/// A rejected short exact sequence operation. A wrong degree is caller input,
+/// so ValueError; every other variant reports a structural check on a sequence
+/// this package built itself, so RuntimeError.
+fn sequence_error(e: SequenceError) -> PyErr {
+    match e {
+        SequenceError::WrongDegree { .. } => value_error(e),
+        other => engine_error(other),
+    }
+}
+
+/// A failed AR-quiver or category-radical call. An algebra outside the two
+/// catalog domains is UnsupportedDomainError naming both failed routes,
+/// mismatched endpoints are ValueError, and a failed internal division or
+/// containment is DefectError.
+fn ar_quiver_error(e: ArQuiverError) -> PyErr {
+    match e {
+        ArQuiverError::UnsupportedDomain { .. } => UnsupportedDomainError::new_err(e.to_string()),
+        ArQuiverError::Hom(_) | ArQuiverError::Space(_) => value_error(e),
+        ArQuiverError::Injective(build) => downstream_build_error(build),
+        e @ (ArQuiverError::RadicalSquareNotContained { .. }
+        | ArQuiverError::ResidueDegreeDoesNotDivide { .. }) => DefectError::new_err(e.to_string()),
+    }
+}
+
+/// A failed almost-split construction. A translate that fails the
+/// indecomposability gate and a failed internal cross-check are both crate
+/// defects, so DefectError; the remaining variants keep the mapping of the
+/// layer they come from.
+fn almost_split_error(e: AlmostSplitError) -> PyErr {
+    match e {
+        AlmostSplitError::Tau(inner) => tau_error(inner),
+        AlmostSplitError::Ext(inner) => ext_class_error(inner),
+        AlmostSplitError::Sequence(inner) => sequence_error(inner),
+        AlmostSplitError::Radical(inner) => ar_quiver_error(inner),
+        e @ (AlmostSplitError::TauIndecomposability(_) | AlmostSplitError::Defect(_)) => {
+            DefectError::new_err(e.to_string())
+        }
+        e @ (AlmostSplitError::Hom(_) | AlmostSplitError::Space(_)) => engine_error(e),
+    }
+}
+
+/// The canonical representatives in `0..p` of a row of field elements. An `Fp`
+/// keeps its representative to itself outside the library, so the row travels
+/// through a one-row matrix.
+fn row_u64(row: &[Fp]) -> Vec<u64> {
+    DenseMat::from_rows(&[row.to_vec()])
+        .entries_u64()
+        .pop()
+        .expect("one row in, one row out")
 }
 
 /// One matrix from a list of integer rows, entries reduced mod p. A matrix given
@@ -641,6 +755,32 @@ impl PyAlgebra {
         })
     }
 
+    /// The valued Auslander-Reiten quiver of the algebra: one vertex per
+    /// indecomposable of a complete enumeration, one arrow per nonzero space
+    /// of irreducible maps. The enumeration route is fixed: a zero ideal over
+    /// a quiver of Dynkin shape takes the Gabriel enumeration, any other
+    /// Nakayama algebra takes the Nakayama enumeration, and any other algebra
+    /// raises UnsupportedDomainError naming both failed routes. The quiver is
+    /// complete for its domain; no budget cuts it short. A general-relation
+    /// algebra carries its field, so `field` may be omitted; a monomial
+    /// presentation is field-free and needs it.
+    #[pyo3(signature = (field = None))]
+    fn ar_quiver(&self, field: Option<&PyPrimeField>) -> PyResult<PyArQuiver> {
+        let algebra = match (&self.kind, field) {
+            (AlgebraKind::General(algebra), None) => algebra.clone(),
+            (_, Some(field)) => self.over(field.inner)?,
+            (AlgebraKind::Monomial { .. }, None) => {
+                return Err(PyValueError::new_err(
+                    "a monomial presentation is field-free and an AR quiver is not; \
+                     pass a field to build the AR quiver over it",
+                ));
+            }
+        };
+        Ok(PyArQuiver {
+            inner: Arc::new(arquiver::ar_quiver(&algebra).map_err(ar_quiver_error)?),
+        })
+    }
+
     /// The indecomposable injective I_v = D(A e_v): its basis at vertex w is dual
     /// to the standard paths w -> v. Raises ValueError when v is not a vertex.
     #[pyo3(text_signature = "($self, field, v)")]
@@ -913,14 +1053,60 @@ impl PyRightModule {
         match ar::tau(&self.inner) {
             Ok(Tau::Zero) => Ok(None),
             Ok(Tau::Module(inner)) => Ok(Some(PyRightModule { inner })),
-            Err(ar::TauError::Opposite(e)) => Err(downstream_build_error(e)),
-            Err(e @ ar::TauError::RoutesDisagree { .. }) => {
-                Err(PyRuntimeError::new_err(e.to_string()))
-            }
-            Err(e @ ar::TauError::AgreementUnknown { .. }) => {
-                Err(TauAgreementUnknown::new_err(e.to_string()))
+            Err(e) => Err(tau_error(e)),
+        }
+    }
+
+    /// The Ext space Ext^degree_A(self, other), with the cochain data
+    /// `ext_dim` discards: a basis of classes, each with a representative
+    /// cocycle. Raises ValueError when the modules do not share one algebra
+    /// object and field.
+    #[pyo3(text_signature = "($self, other, degree)")]
+    fn ext_space(&self, other: &PyRightModule, degree: usize) -> PyResult<PyExtSpace> {
+        check_same_context(&self.inner, &other.inner)?;
+        Ok(PyExtSpace {
+            inner: ext::ExtSpace::new(&self.inner, &other.inner, degree).map_err(value_error)?,
+        })
+    }
+
+    /// The almost-split sequence ending at this module, as an
+    /// AlmostSplitSequence, or AlmostSplitOutcome.PROJECTIVE when the module
+    /// is projective. A projective module is a valid outcome, not an error:
+    /// no almost-split sequence ends at it. The module goes through the
+    /// indecomposability gate first, so the zero module, a decomposable
+    /// module, and a module the gate left undetermined raise
+    /// NotIndecomposableError, a ValueError subclass carrying the gate's
+    /// report. A failed internal cross-check raises DefectError, a
+    /// RuntimeError subclass: it signals a bug in this library, never bad
+    /// input.
+    #[pyo3(text_signature = "($self)")]
+    fn almost_split<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let module =
+            IndecomposableModule::new(&self.inner).map_err(|e| indec_error("the module", e))?;
+        match almost_split::almost_split(&module).map_err(almost_split_error)? {
+            AlmostSplitOutcome::Projective => Ok(projective_outcome(py)?.into_bound(py).into_any()),
+            AlmostSplitOutcome::Sequence(inner) => {
+                Ok(Bound::new(py, PyAlmostSplitSequence { module, inner })?.into_any())
             }
         }
+    }
+
+    /// The radical rad(self, other) of the module category: the maps that are
+    /// not isomorphisms, as a subspace of Hom(self, other). Both endpoints
+    /// must pass the indecomposability gate, so both raise
+    /// NotIndecomposableError otherwise; the message names the failed
+    /// endpoint. Raises ValueError when the modules do not share one algebra
+    /// object and field.
+    #[pyo3(text_signature = "($self, other)")]
+    fn category_radical(&self, other: &PyRightModule) -> PyResult<PyCategoryRadical> {
+        check_same_context(&self.inner, &other.inner)?;
+        let x = IndecomposableModule::new(&self.inner)
+            .map_err(|e| indec_error("the source module", e))?;
+        let y = IndecomposableModule::new(&other.inner)
+            .map_err(|e| indec_error("the target module", e))?;
+        Ok(PyCategoryRadical {
+            inner: arquiver::category_radical(&x, &y).map_err(ar_quiver_error)?,
+        })
     }
 
     /// Decides self ≅ other as an IsoResult: isomorphic True comes with a
@@ -1814,6 +2000,846 @@ impl PyEuclideanType {
     }
 }
 
+/// The Ext space Ext^k_A(M, N) with the data behind its dimension kept: a
+/// basis of classes, each with a representative cocycle P_k -> N.
+///
+/// Coordinates run over one fixed complement basis of the coboundaries inside
+/// the cocycles, so classes of one space are compared and combined by their
+/// coordinates alone. `dim` equals `M.ext_dim(N, k)`. Degree 0 is not special:
+/// Ext^0(M, N) is Hom(M, N), and `identity_class()` of Ext^0(M, M) is the
+/// Yoneda unit. Instances are immutable and come only from
+/// `Module.ext_space`.
+#[pyclass(name = "ExtSpace", module = "auslander", frozen)]
+struct PyExtSpace {
+    inner: ext::ExtSpace,
+}
+
+#[pymethods]
+impl PyExtSpace {
+    /// dim_k Ext^degree(source, target), the same number `Module.ext_dim`
+    /// reports.
+    #[getter]
+    fn dim(&self) -> usize {
+        self.inner.dim()
+    }
+
+    /// The source module M.
+    #[getter]
+    fn source(&self) -> PyRightModule {
+        PyRightModule {
+            inner: self.inner.source().clone(),
+        }
+    }
+
+    /// The target module N.
+    #[getter]
+    fn target(&self) -> PyRightModule {
+        PyRightModule {
+            inner: self.inner.target().clone(),
+        }
+    }
+
+    /// The cohomological degree k.
+    #[getter]
+    fn degree(&self) -> usize {
+        self.inner.degree()
+    }
+
+    /// The basis of the space as ExtClass objects: the class of coordinate
+    /// vector e_i at index i.
+    #[pyo3(text_signature = "($self)")]
+    fn basis(&self) -> Vec<PyExtClass> {
+        let field = self.inner.source().field();
+        (0..self.inner.dim())
+            .map(|i| {
+                let mut coords = vec![field.zero(); self.inner.dim()];
+                coords[i] = field.one();
+                PyExtClass {
+                    inner: self
+                        .inner
+                        .class_from_coordinates(&coords)
+                        .expect("a unit vector has the space's dimension and canonical entries"),
+                }
+            })
+            .collect()
+    }
+
+    /// The class with these coordinates over the basis, entries reduced mod p;
+    /// raises ValueError when the number of coordinates is not `dim`.
+    #[pyo3(text_signature = "($self, coords)")]
+    fn class_from_coordinates(&self, coords: Vec<i64>) -> PyResult<PyExtClass> {
+        let field = self.inner.source().field();
+        let coords: Vec<Fp> = coords.into_iter().map(|c| field.elem(c)).collect();
+        Ok(PyExtClass {
+            inner: self
+                .inner
+                .class_from_coordinates(&coords)
+                .map_err(ext_class_error)?,
+        })
+    }
+
+    /// The Yoneda unit, the class of the identity in Ext^0(M, M); raises
+    /// ValueError unless the space has degree 0 and both endpoints are the
+    /// same module object.
+    #[pyo3(text_signature = "($self)")]
+    fn identity_class(&self) -> PyResult<PyExtClass> {
+        Ok(PyExtClass {
+            inner: self.inner.identity_class().map_err(ext_class_error)?,
+        })
+    }
+
+    /// The zero class of the space.
+    #[pyo3(text_signature = "($self)")]
+    fn zero_class(&self) -> PyExtClass {
+        PyExtClass {
+            inner: self.inner.zero_class(),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ExtSpace(degree={}, dim={}, source_dims={:?}, target_dims={:?})",
+            self.inner.degree(),
+            self.inner.dim(),
+            self.inner.source().dim_vector(),
+            self.inner.target().dim_vector()
+        )
+    }
+}
+
+/// An element of an ExtSpace: coordinates over the space's basis.
+///
+/// Arithmetic and comparison need compatible spaces, which means the same
+/// source object, the same target object, and equal degrees. Incompatible
+/// operands raise IncompatibleSpacesError, a ValueError subclass, so `==`
+/// never answers False for classes that were never comparable. `then` is the
+/// Yoneda product in the endpoint order of morphism composition:
+/// Ext^m(M, N) x Ext^n(N, L) -> Ext^{m+n}(M, L). Instances are immutable.
+#[pyclass(name = "ExtClass", module = "auslander", frozen)]
+struct PyExtClass {
+    inner: ext::ExtClass,
+}
+
+#[pymethods]
+impl PyExtClass {
+    /// The source module of the class's space.
+    #[getter]
+    fn source(&self) -> PyRightModule {
+        PyRightModule {
+            inner: self.inner.space().source().clone(),
+        }
+    }
+
+    /// The target module of the class's space.
+    #[getter]
+    fn target(&self) -> PyRightModule {
+        PyRightModule {
+            inner: self.inner.space().target().clone(),
+        }
+    }
+
+    /// The cohomological degree of the class's space.
+    #[getter]
+    fn degree(&self) -> usize {
+        self.inner.space().degree()
+    }
+
+    /// The coordinates over the space's basis, as canonical integers in 0..p.
+    #[getter]
+    fn coordinates(&self) -> Vec<u64> {
+        row_u64(self.inner.coordinates())
+    }
+
+    /// Whether every coordinate is zero.
+    #[getter]
+    fn is_zero(&self) -> bool {
+        self.inner.is_zero()
+    }
+
+    /// A representative cocycle P_degree -> target as a Morphism. Different
+    /// representatives of one class differ by a coboundary; this one is the
+    /// combination of the space's basis representatives.
+    #[pyo3(text_signature = "($self)")]
+    fn representative(&self) -> PyMorphism {
+        PyMorphism {
+            inner: self.inner.representative(),
+        }
+    }
+
+    /// The Yoneda product of this class with `other`, in composition order:
+    /// this class in Ext^m(M, N) and `other` in Ext^n(N, L) give a class in
+    /// Ext^{m+n}(M, L). Raises IncompatibleSpacesError when this class's
+    /// target is not `other`'s source.
+    #[pyo3(text_signature = "($self, other)")]
+    fn then(&self, other: &PyExtClass) -> PyResult<PyExtClass> {
+        Ok(PyExtClass {
+            inner: self.inner.then(&other.inner).map_err(ext_class_error)?,
+        })
+    }
+
+    /// The extension 0 -> target -> E -> source -> 0 realizing this class, as
+    /// a ShortExactSequence; the zero class gives the split sequence. Raises
+    /// ValueError unless the degree is 1, the only degree in which a class is
+    /// an extension.
+    #[pyo3(text_signature = "($self)")]
+    fn extension(&self) -> PyResult<PyShortExactSequence> {
+        Ok(PyShortExactSequence {
+            inner: sequence::ShortExactSequence::from_ext1(&self.inner).map_err(sequence_error)?,
+        })
+    }
+
+    fn __add__(&self, other: &PyExtClass) -> PyResult<PyExtClass> {
+        Ok(PyExtClass {
+            inner: self.inner.add(&other.inner).map_err(ext_class_error)?,
+        })
+    }
+
+    fn __neg__(&self) -> PyExtClass {
+        PyExtClass {
+            inner: self.inner.neg(),
+        }
+    }
+
+    fn __mul__(&self, scalar: i64) -> PyExtClass {
+        let field = self.inner.space().source().field();
+        PyExtClass {
+            inner: self.inner.scale(field.elem(scalar)),
+        }
+    }
+
+    fn __rmul__(&self, scalar: i64) -> PyExtClass {
+        self.__mul__(scalar)
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let Ok(other) = other.extract::<PyRef<'_, PyExtClass>>() else {
+            return Err(IncompatibleSpacesError::new_err(
+                "an Ext class compares only with another Ext class of a compatible space",
+            ));
+        };
+        self.inner.equals(&other.inner).map_err(ext_class_error)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ExtClass(degree={}, coordinates={:?})",
+            self.inner.space().degree(),
+            self.coordinates()
+        )
+    }
+}
+
+/// A retraction and a section proving a sequence split.
+///
+/// `retraction` is r: E -> N with inclusion followed by r the identity of N,
+/// and `section` is s: M -> E with s followed by the projection the identity
+/// of M. Both are Morphisms, so A-linearity holds by construction. Instances
+/// are immutable and come only from `ShortExactSequence.split_status`.
+#[pyclass(name = "SplitWitness", module = "auslander", frozen)]
+struct PySplitWitness {
+    inner: sequence::SplitWitness,
+}
+
+#[pymethods]
+impl PySplitWitness {
+    /// The retraction r: E -> N.
+    #[getter]
+    fn retraction(&self) -> PyMorphism {
+        PyMorphism {
+            inner: self.inner.retraction().clone(),
+        }
+    }
+
+    /// The section s: M -> E.
+    #[getter]
+    fn section(&self) -> PyMorphism {
+        PyMorphism {
+            inner: self.inner.section().clone(),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "SplitWitness(middle_dims={:?}, sub_dims={:?})",
+            self.inner.retraction().source().dim_vector(),
+            self.inner.retraction().target().dim_vector()
+        )
+    }
+}
+
+/// A dual vector proving a sequence non-split.
+///
+/// The retraction system is a linear system in the entries of a candidate
+/// retraction, built in a fixed equation order. `dual` is a vector y with
+/// y A = 0 and y b = 1; the second identity pins its scale. Its existence
+/// proves the system unsolvable by multiplication alone, so no retraction
+/// exists. Instances are immutable and come only from
+/// `ShortExactSequence.split_status`.
+#[pyclass(name = "NonSplitWitness", module = "auslander", frozen)]
+struct PyNonSplitWitness {
+    inner: sequence::NonSplitWitness,
+}
+
+#[pymethods]
+impl PyNonSplitWitness {
+    /// The dual vector as canonical integers in 0..p, one entry per equation
+    /// of the retraction system.
+    #[getter]
+    fn dual(&self) -> Vec<u64> {
+        row_u64(self.inner.dual())
+    }
+
+    fn __repr__(&self) -> String {
+        format!("NonSplitWitness(equations={})", self.inner.dual().len())
+    }
+}
+
+/// A short exact sequence 0 -> sub -> middle -> quotient -> 0.
+///
+/// Exactness was checked at construction, per vertex: the inclusion is mono,
+/// the projection is epi, the composite is zero, and the middle dimension is
+/// the sum of the other two. Together these force image equals kernel, so
+/// holding a ShortExactSequence is proof of exactness. Instances are
+/// immutable and come from `ExtClass.extension`.
+#[pyclass(name = "ShortExactSequence", module = "auslander", frozen)]
+struct PyShortExactSequence {
+    inner: sequence::ShortExactSequence,
+}
+
+#[pymethods]
+impl PyShortExactSequence {
+    /// The sub module N.
+    #[getter]
+    fn sub(&self) -> PyRightModule {
+        PyRightModule {
+            inner: self.inner.sub().clone(),
+        }
+    }
+
+    /// The middle module E.
+    #[getter]
+    fn middle(&self) -> PyRightModule {
+        PyRightModule {
+            inner: self.inner.middle().clone(),
+        }
+    }
+
+    /// The quotient module M.
+    #[getter]
+    fn quotient(&self) -> PyRightModule {
+        PyRightModule {
+            inner: self.inner.quotient().clone(),
+        }
+    }
+
+    /// The inclusion N -> E.
+    #[getter]
+    fn inclusion(&self) -> PyMorphism {
+        PyMorphism {
+            inner: self.inner.inclusion().clone(),
+        }
+    }
+
+    /// The projection E -> M.
+    #[getter]
+    fn projection(&self) -> PyMorphism {
+        PyMorphism {
+            inner: self.inner.projection().clone(),
+        }
+    }
+
+    /// The class of this extension in Ext^1(quotient, sub). The space is
+    /// rebuilt for this call, so the class of an extension built from a class
+    /// carries the same coordinates as the original.
+    #[pyo3(text_signature = "($self)")]
+    fn ext1_class(&self) -> PyResult<PyExtClass> {
+        let space =
+            ext::ExtSpace::new(self.inner.quotient(), self.inner.sub(), 1).map_err(value_error)?;
+        Ok(PyExtClass {
+            inner: self.inner.ext1_class(&space).map_err(sequence_error)?,
+        })
+    }
+
+    /// Whether the sequence splits, decided by solving the retraction system.
+    /// Both answers carry a proof; see `split_status`.
+    #[getter]
+    fn is_split(&self) -> bool {
+        matches!(self.inner.split_status(), SplitStatus::Split(_))
+    }
+
+    /// The proof behind `is_split`: a SplitWitness with a retraction and a
+    /// section, or a NonSplitWitness with the dual vector of the unsolvable
+    /// retraction system.
+    #[getter]
+    fn split_status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        match self.inner.split_status() {
+            SplitStatus::Split(inner) => Ok(Bound::new(py, PySplitWitness { inner })?.into_any()),
+            SplitStatus::NonSplit(inner) => {
+                Ok(Bound::new(py, PyNonSplitWitness { inner })?.into_any())
+            }
+        }
+    }
+
+    /// Rechecks the sequence: rebuilds it through the exactness checks and
+    /// rechecks the split-status witness by multiplication.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self) -> bool {
+        if sequence::ShortExactSequence::new(
+            self.inner.inclusion().clone(),
+            self.inner.projection().clone(),
+        )
+        .is_err()
+        {
+            return false;
+        }
+        match self.inner.split_status() {
+            SplitStatus::Split(w) => w.verify(&self.inner),
+            SplitStatus::NonSplit(w) => w.verify(&self.inner),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ShortExactSequence(sub_dims={:?}, middle_dims={:?}, quotient_dims={:?})",
+            self.inner.sub().dim_vector(),
+            self.inner.middle().dim_vector(),
+            self.inner.quotient().dim_vector()
+        )
+    }
+}
+
+/// The outcome of `Module.almost_split` for a projective module.
+///
+/// The class has one member, `AlmostSplitOutcome.PROJECTIVE`, and
+/// `Module.almost_split` returns that very object, so `is` decides the case.
+/// No almost-split sequence ends at a projective module; that is mathematics,
+/// not a failure, and it is never reported as None.
+#[pyclass(name = "AlmostSplitOutcome", module = "auslander", frozen, eq)]
+#[derive(PartialEq)]
+struct PyAlmostSplitOutcome;
+
+static PROJECTIVE_OUTCOME: GILOnceCell<Py<PyAlmostSplitOutcome>> = GILOnceCell::new();
+
+/// The single PROJECTIVE member, built once, so the value `almost_split`
+/// returns and the class attribute are one object.
+fn projective_outcome(py: Python<'_>) -> PyResult<Py<PyAlmostSplitOutcome>> {
+    Ok(PROJECTIVE_OUTCOME
+        .get_or_try_init(py, || Py::new(py, PyAlmostSplitOutcome))?
+        .clone_ref(py))
+}
+
+#[pymethods]
+impl PyAlmostSplitOutcome {
+    /// The projective outcome: the module is projective, so no almost-split
+    /// sequence ends at it.
+    #[classattr]
+    #[pyo3(name = "PROJECTIVE")]
+    fn projective(py: Python<'_>) -> PyResult<Py<PyAlmostSplitOutcome>> {
+        projective_outcome(py)
+    }
+
+    fn __repr__(&self) -> String {
+        "AlmostSplitOutcome.PROJECTIVE".to_string()
+    }
+}
+
+/// An almost-split sequence 0 -> start -> middle -> end -> 0 with the witness
+/// that certifies it.
+///
+/// `start` is the AR translate of `end`. The sequence realizes a chosen class
+/// of the socle of Ext^1(end, start) as a module over the endomorphism algebra
+/// of `end`; the class is deterministic, not canonical, and any nonzero socle
+/// class gives an almost-split sequence isomorphic to this one after suitable
+/// automorphisms of the end terms, not an equivalent extension with fixed
+/// ends. `verify()` rechecks every gate of the
+/// construction from the stored witness and the live modules, and
+/// `verification_summary()` reports the gates one by one. Instances are
+/// immutable and come only from `Module.almost_split`.
+#[pyclass(name = "AlmostSplitSequence", module = "auslander", frozen)]
+struct PyAlmostSplitSequence {
+    module: IndecomposableModule,
+    inner: almost_split::AlmostSplitSequence,
+}
+
+impl PyAlmostSplitSequence {
+    /// The AR duality witness. `Module.almost_split` runs the AR duality
+    /// route, so the catalog variant is unreachable through this package.
+    fn ar_duality(&self) -> PyResult<&almost_split::ArDualityWitness> {
+        match self.inner.witness() {
+            AlmostSplitWitness::ArDuality(witness) => Ok(witness),
+            AlmostSplitWitness::ExhaustiveCatalog(_) => Err(engine_error(
+                "the sequence carries a catalog witness, which this package never builds",
+            )),
+        }
+    }
+}
+
+#[pymethods]
+impl PyAlmostSplitSequence {
+    /// The left end, the AR translate of `end`.
+    #[getter]
+    fn start(&self) -> PyRightModule {
+        PyRightModule {
+            inner: self.inner.sequence().sub().clone(),
+        }
+    }
+
+    /// The middle term.
+    #[getter]
+    fn middle(&self) -> PyRightModule {
+        PyRightModule {
+            inner: self.inner.sequence().middle().clone(),
+        }
+    }
+
+    /// The right end: the module the sequence was built for.
+    #[getter]
+    fn end(&self) -> PyRightModule {
+        PyRightModule {
+            inner: self.inner.sequence().quotient().clone(),
+        }
+    }
+
+    /// The inclusion start -> middle.
+    #[getter]
+    fn inclusion(&self) -> PyMorphism {
+        PyMorphism {
+            inner: self.inner.sequence().inclusion().clone(),
+        }
+    }
+
+    /// The projection middle -> end.
+    #[getter]
+    fn projection(&self) -> PyMorphism {
+        PyMorphism {
+            inner: self.inner.sequence().projection().clone(),
+        }
+    }
+
+    /// The chosen AR class in Ext^1(end, start) that the sequence realizes:
+    /// the first row of the socle basis. Deterministic, not canonical.
+    #[pyo3(text_signature = "($self)")]
+    fn ext1_class(&self) -> PyExtClass {
+        PyExtClass {
+            inner: self.inner.chosen_ar_class().clone(),
+        }
+    }
+
+    /// Which route certified the sequence: "ar_duality" for the socle
+    /// construction of AR duality, "exhaustive_catalog" for the catalog
+    /// route. `Module.almost_split` always runs the AR duality route.
+    #[getter]
+    fn witness_route(&self) -> &'static str {
+        match self.inner.witness() {
+            AlmostSplitWitness::ArDuality(_) => "ar_duality",
+            AlmostSplitWitness::ExhaustiveCatalog(_) => "exhaustive_catalog",
+        }
+    }
+
+    /// Rechecks the whole witness against freshly recomputed data: the
+    /// radical basis and the action matrices of the endomorphism algebra, the
+    /// socle kernel, the two dimension equalities, the recovery of the class
+    /// from the sequence, the non-split witness, and exactness.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self) -> PyResult<bool> {
+        let witness = self.ar_duality()?;
+        Ok(witness.verify(
+            &self.module,
+            self.inner.sequence(),
+            self.inner.chosen_ar_class(),
+        ))
+    }
+
+    /// The gates of the construction one by one, as a dict of check name to
+    /// result: "action_traces" (the chosen class is annihilated by every
+    /// radical endomorphism), "socle_membership" (the class is the stored
+    /// socle row and is nonzero), "duality_dimensions" (dim Ext^1(end, start)
+    /// equals dim of the stable endomorphism algebra), "socle_dimension" (the
+    /// socle dimension equals the residue degree), "non_split" (the dual
+    /// vector proves no retraction exists), and "sequence_exact" (the
+    /// exactness checks pass again). `verify()` is the stronger statement: it
+    /// recomputes the stored data instead of reading it.
+    #[pyo3(text_signature = "($self)")]
+    fn verification_summary(&self) -> PyResult<BTreeMap<&'static str, bool>> {
+        let witness = self.ar_duality()?;
+        let sequence = self.inner.sequence();
+        let class = self.inner.chosen_ar_class();
+        let action_traces = witness.action_traces().len() == witness.radical_basis_coords().rows()
+            && witness
+                .action_traces()
+                .iter()
+                .all(|trace| trace.iter().all(|c| c.is_zero()));
+        let socle_membership = witness.chosen_row() < witness.socle_rref().rows()
+            && class.coordinates() == witness.socle_rref().row(witness.chosen_row())
+            && !class.is_zero();
+        let duality_dimensions = witness.ext_dim() == witness.stable_end_dim()
+            && witness.ext_dim() == class.space().dim();
+        let socle_dimension = witness.socle_dim() == witness.socle_rref().rows()
+            && witness.socle_dim() == witness.residue_degree()
+            && witness.residue_degree() == self.module.residue_degree();
+        let non_split = witness.non_split().verify(sequence);
+        let sequence_exact = sequence::ShortExactSequence::new(
+            sequence.inclusion().clone(),
+            sequence.projection().clone(),
+        )
+        .is_ok();
+        Ok(BTreeMap::from([
+            ("action_traces", action_traces),
+            ("duality_dimensions", duality_dimensions),
+            ("non_split", non_split),
+            ("sequence_exact", sequence_exact),
+            ("socle_dimension", socle_dimension),
+            ("socle_membership", socle_membership),
+        ]))
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "AlmostSplitSequence(start_dims={:?}, middle_dims={:?}, end_dims={:?})",
+            self.inner.sequence().sub().dim_vector(),
+            self.inner.sequence().middle().dim_vector(),
+            self.inner.sequence().quotient().dim_vector()
+        )
+    }
+}
+
+/// The radical rad(X, Y) of the module category between two certified
+/// indecomposables, as a subspace of Hom(X, Y).
+///
+/// The radical holds the maps that are not isomorphisms: the whole hom space
+/// when X and Y are not isomorphic, and the maps whose composite with a fixed
+/// isomorphism lands in the radical of End(X) when they are. The computation
+/// is exact and needs no catalog. Instances are immutable and come only from
+/// `Module.category_radical`.
+#[pyclass(name = "CategoryRadical", module = "auslander", frozen)]
+struct PyCategoryRadical {
+    inner: HomSubspace,
+}
+
+#[pymethods]
+impl PyCategoryRadical {
+    /// dim_k rad(X, Y).
+    #[getter]
+    fn dim(&self) -> usize {
+        self.inner.dim()
+    }
+
+    /// A basis of the radical as a list of Morphism objects, not every
+    /// radical map: arbitrary radical maps are its linear combinations.
+    #[pyo3(text_signature = "($self)")]
+    fn basis(&self) -> Vec<PyMorphism> {
+        (0..self.inner.dim())
+            .map(|r| PyMorphism {
+                inner: self.inner.basis_morphism(r),
+            })
+            .collect()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "CategoryRadical(dim={}, source_dims={:?}, target_dims={:?})",
+            self.inner.dim(),
+            self.inner.source().dim_vector(),
+            self.inner.target().dim_vector()
+        )
+    }
+}
+
+/// One vertex of an AR quiver: an indecomposable module with the data the
+/// quiver labels it by.
+///
+/// `id` is the index of the vertex in `ArQuiver.vertices()` and in the catalog
+/// behind it. `residue_degree` is the degree d of the residue field F_{p^d} of
+/// the local endomorphism algebra; it is 1 on both catalog domains of this
+/// release. Instances are immutable.
+#[pyclass(name = "ArVertex", module = "auslander", frozen)]
+struct PyArVertex {
+    quiver: Arc<ArQuiver>,
+    index: usize,
+}
+
+#[pymethods]
+impl PyArVertex {
+    /// The index of the vertex in `ArQuiver.vertices()`.
+    #[getter]
+    fn id(&self) -> usize {
+        self.quiver.vertices()[self.index].id()
+    }
+
+    /// The module at the vertex.
+    #[getter]
+    fn module(&self) -> PyRightModule {
+        PyRightModule {
+            inner: self.quiver.vertices()[self.index].module().module().clone(),
+        }
+    }
+
+    /// The degree d of the residue field F_{p^d} of the module's local
+    /// endomorphism algebra.
+    #[getter]
+    fn residue_degree(&self) -> usize {
+        self.quiver.vertices()[self.index].residue_degree()
+    }
+
+    /// Whether the module is projective.
+    #[getter]
+    fn projective(&self) -> bool {
+        self.quiver.vertices()[self.index].projective()
+    }
+
+    /// Whether the module is injective.
+    #[getter]
+    fn injective(&self) -> bool {
+        self.quiver.vertices()[self.index].injective()
+    }
+
+    fn __repr__(&self) -> String {
+        let vertex = &self.quiver.vertices()[self.index];
+        format!(
+            "ArVertex(id={}, dims={:?}, residue_degree={})",
+            vertex.id(),
+            vertex.module().module().dim_vector(),
+            vertex.residue_degree()
+        )
+    }
+}
+
+/// One arrow of an AR quiver: a pair of vertices with a nonzero space of
+/// irreducible maps, together with its three dimensions.
+///
+/// `base_field_dim` is dim_k Irr(X, Y) over the prime field.
+/// `dim_over_source_residue` and `dim_over_target_residue` are its dimensions
+/// over the two residue fields; they differ from `base_field_dim` exactly when
+/// a residue degree exceeds 1. `plain_multiplicity` is the arrow multiplicity
+/// of an unvalued AR quiver; it raises ValuedArrowError on a valued arrow
+/// instead of reducing three dimensions to one integer. Instances are
+/// immutable.
+#[pyclass(name = "ArArrow", module = "auslander", frozen)]
+struct PyArArrow {
+    quiver: Arc<ArQuiver>,
+    index: usize,
+}
+
+#[pymethods]
+impl PyArArrow {
+    /// The id of the source vertex.
+    #[getter]
+    fn source(&self) -> usize {
+        self.quiver.arrows()[self.index].source()
+    }
+
+    /// The id of the target vertex.
+    #[getter]
+    fn target(&self) -> usize {
+        self.quiver.arrows()[self.index].target()
+    }
+
+    /// dim_k Irr(X, Y) over the prime field.
+    #[getter]
+    fn base_field_dim(&self) -> usize {
+        self.quiver.arrows()[self.index].base_dim()
+    }
+
+    /// The dimension of Irr(X, Y) over the residue field of the source.
+    #[getter]
+    fn dim_over_source_residue(&self) -> usize {
+        self.quiver.arrows()[self.index].over_source_residue()
+    }
+
+    /// The dimension of Irr(X, Y) over the residue field of the target.
+    #[getter]
+    fn dim_over_target_residue(&self) -> usize {
+        self.quiver.arrows()[self.index].over_target_residue()
+    }
+
+    /// The arrow multiplicity of an unvalued AR quiver, defined only when both
+    /// residue degrees are 1; raises ValuedArrowError, a ValueError subclass,
+    /// otherwise. A valued arrow carries three dimensions, and none of them is
+    /// the multiplicity.
+    #[getter]
+    fn plain_multiplicity(&self) -> PyResult<usize> {
+        match self.quiver.arrows()[self.index].valuation() {
+            ArrowValuation::Plain(m) => Ok(m),
+            ArrowValuation::Valued {
+                base_dim,
+                over_source,
+                over_target,
+            } => Err(ValuedArrowError::new_err(format!(
+                "the arrow is valued: dim_k Irr = {base_dim} over the prime field, \
+                 {over_source} over the source residue field, {over_target} over the target \
+                 residue field; read those three dimensions instead"
+            ))),
+        }
+    }
+
+    /// Representatives of a basis of Irr(X, Y) as Morphism objects, one per
+    /// dimension over the prime field.
+    #[pyo3(text_signature = "($self)")]
+    fn representatives(&self) -> Vec<PyMorphism> {
+        self.quiver.arrows()[self.index]
+            .representatives()
+            .iter()
+            .map(|f| PyMorphism { inner: f.clone() })
+            .collect()
+    }
+
+    fn __repr__(&self) -> String {
+        let arrow = &self.quiver.arrows()[self.index];
+        format!(
+            "ArArrow(source={}, target={}, base_field_dim={})",
+            arrow.source(),
+            arrow.target(),
+            arrow.base_dim()
+        )
+    }
+}
+
+/// The valued Auslander-Reiten quiver of an algebra.
+///
+/// One vertex per indecomposable of a complete enumeration, one arrow per
+/// nonzero space of irreducible maps, ordered by source id then target id. The
+/// quiver is complete for its domain: the enumeration behind it is a
+/// classification theorem (Nakayama or Gabriel) and no budget cuts the
+/// construction short, so there is no partial AR quiver. Instances are
+/// immutable and come only from `Algebra.ar_quiver`.
+#[pyclass(name = "ArQuiver", module = "auslander", frozen)]
+struct PyArQuiver {
+    inner: Arc<ArQuiver>,
+}
+
+#[pymethods]
+impl PyArQuiver {
+    /// The vertices in catalog order.
+    #[pyo3(text_signature = "($self)")]
+    fn vertices(&self) -> Vec<PyArVertex> {
+        (0..self.inner.vertices().len())
+            .map(|index| PyArVertex {
+                quiver: self.inner.clone(),
+                index,
+            })
+            .collect()
+    }
+
+    /// The arrows, ordered by source id then target id.
+    #[pyo3(text_signature = "($self)")]
+    fn arrows(&self) -> Vec<PyArArrow> {
+        (0..self.inner.arrows().len())
+            .map(|index| PyArArrow {
+                quiver: self.inner.clone(),
+                index,
+            })
+            .collect()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ArQuiver(vertices={}, arrows={})",
+            self.inner.vertices().len(),
+            self.inner.arrows().len()
+        )
+    }
+}
+
 create_exception!(
     auslander,
     TauAgreementUnknown,
@@ -1825,13 +2851,72 @@ create_exception!(
 
 create_exception!(
     auslander,
-    TruncationError,
+    BudgetExhaustedError,
     PyRuntimeError,
+    "Base of the budget exhaustions: an enforced work budget ran out before \
+     the computation finished. Nothing is claimed about the result; raise the \
+     limits and run again. The variant is the subclass."
+);
+
+create_exception!(
+    auslander,
+    TruncationError,
+    BudgetExhaustedError,
     "Completion ran out of budget before it produced a certificate. The \
      consumed budget is attached: `basis_len`, `pending_ambiguities`, \
      `steps_used`, and `reason` (\"basis_budget\", \"word_len_budget\", or \
      \"step_budget\"). Nothing is claimed about the algebra; raise the limits \
      and rebuild."
+);
+
+create_exception!(
+    auslander,
+    DefectError,
+    PyRuntimeError,
+    "An internal cross-check of this library failed: a computation checked a \
+     consequence of a theorem whose hypotheses hold, and the check came out \
+     false. This is a bug in auslander, never bad input, and it is reported \
+     as such. Please report it with the input that produced it."
+);
+
+create_exception!(
+    auslander,
+    NotIndecomposableError,
+    PyValueError,
+    "The module did not pass the indecomposability gate, which the \
+     almost-split and category-radical constructions need. `kind` is \"zero\", \
+     \"decomposable\", or \"undetermined\"; `summands` counts the certified \
+     summands of a decomposable module and `attempts` the exhausted split \
+     attempts of an undetermined one. Undetermined claims nothing either way."
+);
+
+create_exception!(
+    auslander,
+    IncompatibleSpacesError,
+    PyValueError,
+    "The two Ext classes do not live in one space, so the operation is \
+     undefined. Compatible spaces need the same source module object, the \
+     same target module object, and equal degrees. Comparison raises this \
+     rather than answering False, which would claim the classes differ."
+);
+
+create_exception!(
+    auslander,
+    UnsupportedDomainError,
+    PyValueError,
+    "No complete enumeration of the indecomposables applies to this algebra, \
+     so it has no AR quiver in this release. The message names both failed \
+     routes, the Dynkin one and the Nakayama one."
+);
+
+create_exception!(
+    auslander,
+    ValuedArrowError,
+    PyValueError,
+    "The arrow is valued: a residue degree above 1 makes the dimensions of \
+     Irr(X, Y) over the prime field and over the two residue fields differ, so \
+     no single integer is the multiplicity. Read `base_field_dim`, \
+     `dim_over_source_residue`, and `dim_over_target_residue`."
 );
 
 create_exception!(
@@ -2011,11 +3096,40 @@ fn auslander_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDiagramFamily>()?;
     m.add_class::<PyDynkinType>()?;
     m.add_class::<PyEuclideanType>()?;
+    m.add_class::<PyExtSpace>()?;
+    m.add_class::<PyExtClass>()?;
+    m.add_class::<PySplitWitness>()?;
+    m.add_class::<PyNonSplitWitness>()?;
+    m.add_class::<PyShortExactSequence>()?;
+    m.add_class::<PyAlmostSplitOutcome>()?;
+    m.add_class::<PyAlmostSplitSequence>()?;
+    m.add_class::<PyCategoryRadical>()?;
+    m.add_class::<PyArVertex>()?;
+    m.add_class::<PyArArrow>()?;
+    m.add_class::<PyArQuiver>()?;
     m.add(
         "TauAgreementUnknown",
         m.py().get_type::<TauAgreementUnknown>(),
     )?;
+    m.add(
+        "BudgetExhaustedError",
+        m.py().get_type::<BudgetExhaustedError>(),
+    )?;
     m.add("TruncationError", m.py().get_type::<TruncationError>())?;
+    m.add("DefectError", m.py().get_type::<DefectError>())?;
+    m.add(
+        "NotIndecomposableError",
+        m.py().get_type::<NotIndecomposableError>(),
+    )?;
+    m.add(
+        "IncompatibleSpacesError",
+        m.py().get_type::<IncompatibleSpacesError>(),
+    )?;
+    m.add(
+        "UnsupportedDomainError",
+        m.py().get_type::<UnsupportedDomainError>(),
+    )?;
+    m.add("ValuedArrowError", m.py().get_type::<ValuedArrowError>())?;
     m.add("DynkinError", m.py().get_type::<DynkinError>())?;
     m.add("NonzeroIdealError", m.py().get_type::<NonzeroIdealError>())?;
     m.add("NotDynkinError", m.py().get_type::<NotDynkinError>())?;

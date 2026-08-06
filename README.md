@@ -62,6 +62,14 @@ Answers that are harder to certify follow the same discipline. Decomposition,
 isomorphism, and indecomposability each return a machine-checkable witness or an
 explicit statement that no witness was found. None of them returns a bare yes.
 
+The Auslander-Reiten layer makes that discipline structural. Objects carry
+recheckable witnesses: a short exact sequence exists only after per-vertex
+exactness checks, split status comes with a retraction and section or with a
+dual vector proving the retraction system unsolvable, and a Yoneda product can
+return the chain lifts that computed it. Almost-split status is never a bare
+flag. `almost_split` gates its result behind an explicit `AlmostSplitWitness`,
+and `verify` rechecks every gate from the stored data and the live modules.
+
 ## Contents
 
 Algebras and modules:
@@ -142,6 +150,40 @@ Classification and enumeration:
 - `nakayama_indecomposables`: every indecomposable of a Nakayama algebra, each
   with its certificate.
 
+Ext classes and the witnessed Auslander-Reiten layer:
+
+- `HomSpace`, `HomSubspace`, `HomQuotient`: `Hom_A(M, N)` as an explicit vector
+  space with flat coordinates, RREF subspace bases, and one crate-wide
+  deterministic complement rule, so quotient representatives never depend on
+  the run.
+- `IndecomposableModule`: a checked wrapper that exists only together with the
+  locality proof of its endomorphism algebra. `residue_degree` gives the degree
+  `d` of the residue field `F_{p^d}`.
+- `ExtSpace` and `ExtClass`: Ext groups as explicit vector spaces with
+  representative cocycles that recheck by composition. Degree 0 is `Hom(M, N)`
+  and carries the Yoneda unit. `then` is the Yoneda product through stored
+  chain lifts; `then_with_witness` also returns the lifts as a
+  `ProductWitness` whose `verify` rechecks the lift identities and the
+  reduction.
+- `ShortExactSequence`: exact per vertex by construction. `from_ext1` realizes
+  a degree-1 class as an extension, `ext1_class` recovers the class, and
+  `split_status` proves its answer either way: a retraction and section, or a
+  dual vector showing the retraction system inconsistent by multiplication
+  alone.
+- `stable_hom` and `almost_split`: Hom modulo the maps that factor through a
+  projective, and almost-split sequences gated behind an `AlmostSplitWitness`.
+  The AR-duality route stores the socle construction of the chosen class;
+  `almost_split_via_catalog` instead stores factorization data against every
+  entry of an exhaustive catalog. A projective input is
+  `AlmostSplitOutcome::Projective`, an outcome rather than an error.
+- `category_radical`, `IndecomposableCatalog`,
+  `radical_square_through_catalog`, `irreducible_quotient`, and `ar_quiver`:
+  the exact category radical between certified indecomposables, catalogs that
+  wrap the two complete enumerations (Nakayama, zero-ideal Dynkin),
+  catalog-exact rad^2, irreducible morphism spaces, and the valued AR quiver,
+  whose arrows state dimensions over both residue fields instead of a bare
+  multiplicity.
+
 Certificates:
 
 - `Algebra::certificate` returns the verified certificate, and
@@ -173,18 +215,26 @@ possible" means the operation can end without deciding, and says so.
 | `is_isomorphic` | `Isomorphic` with a witness, `NotIsomorphic` with an obstruction | no | yes: `IsoOutcome::Unknown` |
 | `nakayama_indecomposables` | yes, every certificate is `Indecomposable` | no | no |
 | `dynkin_indecomposables` | one module per positive root, each with the certificate `decompose` produced | no | yes, through that certificate |
+| `HomSpace`, `ExtSpace`, `stable_hom`, `category_radical`, Yoneda `then` | yes | no | no |
+| `ShortExactSequence::from_ext1`, `ext1_class`, `split_status` | yes; splitting carries a witness either way | no | no |
+| `IndecomposableModule::new` | yes on acceptance; a split is rejected with its summand count | no | yes: `IndecError::Undetermined` |
+| `almost_split`, `almost_split_via_catalog` | `Projective`, or a sequence with its witness | no | yes: an undecided `tau` cross-check or gate surfaces as a typed error |
+| `ar_quiver` | yes, complete for its domain | no | no; any other algebra is `UnsupportedDomain` with both rejections |
 
 `tau`, the injective constructions, and `opposite` build the opposite algebra,
 so each can also fail with an `AlgebraBuildError` from that build.
+`almost_split` and `ar_quiver` run `tau` and the injective constructions, so
+they inherit the same failure modes.
 
 ## Not included
 
-- Ext representatives and Yoneda products. `ext_dim` gives dimensions, not
-  classes, and no extension is constructed.
-- Almost-split sequences, AR quivers, and bounded AR component exploration. The
-  crate provides `tau` itself, not the meshes around it; the meshes will come
-  with universal-property verification.
-- Derived categories, tilting, and Hochschild cohomology.
+- Exhaustive catalogs beyond Nakayama algebras and zero-ideal Dynkin path
+  algebras. The AR quiver, catalog-exact rad^2, and irreducible morphism
+  spaces exist only behind an `IndecomposableCatalog`, and a catalog wraps a
+  classification theorem; a plain module list never becomes one. Almost-split
+  sequences through the AR-duality route run on any supported algebra.
+- Tilting and support tau-tilting, chain complexes and Hochschild cohomology,
+  and derived categories.
 - User-defined admissible orders and one-sided Groebner bases. The order is
   sealed.
 - Characteristic 0.
@@ -316,7 +366,42 @@ assert_eq!(d.summands().len(), 3);
 assert!(d.certificates().iter().all(|c| *c == Certificate::Indecomposable));
 ```
 
-The last two examples run as tests in `crates/auslander/tests/fixtures.rs`.
+The witnessed AR layer over `k[x]/(x³)`: certify the simple module
+indecomposable, build its almost-split sequence, recheck the witness, and read
+the valued AR quiver.
+
+```rust
+use auslander::algebra::truncated_poly;
+use auslander::almost_split::{AlmostSplitOutcome, AlmostSplitWitness, almost_split};
+use auslander::arquiver::ar_quiver;
+use auslander::field::PrimeField;
+use auslander::indec::IndecomposableModule;
+use auslander::module::Module;
+
+let field = PrimeField::new(5).unwrap();
+let algebra = truncated_poly(3, field).unwrap();
+let s = IndecomposableModule::new(&Module::simple(&algebra, 0)).unwrap();
+
+// 0 → S → rad P → S → 0: the middle term is the uniserial module of dimension 2.
+let AlmostSplitOutcome::Sequence(sequence) = almost_split(&s).unwrap() else {
+    panic!("S is not projective");
+};
+println!("middle: {:?}", sequence.sequence().middle().dim_vector());
+assert_eq!(sequence.sequence().middle().dim_vector(), &[2]);
+
+// The witness rechecks every gate of the construction against the live modules.
+let AlmostSplitWitness::ArDuality(witness) = sequence.witness() else {
+    panic!("almost_split certifies through AR duality");
+};
+assert!(witness.verify(&s, sequence.sequence(), sequence.chosen_ar_class()));
+
+// Three uniserial indecomposables, four irreducible arrows.
+let quiver = ar_quiver(&algebra).unwrap();
+assert_eq!(quiver.vertices().len(), 3);
+assert_eq!(quiver.arrows().len(), 4);
+```
+
+The last three examples run as tests in `crates/auslander/tests/fixtures.rs`.
 Every value in the first one is pinned by
 `crates/auslander/tests/acceptance_nonmonomial.rs`.
 
@@ -333,8 +418,10 @@ maturin build --release     # or build an abi3 wheel for CPython >= 3.10
 
 The Python surface covers general relations
 (`Algebra.from_relations(quiver, relations, field)`), the certificate workflow
-(`algebra.certificate_json()` and `Algebra.from_certificate(json)`), and the
-same decision surface as the Rust crate. See `crates/auslander-py/README.md`.
+(`algebra.certificate_json()` and `Algebra.from_certificate(json)`), the
+witnessed AR layer (`ext_space`, `extension`, `almost_split`,
+`category_radical`, `ar_quiver`), and the same decision surface as the Rust
+crate. See `crates/auslander-py/README.md`.
 
 ## Migrating
 
@@ -369,6 +456,17 @@ cargo test
   inhomogeneous `kQ/(ab - cde)` over F_5. Each pinned value is hand-derived on
   the test that uses it, and the values that the oracle also stores agree with
   it.
+- `crates/auslander/tests/acceptance_ar.rs` pins the AR layer in two tiers.
+  Ext spaces, the Yoneda product laws on every basis tuple within the degree
+  bound, extension round trips, and AR-duality almost-split sequences run on
+  the full non-monomial matrix. AR quivers, catalog witnesses, and arrow
+  valuations run where an exhaustive catalog exists, with the almost-split
+  sequences of `k[x]/(x³)`, linear A_3, the commutative square, and
+  preprojective A_3 pinned against hand-derived terms.
+  `tests/mutation_ar.rs` feeds every reachable witness verifier tampered data
+  and requires rejection. `tests/determinism_ar.rs` checks a fresh-process
+  fingerprint and compares the committed golden AR-quiver renderings under
+  `tests/golden-ar/` byte for byte.
 - The verifier is tested against a tamper corpus: a wrong schema string, a
   composite field, an out-of-range arrow, a non-canonical coefficient, a
   non-monic or non-reduced basis, an origin expansion that gives the wrong

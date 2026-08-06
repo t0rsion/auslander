@@ -6,7 +6,7 @@ decades of use.
 
 ## Files
 
-Two JSON files with the same schema, produced by independent tool chains:
+Two JSON files, produced by independent tool chains, both at schema v6:
 
 - `qpa_expected.json`: committed, and the oracle. A real GAP+QPA run of
   `generate_fixtures.g` generated it. This library never writes it. The always-on
@@ -30,6 +30,21 @@ directory. It is never committed here.
 | Snapshot rewrite | `QPA_ORACLE_WRITE=1` | rewrites `native_snapshot.json` only, never `qpa_expected.json` |
 | Live GAP run | `QPA_ORACLE=1` | runs `generate_fixtures.g` under GAP+QPA in a temp dir, compares the fresh output against the library (values) and against `qpa_expected.json` (values, then byte for byte); fails hard when GAP is missing, QPA does not load, no output appears, or anything mismatches |
 
+The harness computes every v6 field from the library and compares it entry by
+entry. Designated modules are built by construction from their kind and index,
+never looked up by dimension vector. Almost-split sequences come from
+`almost_split`, and the `ArDualityWitness` of every sequence the harness builds
+is rechecked before its values are used. The irreducible morphisms out of a
+module are computed over the opposite algebra on its dual, which is the same
+computation as the morphisms into a module: `opposite` keeps the vertex ids and
+`dual` keeps the dimension vector, so the values compare directly.
+
+The always-on modes take about 12 minutes unoptimized and under a minute with
+`--release`. `inclusion-ambiguity` dominates: its almost-split sequences run on
+modules of dimension 18 and 24 over a 6-dimensional algebra, and every value is
+computed twice, once over the algebra and once over its opposite for the
+left-convention test.
+
 ## GAP discovery (live run and regeneration)
 
 The launcher in the test resolves GAP and QPA in this order:
@@ -41,23 +56,39 @@ The launcher in the test resolves GAP and QPA in this order:
    packages from the `~/.gap` user root.
 3. Otherwise `$QPA_DIR` must point at a QPA source tree. The test creates a
    temporary GAP root with `pkg/qpa` symlinked to it and launches
-   `gap -q -T -l ";TMPROOT" generate_fixtures.g` (the leading `;` appends the
-   root, so the standard library still resolves). QPA cannot load without its
-   `gbnp` dependency in some root. When the system and user roots lack it, set
-   `$GBNP_DIR` to a gbnp source tree and it is symlinked alongside.
+   `gap -q -T -m 1g -l ";TMPROOT" generate_fixtures.g` (the leading `;` appends
+   the root, so the standard library still resolves). QPA cannot load without
+   its `gbnp` dependency in some root. When the system and user roots lack it,
+   set `$GBNP_DIR` to a gbnp source tree and it is symlinked alongside.
 
 GAP is invoked with `-q -T` and closed stdin, so an error exits nonzero instead
-of hanging in a break loop. A QPA load failure is such an error.
+of hanging in a break loop. A QPA load failure is such an error. `-m 1g` asks
+for a large initial workspace, which the v6 workload needs (see below).
 
-## Regenerating `qpa_expected.json`
+## Regenerating the oracle
 
-Only the GAP path may write this file:
+Only the GAP path may write these files:
 
 ```sh
 cd "$(mktemp -d)"
-/usr/bin/gap -q -T /path/to/crates/auslander/tests/qpa-oracle/generate_fixtures.g
-cp fixtures_qpa.json /path/to/crates/auslander/tests/qpa-oracle/qpa_expected.json
+/usr/bin/gap -q -T -m 1g \
+   /path/to/crates/auslander/tests/qpa-oracle/generate_fixtures.g
+cp fixtures_qpa.json \
+   /path/to/crates/auslander/tests/qpa-oracle/qpa_expected.json
 ```
+
+The generator emits schema v6.
+
+GAP 4.16dev crashes on this workload, with a segmentation fault and no message.
+It crashed on two of five runs of the command above and on none of three runs of
+the same command with `-m 1g`, which asks for a large initial workspace. The
+flag changes nothing in the output: every completed run, with the flag and
+without, wrote the same bytes. Raising the shell stack limit does not help; with
+`ulimit -s unlimited` GAP crashed sooner. Use `-m 1g` and expect a run to take
+about 75 s. A crashed run leaves no `fixtures_qpa.json`, so a crash cannot
+produce a truncated file. Repeat the run until it completes, then confirm two
+completed runs in fresh directories agree byte for byte before copying either
+one.
 
 Then run the test suite and record the new provenance (below) in this README.
 `QPA_ORACLE_WRITE=1 cargo +1.92 test --test qpa_oracle` regenerates
@@ -66,21 +97,34 @@ Then run the test suite and record the new provenance (below) in this README.
 
 ## Provenance of the committed `qpa_expected.json`
 
-- Generated: 2026-08-05, on Arch Linux, package `gap 4.16.0-2`
+- Generated: 2026-08-06, on Arch Linux, package `gap 4.16.0-2`
   (`/usr/bin/gap`, `GAPInfo.Version` = `4.16dev`).
 - QPA: version 1.36, loaded from `~/.gap/pkg/qpa`, a git clone at
   `v1.36-20-g9100462`.
-- Command: `cd "$(mktemp -d)" && /usr/bin/gap -q -T
-  .../tests/qpa-oracle/generate_fixtures.g && cp fixtures_qpa.json
-  .../tests/qpa-oracle/qpa_expected.json` (23 fixtures written; schema v5).
-- SHA-256: `b1a6222275a618623f61772b9b71d37ea139c9205a47369a338ff61c4732bf2a`.
-- Two independent runs in fresh temp dirs produced byte-identical output.
+- Command: `cd "$(mktemp -d)" && /usr/bin/gap -q -T -m 1g
+  .../tests/qpa-oracle/generate_fixtures.g` (23 fixtures written; schema v6),
+  about 73 s of CPU time per run.
+- SHA-256: `d4e3561f3d9b58111381d35da7b6c6d5174d33e3152a798f3d5724fb3a9dde0c`.
+- Two completed runs in fresh temp dirs produced byte-identical output.
+- The only change against the previous committed file (SHA-256
+  `69f0c6d9e8f2505b0df4f46490df60c2c8573ac4eba8c42f2f6086cbc0b64428`,
+  generated 2026-08-05 by the same tool chain) is the rename of the
+  `yoneda_products` key `rank` to `yoneda_map_rank` in all 43 entries, the
+  field name the v0.4 design binds. Renaming the key in the old file
+  reproduces this one byte for byte.
+- Every v5 field of every fixture is byte for byte the schema v5 file the
+  2026-08-05 run replaced (SHA-256
+  `b1a6222275a618623f61772b9b71d37ea139c9205a47369a338ff61c4732bf2a`).
+  Deleting the v6 lines and restoring the schema string reproduces it exactly.
 
-## Schema v5
+## Schema v6
+
+Schema v6 is schema v5 unchanged, plus the Auslander-Reiten fields at the end of
+every fixture, plus the schema string. The envelope keys are the same.
 
 ```json
 {
-  "schema": "auslander-qpa-oracle-v5",
+  "schema": "auslander-qpa-oracle-v6",
   "convention": "right",
   "max_ext_degree": 4,
   "projdim_bound": 6,
@@ -121,7 +165,51 @@ Then run the test suite and record the new provenance (below) in this README.
         "module": "radicals-of-projectives",
         "summands": [{"dimvec": [0, 0, 0, 1], "multiplicity": 2}, "..."]
       },
-      "ext": ["..."]
+      "ext": ["..."],
+      "designated_modules": [{"kind": "simple", "index": 0}, "..."],
+      "ar_sequences": [
+        {
+          "module": {"kind": "simple", "index": 0},
+          "projective": false,
+          "tau": [1, 1, 1, 0],
+          "middle_dimvec": [2, 1, 1, 0],
+          "middle": [{"dimvec": [1, 0, 1, 0], "multiplicity": 1}, "..."],
+          "num_middle_summands": 2
+        },
+        {"module": {"kind": "simple", "index": 3}, "projective": true},
+        "..."
+      ],
+      "irreducible_maps": [
+        {
+          "module": {"kind": "simple", "index": 0},
+          "into": {
+            "present": true,
+            "total": 2,
+            "sources": [{"dimvec": [1, 0, 1, 0], "valuation": 1}, "..."]
+          },
+          "out_of": {"present": false, "total": 0, "targets": []}
+        },
+        "..."
+      ],
+      "ext_algebra": {
+        "module": "sum-of-simples",
+        "max_degree": 4,
+        "dims": [4, 4, 1, 0, 0],
+        "min_generators": [4, 4, 0, 0, 0],
+        "product_rank": [0, 0, 1, 0, 0]
+      },
+      "yoneda_products": [
+        {
+          "i": 0, "j": 1, "k": 3,
+          "dim_ext1_ij": 1, "dim_ext1_jk": 1, "dim_ext2_ik": 1,
+          "yoneda_map_rank": 1
+        },
+        "..."
+      ],
+      "stable_hom": [[1, 0, 0, 0, "..."], "..."],
+      "tau_rigid": [true, "..."],
+      "rigid": [true, "..."],
+      "tau_period": [{"none_up_to": 6}, "..."]
     }
   ]
 }
@@ -195,10 +283,64 @@ Result fields, all computed by QPA. Vertex `i` (0-based) indexes the simple
   dimension vectors with multiplicity, not on isomorphism classes.
 - `ext[i][j][k]` = `dim Ext^k(S_i, S_j)` for `k = 0..max_ext_degree`.
 
+Auslander-Reiten fields, new in v6. They all run over one fixed list:
+
+- `designated_modules`: every simple `S_i` as `{"kind": "simple", "index": i}`,
+  then every indecomposable projective `P_i`, then every indecomposable
+  injective `I_i`, in vertex order, so the list has `3 * num_vertices` entries.
+  They come from `SimpleModules`, `IndecProjectiveModules` and
+  `IndecInjectiveModules` in that order. A module is named by kind and index and
+  never looked up by its dimension vector: on `kronecker-2` the dimension
+  vector `[1, 1]` belongs to `field + 1` pairwise non-isomorphic modules, so a
+  dimension vector does not identify anything there. A module that is both
+  simple and projective is listed twice, once per kind, and both entries carry
+  the same results.
+- `ar_sequences[m]`: the almost-split sequence ending at designated module `m`,
+  from QPA's `AlmostSplitSequence(M, "r")`. `"projective": true` records that
+  QPA returned `fail`, which happens exactly on the projectives; the other
+  fields are then absent. Otherwise `tau` is the dimension vector of the start
+  term, checked against `DTr(M)` during generation, `middle_dimvec` is the
+  dimension vector of the middle term, `middle` lists its Krull-Schmidt
+  summands as dimension vectors with multiplicities (sorted, equal dimension
+  vectors merged, as in `decomposition`), and `num_middle_summands` counts them
+  with multiplicity.
+- `irreducible_maps[m]`: the irreducible morphisms into and out of `m`. `into`
+  reports `IrreducibleMorphismsEndingIn`, `out_of` reports
+  `IrreducibleMorphismsStartingIn`. `present` is false exactly where QPA has no
+  such morphism to offer: a projective with zero radical has nothing ending in
+  it, and an injective equal to its socle has nothing starting from it. `total`
+  counts the morphisms, and `sources` (resp. `targets`) lists the endpoint
+  dimension vectors, sorted, with `valuation` the number of morphisms merged
+  into that entry.
+- `ext_algebra`: `ExtAlgebraGenerators(A/rad, max_degree)` on
+  `A/rad = sum of all simples`. `dims[k]` = `dim Ext^k(A/rad, A/rad)` for
+  `k = 0..max_degree`, `min_generators[k]` counts the minimal generators of the
+  Yoneda algebra in degree `k`, and `product_rank` is the elementwise
+  difference: the rank of the multiplication into degree `k`. Only this module
+  is reported, because `rad End(A/rad) = 0` makes the difference the genuine
+  Yoneda product rank.
+- `yoneda_products`: one entry per ordered triple of simple indices with
+  `dim Ext^1(S_i, S_j) > 0` and `dim Ext^1(S_j, S_k) > 0`. `yoneda_map_rank`
+  is the rank of the image of
+  `Ext^1(S_i, S_j) x Ext^1(S_j, S_k) -> Ext^2(S_i, S_k)` in
+  `Ext^2(S_i, S_k)`, whose dimension is `dim_ext2_ik`. The three dimensions
+  repeat values that `ext` already stores, which cross-checks the two routes.
+- `stable_hom[a][b]` = `dim Hom(M_a, M_b)` minus the dimension of the subspace
+  of morphisms that factor through a projective, over designated modules `a`
+  and `b`.
+- `tau_rigid[m]` and `rigid[m]`: `IsTauRigidModule` and `IsRigidModule`.
+- `tau_period[m]`: `{"period": i}` when `DTr^i(M) = M` for the smallest such
+  `i` inside the bound, else `{"none_up_to": bound}`. The bound is 6 for every
+  fixture except `inclusion-ambiguity`, where it is 3: the tau orbit of the
+  simple module there has dimensions 1, 8, 26, 86, 284, and the fifth step
+  alone costs over a minute. A value never claims a larger bound than it
+  checked.
+
 Schema history: v1 through v4 stored one implicit global field and untyped
-values. The reader rejects every schema string except
-`auslander-qpa-oracle-v5`, so a stale oracle file fails loudly instead of
-silently skipping checks.
+values. v5 added the per-fixture field and presentation. v6 adds the
+Auslander-Reiten fields above and changes nothing else. The reader rejects
+every schema string it does not implement, so a stale oracle file fails loudly
+instead of silently skipping checks.
 
 JSON is written and read by hand: the schema is small and fixed, so string
 formatting plus a strict recursive-descent reader replaces a serde dependency.
@@ -269,8 +411,8 @@ New in v5. The square quiver is `a: 0->1` (arrow 0), `b: 1->3` (1),
   term drops, and the ideal degenerates to the monomial ideal `(ab)`.
 
 Every result of `redundant-presentation` and `permuted-presentation` in the
-committed file is equal to `commutative-square` `f5`, verified after
-generation.
+committed file is equal to `commutative-square` `f5`, on the v5 fields and on
+the v6 fields alike, verified after generation.
 
 ## Characteristic sensitivity
 
@@ -285,6 +427,19 @@ generation.
   `[0, 1, 0, 0] + [0, 0, 1, 1]` because `ab = 0` cuts the socle; over F_3 it
   is indecomposable with dimension vector `[0, 1, 1, 1]`. The summand lists
   are `{[0,0,0,1] x2, [0,0,1,1], [0,1,0,0]}` vs `{[0,0,0,1] x2, [0,1,1,1]}`.
+
+The v6 fields separate the two cases further. `ext_algebra` and `rigid` agree;
+`ar_sequences`, `irreducible_maps`, `yoneda_products`, `stable_hom`,
+`tau_rigid` and `tau_period` differ. The sharpest three:
+
+- `yoneda_products`: the triple `(S_0, S_2, S_3)` has `yoneda_map_rank` 0
+  over F_2 and 1 over F_3, from equal factor dimensions `1, 1` into an equal
+  `dim Ext^2 = 1`. The product of two nonzero Ext classes dies in one
+  characteristic and survives in the other.
+- `tau_period`: `S_1` is tau-periodic with period 2 over F_2 and has no period
+  up to 6 over F_3.
+- `tau_rigid`: `I_3` is tau-rigid over F_3 and not over F_2, which is the
+  same degeneration that makes `I_3` projective over F_3 only.
 
 ## Conventions
 
