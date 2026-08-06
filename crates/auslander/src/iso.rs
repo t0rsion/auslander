@@ -86,8 +86,8 @@ pub(crate) fn indecomposable_iso(m: &Module, n: &Module, endo_m: &EndoAlgebra) -
     if m.dim_vector() != n.dim_vector() {
         return None;
     }
-    let forward = hom(m, n).expect("summands share one algebra and field");
-    let backward = hom(n, m).expect("summands share one algebra and field");
+    let forward = hom(m, n).expect("summands share one algebra");
+    let backward = hom(n, m).expect("summands share one algebra");
     for h in &forward {
         for k in &backward {
             let u = h.then(k).expect("endpoints agree");
@@ -125,7 +125,7 @@ fn certified_single(d: &Decomposition) -> bool {
 
 /// Whether `m ≅ n`: a verified witness, a proof of non-isomorphism, or
 /// [`IsoOutcome::Unknown`] when neither could be certified. Errors only when
-/// the modules do not share one algebra (the same `Arc`) and field.
+/// the modules do not share one algebra (the same `Arc`).
 pub fn is_isomorphic(m: &Module, n: &Module) -> Result<IsoOutcome, HomError> {
     let zero = zero_morphism(m, n)?;
     if m.dim_vector() != n.dim_vector() {
@@ -264,12 +264,12 @@ mod tests {
     #[test]
     fn a_module_is_isomorphic_to_itself_and_to_a_fresh_copy() {
         for field in fields() {
-            let a = linear_an(3);
-            let p0 = Module::projective(&a, field, 0);
+            let a = linear_an(3, field);
+            let p0 = Module::projective(&a, 0);
             expect_witness(is_isomorphic(&p0, &p0).unwrap(), &p0, &p0);
-            let copy = Module::projective(&a, field, 0);
+            let copy = Module::projective(&a, 0);
             expect_witness(is_isomorphic(&p0, &copy).unwrap(), &p0, &copy);
-            let s1 = Module::simple(&a, field, 1);
+            let s1 = Module::simple(&a, 1);
             let (sum, _, _) = direct_sum(&[&p0, &s1]);
             let (sum2, _, _) = direct_sum(&[&s1, &p0]);
             expect_witness(is_isomorphic(&sum, &sum).unwrap(), &sum, &sum);
@@ -280,9 +280,9 @@ mod tests {
     #[test]
     fn p0_and_i2_over_a3_are_isomorphic() {
         for field in fields() {
-            let a = linear_an(3);
-            let p0 = Module::projective(&a, field, 0);
-            let i2 = Module::injective(&a, field, 2);
+            let a = linear_an(3, field);
+            let p0 = Module::projective(&a, 0);
+            let i2 = Module::injective(&a, 2);
             expect_witness(is_isomorphic(&p0, &i2).unwrap(), &p0, &i2);
         }
     }
@@ -290,12 +290,12 @@ mod tests {
     #[test]
     fn a_conjugated_module_is_isomorphic_to_the_original() {
         for field in fields() {
-            let a = dual_numbers();
+            let a = dual_numbers(field);
             let x = DenseMat::from_rows(&[
                 vec![field.zero(), field.one()],
                 vec![field.zero(), field.zero()],
             ]);
-            let m = Module::new(a.clone(), field, vec![2], vec![x]).unwrap();
+            let m = Module::new(a.clone(), vec![2], vec![x]).unwrap();
             // Conjugate by T = [[1, 1], [0, 1]]: N(a) = T⁻¹ M(a) T.
             let conjugated = DenseMat::from_rows(&[
                 vec![field.zero(), field.one()],
@@ -309,7 +309,7 @@ mod tests {
                 let t_inv = matrix_inverse(&t, &field).unwrap();
                 t_inv.mul(&conjugated, &field).mul(&t, &field)
             };
-            let n = Module::new(a, field, vec![2], vec![conjugated]).unwrap();
+            let n = Module::new(a, vec![2], vec![conjugated]).unwrap();
             expect_witness(is_isomorphic(&m, &n).unwrap(), &m, &n);
         }
     }
@@ -317,9 +317,9 @@ mod tests {
     #[test]
     fn modules_with_different_dimension_vectors_are_distinguished() {
         for field in fields() {
-            let a = linear_an(3);
-            let s0 = Module::simple(&a, field, 0);
-            let s1 = Module::simple(&a, field, 1);
+            let a = linear_an(3, field);
+            let s0 = Module::simple(&a, 0);
+            let s1 = Module::simple(&a, 1);
             assert_eq!(
                 is_isomorphic(&s0, &s1).unwrap(),
                 IsoOutcome::NotIsomorphic(Obstruction::DimensionVector {
@@ -336,10 +336,9 @@ mod tests {
     #[test]
     fn nonisomorphic_kronecker_modules_hit_the_radical_criterion() {
         for field in fields() {
-            let a = kronecker(2);
+            let a = kronecker(2, field);
             let m = Module::new(
                 a.clone(),
-                field,
                 vec![1, 1],
                 vec![
                     DenseMat::from_rows(&[vec![field.one()]]),
@@ -349,7 +348,6 @@ mod tests {
             .unwrap();
             let n = Module::new(
                 a,
-                field,
                 vec![1, 1],
                 vec![
                     DenseMat::from_rows(&[vec![field.zero()]]),
@@ -368,10 +366,10 @@ mod tests {
     #[test]
     fn an_indecomposable_and_a_semisimple_sum_differ_by_loewy_series() {
         for field in fields() {
-            let a = linear_an(2);
-            let p0 = Module::projective(&a, field, 0);
-            let s0 = Module::simple(&a, field, 0);
-            let s1 = Module::simple(&a, field, 1);
+            let a = linear_an(2, field);
+            let p0 = Module::projective(&a, 0);
+            let s0 = Module::simple(&a, 0);
+            let s1 = Module::simple(&a, 1);
             let (sum, _, _) = direct_sum(&[&s0, &s1]);
             assert_eq!(
                 is_isomorphic(&p0, &sum).unwrap(),
@@ -392,13 +390,12 @@ mod tests {
 
     // The regular Kronecker representation (a, b) ↦ ([1], [λ]) for a scalar λ.
     fn kronecker_regular(
-        a: &std::sync::Arc<crate::algebra::MonomialAlgebra>,
+        a: &std::sync::Arc<crate::algebra::Algebra>,
         field: PrimeField,
         lambda: i64,
     ) -> Module {
         Module::new(
             a.clone(),
-            field,
             vec![1, 1],
             vec![
                 DenseMat::from_rows(&[vec![field.one()]]),
@@ -414,7 +411,7 @@ mod tests {
     #[test]
     fn endomorphism_dimension_asymmetry_is_a_typed_obstruction() {
         for field in fields() {
-            let a = kronecker(2);
+            let a = kronecker(2, field);
             let m = kronecker_regular(&a, field, 0);
             let n = kronecker_regular(&a, field, 1);
             let (mm, _, _) = direct_sum(&[&m, &m]);
@@ -436,12 +433,11 @@ mod tests {
     #[test]
     fn hom_symmetric_sums_are_distinguished_by_summand_matching() {
         for field in fields() {
-            let a = kronecker(2);
+            let a = kronecker(2, field);
             let m0 = kronecker_regular(&a, field, 0);
             let m1 = kronecker_regular(&a, field, 1);
             let minf = Module::new(
                 a.clone(),
-                field,
                 vec![1, 1],
                 vec![
                     DenseMat::from_rows(&[vec![field.zero()]]),
@@ -463,27 +459,30 @@ mod tests {
     #[test]
     fn zero_modules_are_isomorphic() {
         let field = PrimeField::new(5).unwrap();
-        let a = linear_an(3);
-        let z1 = Module::zero(&a, field);
-        let z2 = Module::zero(&a, field);
+        let a = linear_an(3, field);
+        let z1 = Module::zero(&a);
+        let z2 = Module::zero(&a);
         expect_witness(is_isomorphic(&z1, &z2).unwrap(), &z1, &z2);
     }
 
     #[test]
     fn mismatched_algebras_and_fields_are_rejected() {
         let field = PrimeField::new(5).unwrap();
-        let a = linear_an(3);
-        let b = linear_an(3);
-        let m = Module::simple(&a, field, 0);
-        let n = Module::simple(&b, field, 0);
+        let a = linear_an(3, field);
+        let b = linear_an(3, field);
+        let m = Module::simple(&a, 0);
+        let n = Module::simple(&b, 0);
         assert_eq!(
             is_isomorphic(&m, &n).unwrap_err(),
             HomError::DifferentAlgebras
         );
-        let other = Module::simple(&a, PrimeField::new(7).unwrap(), 0);
+        // The field lives on the algebra, so a different field means a
+        // different algebra value.
+        let over_f7 = linear_an(3, PrimeField::new(7).unwrap());
+        let other = Module::simple(&over_f7, 0);
         assert_eq!(
             is_isomorphic(&m, &other).unwrap_err(),
-            HomError::DifferentFields
+            HomError::DifferentAlgebras
         );
     }
 }

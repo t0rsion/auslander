@@ -68,8 +68,8 @@ pub fn projective_cover(m: &Module) -> (Module, Morphism) {
     let field = m.field();
     let algebra = m.algebra().clone();
     if m.is_zero() {
-        let p = Module::zero(&algebra, field);
-        let cover = zero_morphism(&p, m).expect("zero module shares algebra and field with m");
+        let p = Module::zero(&algebra);
+        let cover = zero_morphism(&p, m).expect("zero module shares its algebra with m");
         return (p, cover);
     }
     let quiver = algebra.quiver();
@@ -89,9 +89,7 @@ pub fn projective_cover(m: &Module) -> (Module, Morphism) {
             generators.push((v, lift));
         }
     }
-    let projectives: Vec<Module> = (0..n)
-        .map(|v| Module::projective(&algebra, field, v))
-        .collect();
+    let projectives: Vec<Module> = (0..n).map(|v| Module::projective(&algebra, v)).collect();
     let parts: Vec<&Module> = generators
         .iter()
         .map(|&(v, _)| &projectives[v as usize])
@@ -198,14 +196,8 @@ pub fn minimal_presentation_matrix(m: &Module) -> ElementMatrix {
     let resolution = resolve(m, 1);
     let targets = cover_summands(m);
     match resolution.maps.first() {
-        None => ElementMatrix::new(
-            m.algebra().clone(),
-            m.field(),
-            Vec::new(),
-            targets,
-            Vec::new(),
-        )
-        .expect("cover summand vertices are in range"),
+        None => ElementMatrix::new(m.algebra().clone(), Vec::new(), targets, Vec::new())
+            .expect("cover summand vertices are in range"),
         Some(d1) => {
             // P_1 covers Ω¹ m and shares its top, so its summands are read off
             // top P_1.
@@ -245,11 +237,14 @@ mod tests {
     #[test]
     fn cover_of_a_simple_is_the_indecomposable_projective() {
         let field = f5();
-        for algebra in [linear_an(3), an_with_relations(3, &[(0, 2)]).unwrap()] {
+        for algebra in [
+            linear_an(3, field),
+            an_with_relations(3, &[(0, 2)], field).unwrap(),
+        ] {
             for v in 0..algebra.quiver().num_vertices() {
-                let s = Module::simple(&algebra, field, v);
+                let s = Module::simple(&algebra, v);
                 let (p, cover) = projective_cover(&s);
-                let pv = Module::projective(&algebra, field, v);
+                let pv = Module::projective(&algebra, v);
                 assert_eq!(p.dim_vector(), pv.dim_vector(), "cover of S_{v}");
                 assert!(!cover.is_zero());
             }
@@ -258,8 +253,8 @@ mod tests {
 
     #[test]
     fn cover_of_the_zero_module_is_zero() {
-        let algebra = linear_an(3);
-        let z = Module::zero(&algebra, f5());
+        let algebra = linear_an(3, f5());
+        let z = Module::zero(&algebra);
         let (p, cover) = projective_cover(&z);
         assert!(p.is_zero());
         assert!(cover.is_zero());
@@ -271,11 +266,11 @@ mod tests {
 
     #[test]
     fn a3_simples_have_pd_1_1_0() {
-        let algebra = linear_an(3);
         let field = f5();
+        let algebra = linear_an(3, field);
         let expected = [1usize, 1, 0];
         for v in 0..3u32 {
-            let s = Module::simple(&algebra, field, v);
+            let s = Module::simple(&algebra, v);
             assert_eq!(
                 projective_dimension(&s, 5),
                 Bounded::Exact(expected[v as usize]),
@@ -286,10 +281,10 @@ mod tests {
 
     #[test]
     fn a3_projectives_resolve_finitely_in_one_term() {
-        let algebra = linear_an(3);
         let field = f5();
+        let algebra = linear_an(3, field);
         for v in 0..3u32 {
-            let p = Module::projective(&algebra, field, v);
+            let p = Module::projective(&algebra, v);
             let res = resolve(&p, 5);
             assert_eq!(res.end, ResolutionEnd::Finite, "P_{v}");
             assert_eq!(res.terms.len(), 1, "P_{v}");
@@ -302,16 +297,16 @@ mod tests {
     // P_2. Hence 0 → P_2 → P_1 → P_0 → S_0 → 0 and pd S_0 = 2.
     #[test]
     fn a3_mod_ab_simple_0_has_pd_2_with_terms_p0_p1_p2() {
-        let algebra = an_with_relations(3, &[(0, 2)]).unwrap();
         let field = f5();
-        let s0 = Module::simple(&algebra, field, 0);
+        let algebra = an_with_relations(3, &[(0, 2)], field).unwrap();
+        let s0 = Module::simple(&algebra, 0);
         let res = resolve(&s0, 5);
         assert_eq!(res.end, ResolutionEnd::Finite);
         let dims: Vec<&[usize]> = res.terms.iter().map(Module::dim_vector).collect();
         assert_eq!(dims, vec![&[1, 1, 0][..], &[0, 1, 1], &[0, 0, 1]]);
         assert_eq!(projective_dimension(&s0, 5), Bounded::Exact(2));
-        let s1 = Module::simple(&algebra, field, 1);
-        let s2 = Module::simple(&algebra, field, 2);
+        let s1 = Module::simple(&algebra, 1);
+        let s2 = Module::simple(&algebra, 2);
         assert_eq!(projective_dimension(&s1, 5), Bounded::Exact(1));
         assert_eq!(projective_dimension(&s2, 5), Bounded::Exact(0));
     }
@@ -320,9 +315,9 @@ mod tests {
     // every term the regular module of dimension 2.
     #[test]
     fn dual_numbers_simple_resolves_periodically_and_pd_is_at_least_bound_plus_1() {
-        let algebra = dual_numbers();
         let field = f5();
-        let s = Module::simple(&algebra, field, 0);
+        let algebra = dual_numbers(field);
+        let s = Module::simple(&algebra, 0);
         let res = resolve(&s, 6);
         assert_eq!(res.end, ResolutionEnd::Cut { at: 6 });
         assert_eq!(res.terms.len(), 7);
@@ -334,22 +329,22 @@ mod tests {
 
     #[test]
     fn resolve_with_zero_steps_reports_cut_for_a_nonprojective_module() {
-        let algebra = dual_numbers();
         let field = f5();
-        let s = Module::simple(&algebra, field, 0);
+        let algebra = dual_numbers(field);
+        let s = Module::simple(&algebra, 0);
         let res = resolve(&s, 0);
         assert_eq!(res.end, ResolutionEnd::Cut { at: 0 });
         assert_eq!(res.terms.len(), 1);
-        let p = Module::projective(&algebra, field, 0);
+        let p = Module::projective(&algebra, 0);
         assert_eq!(resolve(&p, 0).end, ResolutionEnd::Finite);
     }
 
     #[test]
     fn radical_square_zero_cycle_simples_have_unbounded_pd() {
-        let algebra = radical_square_zero_cycle(3);
         let field = f5();
+        let algebra = radical_square_zero_cycle(3, field);
         for v in 0..3u32 {
-            let s = Module::simple(&algebra, field, v);
+            let s = Module::simple(&algebra, v);
             assert_eq!(projective_dimension(&s, 7), Bounded::AtLeast(8), "pd S_{v}");
         }
     }
@@ -358,18 +353,18 @@ mod tests {
         let field = f5();
         let mut modules = Vec::new();
         for algebra in [
-            linear_an(3),
-            an_with_relations(3, &[(0, 2)]).unwrap(),
-            dual_numbers(),
-            truncated_poly(3).unwrap(),
-            radical_square_zero_cycle(3),
+            linear_an(3, field),
+            an_with_relations(3, &[(0, 2)], field).unwrap(),
+            dual_numbers(field),
+            truncated_poly(3, field).unwrap(),
+            radical_square_zero_cycle(3, field),
         ] {
             for v in 0..algebra.quiver().num_vertices() {
-                modules.push(Module::simple(&algebra, field, v));
-                modules.push(Module::injective(&algebra, field, v));
+                modules.push(Module::simple(&algebra, v));
+                modules.push(Module::injective(&algebra, v));
             }
-            let s0 = Module::simple(&algebra, field, 0);
-            let i_last = Module::injective(&algebra, field, algebra.quiver().num_vertices() - 1);
+            let s0 = Module::simple(&algebra, 0);
+            let i_last = Module::injective(&algebra, algebra.quiver().num_vertices() - 1);
             let (sum, _, _) = direct_sum(&[&s0, &i_last]);
             modules.push(sum);
         }
@@ -437,8 +432,8 @@ mod tests {
 
     #[test]
     fn minimal_presentation_matrix_of_a_projective_has_no_source_summands() {
-        let algebra = linear_an(3);
-        let p1 = Module::projective(&algebra, f5(), 1);
+        let algebra = linear_an(3, f5());
+        let p1 = Module::projective(&algebra, 1);
         let matrix = minimal_presentation_matrix(&p1);
         assert!(matrix.sources().is_empty());
         assert_eq!(matrix.targets(), &[1]);

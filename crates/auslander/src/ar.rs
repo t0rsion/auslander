@@ -18,6 +18,7 @@
 
 use std::fmt;
 
+use crate::algebra::AlgebraBuildError;
 use crate::hom::{cokernel, kernel};
 use crate::iso::{IsoOutcome, Obstruction, is_isomorphic};
 use crate::module::Module;
@@ -43,6 +44,10 @@ pub enum Tau {
 /// It says nothing about whether the routes agree.
 #[derive(Clone, Debug)]
 pub enum TauError {
+    /// Building the opposite algebra failed, so the transpose-dual route
+    /// could not run. This is an engine limit or defect, not a statement
+    /// about the module.
+    Opposite(AlgebraBuildError),
     /// [`crate::iso::is_isomorphic`] proved the two routes non-isomorphic.
     RoutesDisagree {
         /// `ker(ν(d1))`.
@@ -67,6 +72,9 @@ pub enum TauError {
 impl fmt::Display for TauError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Opposite(error) => {
+                write!(f, "building the opposite algebra failed: {error}")
+            }
             Self::RoutesDisagree {
                 nakayama_kernel,
                 transpose_dual,
@@ -92,7 +100,14 @@ impl fmt::Display for TauError {
     }
 }
 
-impl std::error::Error for TauError {}
+impl std::error::Error for TauError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Opposite(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 /// Route 1: `τM = ker(ν(d1))` for the minimal presentation `P_1 -d1-> P_0`.
 /// Zero exactly when `m` is projective.
@@ -107,9 +122,11 @@ fn nakayama_kernel_route(d1: &ElementMatrix) -> Module {
 /// Route 2: `τM = D(Tr M)` with `Tr M = coker(Hom_A(d1, A))`, the transposed
 /// element matrix realized between opposite-side projectives. Zero exactly
 /// when `m` is projective. The result lives over the same algebra [`std::sync::Arc`]
-/// as `m`.
-pub fn tau_via_transpose_dual(m: &Module) -> Module {
-    transpose_dual_route(&minimal_presentation_matrix(m), &opposite(m.algebra()))
+/// as `m`. Errors with [`TauError::Opposite`] when building the opposite
+/// algebra fails.
+pub fn tau_via_transpose_dual(m: &Module) -> Result<Module, TauError> {
+    let op = opposite(m.algebra()).map_err(TauError::Opposite)?;
+    Ok(transpose_dual_route(&minimal_presentation_matrix(m), &op))
 }
 
 fn transpose_dual_route(d1: &ElementMatrix, op: &OppositeMap) -> Module {
@@ -131,9 +148,10 @@ fn transpose_dual_route(d1: &ElementMatrix, op: &OppositeMap) -> Module {
 pub fn tau(m: &Module) -> Result<Tau, TauError> {
     let d1 = minimal_presentation_matrix(m);
     let nakayama_kernel = nakayama_kernel_route(&d1);
-    let transpose_dual = transpose_dual_route(&d1, &opposite(m.algebra()));
+    let op = opposite(m.algebra()).map_err(TauError::Opposite)?;
+    let transpose_dual = transpose_dual_route(&d1, &op);
     let outcome = is_isomorphic(&nakayama_kernel, &transpose_dual)
-        .expect("both routes land over m's algebra Arc and field");
+        .expect("both routes land over m's algebra Arc");
     match outcome {
         IsoOutcome::Isomorphic(_) => {}
         IsoOutcome::NotIsomorphic(obstruction) => {
@@ -171,18 +189,18 @@ mod tests {
     #[test]
     fn nakayama_kernel_route_recovers_hand_derived_translates() {
         for field in fields() {
-            let a3 = linear_an(3);
+            let a3 = linear_an(3, field);
             assert_eq!(
-                tau_via_nakayama_kernel(&Module::simple(&a3, field, 0)).dim_vector(),
+                tau_via_nakayama_kernel(&Module::simple(&a3, 0)).dim_vector(),
                 &[0, 1, 0]
             );
             assert_eq!(
-                tau_via_nakayama_kernel(&Module::simple(&a3, field, 1)).dim_vector(),
+                tau_via_nakayama_kernel(&Module::simple(&a3, 1)).dim_vector(),
                 &[0, 0, 1]
             );
-            let kron = kronecker(2);
+            let kron = kronecker(2, field);
             assert_eq!(
-                tau_via_nakayama_kernel(&Module::simple(&kron, field, 0)).dim_vector(),
+                tau_via_nakayama_kernel(&Module::simple(&kron, 0)).dim_vector(),
                 &[3, 2]
             );
         }
@@ -192,12 +210,12 @@ mod tests {
     fn nakayama_kernel_route_is_zero_on_projectives() {
         for field in fields() {
             for algebra in [
-                linear_an(3),
-                dual_numbers(),
-                cyclic_nakayama(&[3, 3, 3]).unwrap(),
+                linear_an(3, field),
+                dual_numbers(field),
+                cyclic_nakayama(&[3, 3, 3], field).unwrap(),
             ] {
                 for v in 0..algebra.quiver().num_vertices() {
-                    let p = Module::projective(&algebra, field, v);
+                    let p = Module::projective(&algebra, v);
                     assert!(tau_via_nakayama_kernel(&p).is_zero(), "τ P_{v}");
                 }
             }
@@ -207,9 +225,9 @@ mod tests {
     #[test]
     fn transpose_dual_route_lands_over_the_same_algebra_arc() {
         for field in fields() {
-            let a3 = linear_an(3);
-            let s0 = Module::simple(&a3, field, 0);
-            let t = tau_via_transpose_dual(&s0);
+            let a3 = linear_an(3, field);
+            let s0 = Module::simple(&a3, 0);
+            let t = tau_via_transpose_dual(&s0).unwrap();
             assert!(std::sync::Arc::ptr_eq(t.algebra(), &a3));
             assert_eq!(t.dim_vector(), &[0, 1, 0]);
         }
@@ -219,14 +237,14 @@ mod tests {
     fn tau_is_zero_exactly_on_projectives() {
         for field in fields() {
             for algebra in [
-                linear_an(3),
-                dual_numbers(),
-                cyclic_nakayama(&[3, 3, 3]).unwrap(),
+                linear_an(3, field),
+                dual_numbers(field),
+                cyclic_nakayama(&[3, 3, 3], field).unwrap(),
             ] {
                 for v in 0..algebra.quiver().num_vertices() {
-                    let p = Module::projective(&algebra, field, v);
+                    let p = Module::projective(&algebra, v);
                     assert!(matches!(tau(&p).unwrap(), Tau::Zero), "τ P_{v}");
-                    let s = Module::simple(&algebra, field, v);
+                    let s = Module::simple(&algebra, v);
                     if s.dim_vector() == p.dim_vector() {
                         continue;
                     }
@@ -241,8 +259,8 @@ mod tests {
 
     #[test]
     fn tau_of_the_zero_module_is_zero() {
-        let a = linear_an(3);
-        let z = Module::zero(&a, PrimeField::new(5).unwrap());
+        let a = linear_an(3, PrimeField::new(5).unwrap());
+        let z = Module::zero(&a);
         assert!(matches!(tau(&z).unwrap(), Tau::Zero));
     }
 
@@ -250,15 +268,15 @@ mod tests {
     fn both_routes_agree_on_every_simple_of_the_fixtures() {
         for field in fields() {
             for algebra in [
-                linear_an(3),
-                kronecker(2),
-                dual_numbers(),
-                cyclic_nakayama(&[3, 3, 3]).unwrap(),
+                linear_an(3, field),
+                kronecker(2, field),
+                dual_numbers(field),
+                cyclic_nakayama(&[3, 3, 3], field).unwrap(),
             ] {
                 for v in 0..algebra.quiver().num_vertices() {
-                    let s = Module::simple(&algebra, field, v);
+                    let s = Module::simple(&algebra, v);
                     let left = tau_via_nakayama_kernel(&s);
-                    let right = tau_via_transpose_dual(&s);
+                    let right = tau_via_transpose_dual(&s).unwrap();
                     assert!(
                         matches!(
                             is_isomorphic(&left, &right).unwrap(),

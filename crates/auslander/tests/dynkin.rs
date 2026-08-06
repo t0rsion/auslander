@@ -3,7 +3,8 @@
 
 use std::sync::Arc;
 
-use auslander::algebra::{MonomialAlgebra, an_with_relations, kronecker};
+use auslander::algebra::{Algebra, MonomialPresentation, an_with_relations, kronecker};
+use auslander::completion::CompletionLimits;
 use auslander::decompose::Certificate;
 use auslander::dynkin::{
     DynkinError, DynkinType, EuclideanType, dynkin_indecomposables, dynkin_quiver, dynkin_type,
@@ -24,8 +25,11 @@ fn fields() -> [PrimeField; 3] {
     ]
 }
 
-fn path_algebra(quiver: Quiver) -> Arc<MonomialAlgebra> {
-    MonomialAlgebra::new(quiver, Vec::new()).expect("an acyclic quiver has a finite kQ")
+fn path_algebra(quiver: Quiver, field: PrimeField) -> Arc<Algebra> {
+    let presentation =
+        MonomialPresentation::new(quiver, Vec::new()).expect("an acyclic quiver has a finite kQ");
+    Algebra::from_monomial(field, &presentation, &CompletionLimits::default())
+        .expect("the zero ideal completes")
 }
 
 fn small_types() -> Vec<DynkinType> {
@@ -44,8 +48,8 @@ fn indecomposable_counts_are_n_n_plus_one_over_two_for_a_and_n_n_minus_one_for_d
     for field in fields() {
         for n in 1..=6 {
             let t = DynkinType::A(n);
-            let algebra = path_algebra(dynkin_quiver(t).unwrap());
-            let modules = dynkin_indecomposables(&algebra, field).unwrap();
+            let algebra = path_algebra(dynkin_quiver(t).unwrap(), field);
+            let modules = dynkin_indecomposables(&algebra).unwrap();
             assert_eq!(
                 modules.len(),
                 n * (n + 1) / 2,
@@ -55,8 +59,8 @@ fn indecomposable_counts_are_n_n_plus_one_over_two_for_a_and_n_n_minus_one_for_d
         }
         for n in 4..=6 {
             let t = DynkinType::D(n);
-            let algebra = path_algebra(dynkin_quiver(t).unwrap());
-            let modules = dynkin_indecomposables(&algebra, field).unwrap();
+            let algebra = path_algebra(dynkin_quiver(t).unwrap(), field);
+            let modules = dynkin_indecomposables(&algebra).unwrap();
             assert_eq!(modules.len(), n * (n - 1), "{t} over F_{}", field.modulus());
         }
     }
@@ -70,8 +74,8 @@ fn the_exceptional_types_have_thirty_six_sixty_three_and_one_hundred_twenty_inde
             (DynkinType::E7, 63),
             (DynkinType::E8, 120),
         ] {
-            let algebra = path_algebra(dynkin_quiver(t).unwrap());
-            let modules = dynkin_indecomposables(&algebra, field).unwrap();
+            let algebra = path_algebra(dynkin_quiver(t).unwrap(), field);
+            let modules = dynkin_indecomposables(&algebra).unwrap();
             assert_eq!(modules.len(), count, "{t} over F_{}", field.modulus());
         }
     }
@@ -86,8 +90,8 @@ fn constructed_dimension_vectors_are_exactly_the_positive_roots() {
         {
             let quiver = dynkin_quiver(t).unwrap();
             let roots = positive_roots(&quiver).unwrap();
-            let algebra = path_algebra(quiver);
-            let built: Vec<Vec<usize>> = dynkin_indecomposables(&algebra, field)
+            let algebra = path_algebra(quiver, field);
+            let built: Vec<Vec<usize>> = dynkin_indecomposables(&algebra)
                 .unwrap()
                 .iter()
                 .map(|(m, _)| m.dim_vector().to_vec())
@@ -101,8 +105,8 @@ fn constructed_dimension_vectors_are_exactly_the_positive_roots() {
 fn every_constructed_module_is_certified_indecomposable() {
     for field in fields() {
         for t in small_types().into_iter().chain([DynkinType::E6]) {
-            let algebra = path_algebra(dynkin_quiver(t).unwrap());
-            for (m, certificate) in dynkin_indecomposables(&algebra, field).unwrap() {
+            let algebra = path_algebra(dynkin_quiver(t).unwrap(), field);
+            for (m, certificate) in dynkin_indecomposables(&algebra).unwrap() {
                 assert_eq!(
                     certificate,
                     Certificate::Indecomposable,
@@ -119,8 +123,8 @@ fn every_constructed_module_is_certified_indecomposable() {
 fn every_constructed_module_is_a_brick_without_self_extensions() {
     for field in fields() {
         for t in small_types().into_iter().chain([DynkinType::E6]) {
-            let algebra = path_algebra(dynkin_quiver(t).unwrap());
-            for (m, _) in dynkin_indecomposables(&algebra, field).unwrap() {
+            let algebra = path_algebra(dynkin_quiver(t).unwrap(), field);
+            for (m, _) in dynkin_indecomposables(&algebra).unwrap() {
                 assert_eq!(
                     hom_dim(&m, &m).unwrap(),
                     1,
@@ -144,8 +148,8 @@ fn every_constructed_module_is_a_brick_without_self_extensions() {
 fn constructed_modules_are_pairwise_non_isomorphic() {
     for field in fields() {
         for t in small_types() {
-            let algebra = path_algebra(dynkin_quiver(t).unwrap());
-            let modules = dynkin_indecomposables(&algebra, field).unwrap();
+            let algebra = path_algebra(dynkin_quiver(t).unwrap(), field);
+            let modules = dynkin_indecomposables(&algebra).unwrap();
             assert_eq!(modules.len(), t.indecomposable_count().unwrap());
             for (i, (m, _)) in modules.iter().enumerate() {
                 for (n, _) in modules.iter().skip(i + 1) {
@@ -166,13 +170,13 @@ fn constructed_modules_are_pairwise_non_isomorphic() {
 fn every_projective_and_every_simple_occurs_among_the_constructed_modules() {
     for field in fields() {
         for t in [DynkinType::A(4), DynkinType::D(4)] {
-            let algebra = path_algebra(dynkin_quiver(t).unwrap());
-            let modules = dynkin_indecomposables(&algebra, field).unwrap();
+            let algebra = path_algebra(dynkin_quiver(t).unwrap(), field);
+            let modules = dynkin_indecomposables(&algebra).unwrap();
             for v in 0..algebra.quiver().num_vertices() {
                 for expected in [
-                    Module::projective(&algebra, field, v),
-                    Module::injective(&algebra, field, v),
-                    Module::simple(&algebra, field, v),
+                    Module::projective(&algebra, v),
+                    Module::injective(&algebra, v),
+                    Module::simple(&algebra, v),
                 ] {
                     assert!(
                         modules.iter().any(|(m, _)| matches!(
@@ -201,8 +205,8 @@ fn every_orientation_of_a4_gives_the_same_dimension_vectors() {
         let mut seen: Option<Vec<Vec<usize>>> = None;
         for quiver in &orientations {
             assert_eq!(dynkin_type(quiver), Some(DynkinType::A(4)));
-            let algebra = path_algebra(quiver.clone());
-            let dims: Vec<Vec<usize>> = dynkin_indecomposables(&algebra, field)
+            let algebra = path_algebra(quiver.clone(), field);
+            let dims: Vec<Vec<usize>> = dynkin_indecomposables(&algebra)
                 .unwrap()
                 .iter()
                 .map(|(m, _)| m.dim_vector().to_vec())
@@ -217,12 +221,12 @@ fn every_orientation_of_a4_gives_the_same_dimension_vectors() {
 
 #[test]
 fn kronecker_2_is_euclidean_and_rejected_by_the_dynkin_enumerator() {
-    let algebra = kronecker(2);
-    assert_eq!(euclidean_type(algebra.quiver()), Some(EuclideanType::A(1)));
-    assert_eq!(dynkin_type(algebra.quiver()), None);
     for field in fields() {
+        let algebra = kronecker(2, field);
+        assert_eq!(euclidean_type(algebra.quiver()), Some(EuclideanType::A(1)));
+        assert_eq!(dynkin_type(algebra.quiver()), None);
         assert_eq!(
-            dynkin_indecomposables(&algebra, field).unwrap_err(),
+            dynkin_indecomposables(&algebra).unwrap_err(),
             DynkinError::NotDynkin {
                 euclidean: Some(EuclideanType::A(1)),
             }
@@ -232,12 +236,12 @@ fn kronecker_2_is_euclidean_and_rejected_by_the_dynkin_enumerator() {
 
 #[test]
 fn a_bound_a3_is_rejected_for_its_nonzero_ideal() {
-    let algebra = an_with_relations(3, &[(0, 2)]).unwrap();
-    assert_eq!(dynkin_type(algebra.quiver()), Some(DynkinType::A(3)));
     for field in fields() {
+        let algebra = an_with_relations(3, &[(0, 2)], field).unwrap();
+        assert_eq!(dynkin_type(algebra.quiver()), Some(DynkinType::A(3)));
         assert_eq!(
-            dynkin_indecomposables(&algebra, field).unwrap_err(),
-            DynkinError::NonzeroIdeal { forbidden_words: 1 }
+            dynkin_indecomposables(&algebra).unwrap_err(),
+            DynkinError::NonzeroIdeal { relations: 1 }
         );
     }
 }

@@ -9,9 +9,8 @@
 use std::fmt;
 use std::sync::Arc;
 
-use crate::algebra::MonomialAlgebra;
+use crate::algebra::Algebra;
 use crate::decompose::{Certificate, decompose};
-use crate::field::PrimeField;
 use crate::hom::cokernel;
 use crate::module::Module;
 use crate::radical::radical;
@@ -54,8 +53,7 @@ impl std::error::Error for EnumerateError {}
 /// exact local-endomorphism computation must certify a uniserial module, so any
 /// other outcome is an upstream bug.
 pub fn nakayama_indecomposables(
-    algebra: &Arc<MonomialAlgebra>,
-    field: PrimeField,
+    algebra: &Arc<Algebra>,
 ) -> Result<Vec<(Module, Certificate)>, EnumerateError> {
     let quiver = algebra.quiver();
     for v in 0..quiver.num_vertices() {
@@ -71,7 +69,7 @@ pub fn nakayama_indecomposables(
     }
     let mut modules = Vec::with_capacity(algebra.dim());
     for v in 0..quiver.num_vertices() {
-        let p = Module::projective(algebra, field, v);
+        let p = Module::projective(algebra, v);
         let (mut rad_power, mut inclusion) = radical(&p);
         loop {
             modules.push(certified(cokernel(&inclusion).0));
@@ -111,6 +109,7 @@ mod tests {
         cyclic_nakayama, dual_numbers, kronecker, linear_nakayama, radical_square_zero_cycle,
         truncated_poly,
     };
+    use crate::field::PrimeField;
 
     fn fields() -> [PrimeField; 2] {
         [PrimeField::new(2).unwrap(), PrimeField::new(5).unwrap()]
@@ -120,14 +119,14 @@ mod tests {
     fn count_equals_the_sum_of_the_kupisch_series() {
         for field in fields() {
             for algebra in [
-                linear_nakayama(&[3, 2, 1]).unwrap(),
-                linear_nakayama(&[2, 2, 1]).unwrap(),
-                cyclic_nakayama(&[3, 3, 3]).unwrap(),
-                radical_square_zero_cycle(3),
-                dual_numbers(),
-                truncated_poly(4).unwrap(),
+                linear_nakayama(&[3, 2, 1], field).unwrap(),
+                linear_nakayama(&[2, 2, 1], field).unwrap(),
+                cyclic_nakayama(&[3, 3, 3], field).unwrap(),
+                radical_square_zero_cycle(3, field),
+                dual_numbers(field),
+                truncated_poly(4, field).unwrap(),
             ] {
-                let modules = nakayama_indecomposables(&algebra, field).unwrap();
+                let modules = nakayama_indecomposables(&algebra).unwrap();
                 assert_eq!(modules.len(), algebra.dim());
                 assert!(
                     modules
@@ -141,8 +140,8 @@ mod tests {
     #[test]
     fn linear_3_2_1_lists_the_six_uniserial_dimension_vectors() {
         for field in fields() {
-            let algebra = linear_nakayama(&[3, 2, 1]).unwrap();
-            let dims: Vec<Vec<usize>> = nakayama_indecomposables(&algebra, field)
+            let algebra = linear_nakayama(&[3, 2, 1], field).unwrap();
+            let dims: Vec<Vec<usize>> = nakayama_indecomposables(&algebra)
                 .unwrap()
                 .iter()
                 .map(|(m, _)| m.dim_vector().to_vec())
@@ -164,8 +163,8 @@ mod tests {
     #[test]
     fn truncated_poly_lists_every_jordan_block_dimension() {
         for field in fields() {
-            let algebra = truncated_poly(4).unwrap();
-            let dims: Vec<usize> = nakayama_indecomposables(&algebra, field)
+            let algebra = truncated_poly(4, field).unwrap();
+            let dims: Vec<usize> = nakayama_indecomposables(&algebra)
                 .unwrap()
                 .iter()
                 .map(|(m, _)| m.total_dim())
@@ -176,9 +175,9 @@ mod tests {
 
     #[test]
     fn a_vertex_with_two_outgoing_arrows_is_rejected() {
-        let algebra = kronecker(2);
+        let algebra = kronecker(2, PrimeField::new(5).unwrap());
         assert_eq!(
-            nakayama_indecomposables(&algebra, PrimeField::new(5).unwrap()).unwrap_err(),
+            nakayama_indecomposables(&algebra).unwrap_err(),
             EnumerateError::NotNakayama {
                 vertex: 0,
                 incoming: 0,

@@ -18,8 +18,10 @@
 use std::sync::Arc;
 
 use auslander::algebra::{
-    MonomialAlgebra, an_with_relations, cyclic_nakayama, dual_numbers, linear_an,
+    Algebra, MonomialPresentation, an_with_relations, commutative_square, cyclic_nakayama,
+    dual_numbers, linear_an,
 };
+use auslander::completion::CompletionLimits;
 use auslander::ext::ext_table;
 use auslander::field::{Fp, PrimeField};
 use auslander::hom::{Morphism, hom, hom_dim, kernel};
@@ -67,21 +69,24 @@ fn fields() -> [PrimeField; 2] {
     [PrimeField::new(2).unwrap(), PrimeField::new(3).unwrap()]
 }
 
-fn gentle_tree() -> Arc<MonomialAlgebra> {
+fn gentle_tree(field: PrimeField) -> Arc<Algebra> {
     let quiver = Quiver::new(4, &[(0, 1), (1, 2), (1, 3)]).unwrap();
-    MonomialAlgebra::new(quiver, vec![vec![ArrowId(0), ArrowId(1)]]).unwrap()
+    let presentation =
+        MonomialPresentation::new(quiver, vec![vec![ArrowId(0), ArrowId(1)]]).unwrap();
+    Algebra::from_monomial(field, &presentation, &CompletionLimits::default()).unwrap()
 }
 
-fn algebras() -> Vec<(&'static str, Arc<MonomialAlgebra>)> {
+fn algebras(field: PrimeField) -> Vec<(&'static str, Arc<Algebra>)> {
     vec![
-        ("linear_an_3", linear_an(3)),
-        ("a3_mod_ab", an_with_relations(3, &[(0, 2)]).unwrap()),
-        ("gentle_tree", gentle_tree()),
+        ("linear_an_3", linear_an(3, field)),
+        ("a3_mod_ab", an_with_relations(3, &[(0, 2)], field).unwrap()),
+        ("gentle_tree", gentle_tree(field)),
         (
             "cyclic_nakayama_3_3_3",
-            cyclic_nakayama(&[3, 3, 3]).unwrap(),
+            cyclic_nakayama(&[3, 3, 3], field).unwrap(),
         ),
-        ("dual_numbers", dual_numbers()),
+        ("dual_numbers", dual_numbers(field)),
+        ("commutative_square", commutative_square(field)),
     ]
 }
 
@@ -111,20 +116,16 @@ fn vstack(a: &DenseMat, b: &DenseMat) -> DenseMat {
 
 /// Generator (a), first half: a random direct sum of projectives, simples, and
 /// injectives with total dimension at most [`MAX_TOTAL_DIM`].
-fn random_sum_module(
-    rng: &mut XorShift64,
-    algebra: &Arc<MonomialAlgebra>,
-    field: PrimeField,
-) -> Module {
+fn random_sum_module(rng: &mut XorShift64, algebra: &Arc<Algebra>) -> Module {
     let n = algebra.quiver().num_vertices();
     let mut parts: Vec<Module> = Vec::new();
     let mut total = 0usize;
     for _ in 0..1 + rng.below(3) {
         let v = rng.below(u64::from(n)) as u32;
         let part = match rng.below(3) {
-            0 => Module::simple(algebra, field, v),
-            1 => Module::projective(algebra, field, v),
-            _ => Module::injective(algebra, field, v),
+            0 => Module::simple(algebra, v),
+            1 => Module::projective(algebra, v),
+            _ => Module::injective(algebra, v),
         };
         if total + part.total_dim() > MAX_TOTAL_DIM {
             break;
@@ -133,7 +134,7 @@ fn random_sum_module(
         parts.push(part);
     }
     if parts.is_empty() {
-        parts.push(Module::simple(algebra, field, 0));
+        parts.push(Module::simple(algebra, 0));
     }
     let refs: Vec<&Module> = parts.iter().collect();
     direct_sum(&refs).0
@@ -211,7 +212,7 @@ fn random_basis_change(rng: &mut XorShift64, m: &Module) -> (Module, Vec<DenseMa
             g[s].mul(m.map(a), &field).mul(&g_inv[t], &field)
         })
         .collect();
-    let transformed = Module::new(m.algebra().clone(), field, m.dim_vector().to_vec(), maps)
+    let transformed = Module::new(m.algebra().clone(), m.dim_vector().to_vec(), maps)
         .expect("a vertexwise basis change preserves the relations");
     (transformed, g)
 }
@@ -277,7 +278,7 @@ fn submodule_from_closure(m: &Module, bases: &[DenseMat]) -> (Module, Morphism) 
             rows_in_basis(&bases[v], &bases[u].mul(m.map(a), &field), &field)
         })
         .collect();
-    let sub = Module::new(m.algebra().clone(), field, dims, maps)
+    let sub = Module::new(m.algebra().clone(), dims, maps)
         .expect("the arrow closure carries a submodule");
     let inclusion =
         Morphism::new(&sub, m, bases.to_vec()).expect("the closure inclusion is A-linear");
@@ -314,7 +315,7 @@ fn quotient_from_closure(m: &Module, bases: &[DenseMat]) -> (Module, Morphism) {
             c
         })
         .collect();
-    let quotient = Module::new(m.algebra().clone(), field, dims, maps)
+    let quotient = Module::new(m.algebra().clone(), dims, maps)
         .expect("the quotient by a closed submodule is a module");
     let projection =
         Morphism::new(m, &quotient, projections).expect("the quotient projection is A-linear");
@@ -338,7 +339,7 @@ fn ext_table_via_generic_hom(m: &Module, n: &Module, max_k: usize) -> Vec<usize>
     let bases: Vec<Vec<Morphism>> = res
         .terms
         .iter()
-        .map(|t| hom(t, n).expect("resolution terms share algebra and field with n"))
+        .map(|t| hom(t, n).expect("resolution terms share their algebra with n"))
         .collect();
     let flatten = |f: &Morphism| -> Vec<Fp> {
         let mut out = Vec::new();
@@ -380,10 +381,10 @@ fn ext_table_via_generic_hom(m: &Module, n: &Module, max_k: usize) -> Vec<usize>
 
 fn for_each_case(
     test: u64,
-    mut body: impl FnMut(&mut XorShift64, &Arc<MonomialAlgebra>, PrimeField, &str),
+    mut body: impl FnMut(&mut XorShift64, &Arc<Algebra>, PrimeField, &str),
 ) {
     for field in fields() {
-        for (algebra_idx, (name, algebra)) in algebras().iter().enumerate() {
+        for (algebra_idx, (name, algebra)) in algebras(field).iter().enumerate() {
             for case in 0..CASES {
                 let seed = case_seed(test, field.modulus(), algebra_idx, case);
                 println!(
@@ -399,8 +400,8 @@ fn for_each_case(
 
 #[test]
 fn basis_changed_sums_stay_valid_isomorphic_and_hom_ext_invariant() {
-    for_each_case(1, |rng, algebra, field, name| {
-        let m = random_sum_module(rng, algebra, field);
+    for_each_case(1, |rng, algebra, _field, name| {
+        let m = random_sum_module(rng, algebra);
         let (t, g) = random_basis_change(rng, &m);
         assert_eq!(t.dim_vector(), m.dim_vector(), "{name}");
         let iso = Morphism::new(&t, &m, g).expect("the G_v matrices form a morphism M' -> M");
@@ -410,7 +411,7 @@ fn basis_changed_sums_stay_valid_isomorphic_and_hom_ext_invariant() {
         );
         let n = algebra.quiver().num_vertices();
         for v in 0..n {
-            let s = Module::simple(algebra, field, v);
+            let s = Module::simple(algebra, v);
             assert_eq!(
                 hom_dim(&t, &s).unwrap(),
                 hom_dim(&m, &s).unwrap(),
@@ -428,7 +429,7 @@ fn basis_changed_sums_stay_valid_isomorphic_and_hom_ext_invariant() {
             "{name}: dim End changed under basis change"
         );
         let v = rng.below(u64::from(n)) as u32;
-        let s = Module::simple(algebra, field, v);
+        let s = Module::simple(algebra, v);
         assert_eq!(
             ext_table(&t, &s, 2).unwrap(),
             ext_table(&m, &s, 2).unwrap(),
@@ -439,8 +440,8 @@ fn basis_changed_sums_stay_valid_isomorphic_and_hom_ext_invariant() {
 
 #[test]
 fn closed_submodules_and_quotients_are_modules_with_exact_dimensions() {
-    for_each_case(2, |rng, algebra, field, name| {
-        let m = random_sum_module(rng, algebra, field);
+    for_each_case(2, |rng, algebra, _field, name| {
+        let m = random_sum_module(rng, algebra);
         let bases = random_closed_submodule_bases(rng, &m);
         let (sub, inclusion) = submodule_from_closure(&m, &bases);
         let (quotient, projection) = quotient_from_closure(&m, &bases);
@@ -459,7 +460,7 @@ fn closed_submodules_and_quotients_are_modules_with_exact_dimensions() {
 #[test]
 fn covers_of_random_modules_are_surjective_with_syzygy_in_the_radical() {
     for_each_case(3, |rng, algebra, field, name| {
-        let base = random_sum_module(rng, algebra, field);
+        let base = random_sum_module(rng, algebra);
         let (transformed, _) = random_basis_change(rng, &base);
         let bases = random_closed_submodule_bases(rng, &base);
         let (sub, _) = submodule_from_closure(&base, &bases);
@@ -490,7 +491,7 @@ fn covers_of_random_modules_are_surjective_with_syzygy_in_the_radical() {
 #[test]
 fn resolution_prefixes_of_random_modules_are_exact_complexes() {
     for_each_case(4, |rng, algebra, field, name| {
-        let base = random_sum_module(rng, algebra, field);
+        let base = random_sum_module(rng, algebra);
         let (transformed, _) = random_basis_change(rng, &base);
         let bases = random_closed_submodule_bases(rng, &base);
         let (sub, _) = submodule_from_closure(&base, &bases);
@@ -538,15 +539,12 @@ fn resolution_prefixes_of_random_modules_are_exact_complexes() {
 
 #[test]
 fn yoneda_ext_agrees_with_generic_hom_cochain_ext() {
-    for_each_case(5, |rng, algebra, field, name| {
-        let base = random_sum_module(rng, algebra, field);
+    for_each_case(5, |rng, algebra, _field, name| {
+        let base = random_sum_module(rng, algebra);
         let (m, _) = random_basis_change(rng, &base);
         let nv = algebra.quiver().num_vertices();
         let v = rng.below(u64::from(nv)) as u32;
-        let targets = [
-            Module::simple(algebra, field, v),
-            Module::injective(algebra, field, v),
-        ];
+        let targets = [Module::simple(algebra, v), Module::injective(algebra, v)];
         for n in &targets {
             assert_eq!(
                 ext_table(&m, n, 2).unwrap(),
@@ -559,15 +557,15 @@ fn yoneda_ext_agrees_with_generic_hom_cochain_ext() {
 
 #[test]
 fn hom_into_an_injective_has_the_dimension_of_the_module_at_its_vertex() {
-    for_each_case(6, |rng, algebra, field, name| {
-        let base = random_sum_module(rng, algebra, field);
+    for_each_case(6, |rng, algebra, _field, name| {
+        let base = random_sum_module(rng, algebra);
         let (transformed, _) = random_basis_change(rng, &base);
         let bases = random_closed_submodule_bases(rng, &base);
         let (sub, _) = submodule_from_closure(&base, &bases);
         let (quotient, _) = quotient_from_closure(&base, &bases);
         for m in [&base, &transformed, &sub, &quotient] {
             for v in 0..algebra.quiver().num_vertices() {
-                let injective = Module::injective(algebra, field, v);
+                let injective = Module::injective(algebra, v);
                 assert_eq!(
                     hom_dim(m, &injective).unwrap(),
                     m.dim_at(v),

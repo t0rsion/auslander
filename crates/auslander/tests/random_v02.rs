@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use auslander::algebra::{
-    MonomialAlgebra, an_with_relations, cyclic_nakayama, dual_numbers, linear_an,
+    Algebra, an_with_relations, commutative_square, cyclic_nakayama, dual_numbers, linear_an,
 };
 use auslander::ar::{Tau, tau};
 use auslander::decompose::{Certificate, IsoClass, KrullSchmidtOutcome, decompose, krull_schmidt};
@@ -68,15 +68,16 @@ fn fields() -> [PrimeField; 3] {
     ]
 }
 
-fn algebras() -> Vec<(&'static str, Arc<MonomialAlgebra>)> {
+fn algebras(field: PrimeField) -> Vec<(&'static str, Arc<Algebra>)> {
     vec![
-        ("linear_an_3", linear_an(3)),
-        ("a3_mod_ab", an_with_relations(3, &[(0, 2)]).unwrap()),
+        ("linear_an_3", linear_an(3, field)),
+        ("a3_mod_ab", an_with_relations(3, &[(0, 2)], field).unwrap()),
         (
             "cyclic_nakayama_3_3_3",
-            cyclic_nakayama(&[3, 3, 3]).unwrap(),
+            cyclic_nakayama(&[3, 3, 3], field).unwrap(),
         ),
-        ("dual_numbers", dual_numbers()),
+        ("dual_numbers", dual_numbers(field)),
+        ("commutative_square", commutative_square(field)),
     ]
 }
 
@@ -86,21 +87,16 @@ fn rand_elem(rng: &mut XorShift64, field: &PrimeField) -> Fp {
 
 /// A random direct sum of projectives, simples, and injectives with total
 /// dimension at most `budget`.
-fn random_sum_module(
-    rng: &mut XorShift64,
-    algebra: &Arc<MonomialAlgebra>,
-    field: PrimeField,
-    budget: usize,
-) -> Module {
+fn random_sum_module(rng: &mut XorShift64, algebra: &Arc<Algebra>, budget: usize) -> Module {
     let n = algebra.quiver().num_vertices();
     let mut parts: Vec<Module> = Vec::new();
     let mut total = 0usize;
     for _ in 0..1 + rng.below(3) {
         let v = rng.below(u64::from(n)) as u32;
         let part = match rng.below(3) {
-            0 => Module::simple(algebra, field, v),
-            1 => Module::projective(algebra, field, v),
-            _ => Module::injective(algebra, field, v),
+            0 => Module::simple(algebra, v),
+            1 => Module::projective(algebra, v),
+            _ => Module::injective(algebra, v),
         };
         if total + part.total_dim() > budget {
             break;
@@ -109,7 +105,7 @@ fn random_sum_module(
         parts.push(part);
     }
     if parts.is_empty() {
-        parts.push(Module::simple(algebra, field, 0));
+        parts.push(Module::simple(algebra, 0));
     }
     let refs: Vec<&Module> = parts.iter().collect();
     direct_sum(&refs).0
@@ -187,16 +183,13 @@ fn random_basis_change(rng: &mut XorShift64, m: &Module) -> Module {
             g[s].mul(m.map(a), &field).mul(&g_inv[t], &field)
         })
         .collect();
-    Module::new(m.algebra().clone(), field, m.dim_vector().to_vec(), maps)
+    Module::new(m.algebra().clone(), m.dim_vector().to_vec(), maps)
         .expect("a vertexwise basis change preserves the relations")
 }
 
-fn for_each_case(
-    test: u64,
-    mut body: impl FnMut(&mut XorShift64, &Arc<MonomialAlgebra>, PrimeField, &str),
-) {
+fn for_each_case(test: u64, mut body: impl FnMut(&mut XorShift64, &Arc<Algebra>, &str)) {
     for field in fields() {
-        for (algebra_idx, (name, algebra)) in algebras().iter().enumerate() {
+        for (algebra_idx, (name, algebra)) in algebras(field).iter().enumerate() {
             for case in 0..CASES {
                 let seed = case_seed(test, field.modulus(), algebra_idx, case);
                 println!(
@@ -204,14 +197,14 @@ fn for_each_case(
                     field.modulus()
                 );
                 let mut rng = XorShift64(seed);
-                body(&mut rng, algebra, field, name);
+                body(&mut rng, algebra, name);
             }
         }
     }
 }
 
 fn certified_isomorphic(m: &Module, n: &Module, context: &str) -> Morphism {
-    match is_isomorphic(m, n).expect("modules share one algebra and field") {
+    match is_isomorphic(m, n).expect("modules share one algebra") {
         IsoOutcome::Isomorphic(witness) => witness,
         other => panic!("{context}: expected an isomorphism, got {other:?}"),
     }
@@ -238,7 +231,7 @@ fn same_class_multiset(a: &[IsoClass], b: &[IsoClass]) -> bool {
                 && cb.multiplicity == ca.multiplicity
                 && matches!(
                     is_isomorphic(&ca.representative, &cb.representative)
-                        .expect("representatives share one algebra and field"),
+                        .expect("representatives share one algebra"),
                     IsoOutcome::Isomorphic(_)
                 )
         }) {
@@ -253,8 +246,8 @@ fn same_class_multiset(a: &[IsoClass], b: &[IsoClass]) -> bool {
 
 #[test]
 fn decompose_certifies_every_summand_and_reassembles_to_the_original() {
-    for_each_case(1, |rng, algebra, field, name| {
-        let base = random_sum_module(rng, algebra, field, MAX_TOTAL_DIM);
+    for_each_case(1, |rng, algebra, name| {
+        let base = random_sum_module(rng, algebra, MAX_TOTAL_DIM);
         let m = random_basis_change(rng, &base);
         let d = decompose(&m);
         assert!(d.split().total().ptr_eq(&m), "{name}: split total is not m");
@@ -283,10 +276,10 @@ fn decompose_certifies_every_summand_and_reassembles_to_the_original() {
 fn krull_schmidt_classes_are_invariant_under_permutation_and_reassociation() {
     // A smaller budget than elsewhere: the triple sums grow to three times it,
     // and endomorphism algebras get expensive quickly.
-    for_each_case(2, |rng, algebra, field, name| {
-        let m = random_sum_module(rng, algebra, field, 4);
-        let n = random_sum_module(rng, algebra, field, 4);
-        let l = random_sum_module(rng, algebra, field, 4);
+    for_each_case(2, |rng, algebra, name| {
+        let m = random_sum_module(rng, algebra, 4);
+        let n = random_sum_module(rng, algebra, 4);
+        let l = random_sum_module(rng, algebra, 4);
         let mn = direct_sum(&[&m, &n]).0;
         let nm = direct_sum(&[&n, &m]).0;
         assert!(
@@ -308,10 +301,10 @@ fn krull_schmidt_classes_are_invariant_under_permutation_and_reassociation() {
 
 #[test]
 fn tau_routes_agree_and_tau_distributes_over_direct_sums() {
-    for_each_case(3, |rng, algebra, field, name| {
-        let base_m = random_sum_module(rng, algebra, field, MAX_TOTAL_DIM);
+    for_each_case(3, |rng, algebra, name| {
+        let base_m = random_sum_module(rng, algebra, MAX_TOTAL_DIM);
         let m = random_basis_change(rng, &base_m);
-        let base_n = random_sum_module(rng, algebra, field, MAX_TOTAL_DIM);
+        let base_n = random_sum_module(rng, algebra, MAX_TOTAL_DIM);
         let n = random_basis_change(rng, &base_n);
         // tau() itself runs both routes and errors on disagreement, so every
         // unwrap here is a broad route-agreement check.

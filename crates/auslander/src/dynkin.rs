@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::algebra::MonomialAlgebra;
+use crate::algebra::Algebra;
 use crate::decompose::{Certificate, decompose};
 use crate::field::{Fp, PrimeField};
 use crate::linalg::DenseMat;
@@ -320,11 +320,11 @@ pub fn euclidean_quiver(euclidean: EuclideanType) -> Option<Quiver> {
 /// Rejected input for [`dynkin_indecomposables`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DynkinError {
-    /// The algebra has minimal forbidden words, so it is a proper quotient of
-    /// `kQ`. Gabriel's theorem lists the indecomposables of `kQ` itself.
+    /// The algebra has relations, so it is a proper quotient of `kQ`.
+    /// Gabriel's theorem lists the indecomposables of `kQ` itself.
     NonzeroIdeal {
-        /// Number of minimal forbidden words the algebra carries.
-        forbidden_words: usize,
+        /// Number of Groebner relations the algebra carries.
+        relations: usize,
     },
     /// The underlying graph of the quiver is no Dynkin diagram, so `kQ` is not
     /// representation finite by Gabriel's theorem. `euclidean` reports the
@@ -338,9 +338,9 @@ pub enum DynkinError {
 impl fmt::Display for DynkinError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NonzeroIdeal { forbidden_words } => write!(
+            Self::NonzeroIdeal { relations } => write!(
                 f,
-                "the algebra has {forbidden_words} minimal forbidden words; \
+                "the algebra has {relations} relations; \
                  Gabriel's theorem needs the full path algebra"
             ),
             Self::NotDynkin { euclidean: None } => {
@@ -373,13 +373,13 @@ impl std::error::Error for DynkinError {}
 /// `kQ`, [`DynkinError::NotDynkin`] when the underlying graph is no Dynkin
 /// diagram.
 pub fn dynkin_indecomposables(
-    algebra: &Arc<MonomialAlgebra>,
-    field: PrimeField,
+    algebra: &Arc<Algebra>,
 ) -> Result<Vec<(Module, Certificate)>, DynkinError> {
-    let forbidden_words = algebra.forbidden().len();
-    if forbidden_words > 0 {
-        return Err(DynkinError::NonzeroIdeal { forbidden_words });
+    let relations = algebra.relations().len();
+    if relations > 0 {
+        return Err(DynkinError::NonzeroIdeal { relations });
     }
+    let field = algebra.field();
     let quiver = algebra.quiver();
     if dynkin_type(quiver).is_none() {
         return Err(DynkinError::NotDynkin {
@@ -396,7 +396,7 @@ pub fn dynkin_indecomposables(
             &rep.dims, root,
             "reflection chain landed on the wrong dimension vector; library bug"
         );
-        let m = Module::new(algebra.clone(), field, rep.dims, rep.maps)
+        let m = Module::new(algebra.clone(), rep.dims, rep.maps)
             .expect("a representation of kQ with no relations is a module");
         let d = decompose(&m);
         assert_eq!(
@@ -790,8 +790,15 @@ mod tests {
     use crate::algebra::{an_with_relations, kronecker, linear_an};
     use crate::iso::{IsoOutcome, is_isomorphic};
 
-    fn path_algebra(quiver: Quiver) -> Arc<MonomialAlgebra> {
-        MonomialAlgebra::new(quiver, Vec::new()).expect("an acyclic quiver has a finite kQ")
+    fn path_algebra(quiver: Quiver, field: PrimeField) -> Arc<Algebra> {
+        let presentation = crate::algebra::MonomialPresentation::new(quiver, Vec::new())
+            .expect("an acyclic quiver has a finite kQ");
+        Algebra::from_monomial(
+            field,
+            &presentation,
+            &crate::completion::CompletionLimits::default(),
+        )
+        .expect("the zero ideal completes")
     }
 
     fn dynkin_types() -> Vec<DynkinType> {
@@ -921,7 +928,7 @@ mod tests {
 
     #[test]
     fn the_positive_roots_of_a3_are_the_six_intervals() {
-        let roots = positive_roots(linear_an(3).quiver()).unwrap();
+        let roots = positive_roots(linear_an(3, PrimeField::new(5).unwrap()).quiver()).unwrap();
         assert_eq!(
             roots,
             vec![
@@ -937,7 +944,10 @@ mod tests {
 
     #[test]
     fn a_euclidean_graph_has_no_positive_root_list() {
-        assert_eq!(positive_roots(kronecker(2).quiver()), None);
+        assert_eq!(
+            positive_roots(kronecker(2, PrimeField::new(5).unwrap()).quiver()),
+            None
+        );
     }
 
     #[test]
@@ -964,17 +974,17 @@ mod tests {
 
     #[test]
     fn a_bound_algebra_is_rejected_as_a_nonzero_ideal() {
-        let algebra = an_with_relations(3, &[(0, 2)]).unwrap();
+        let algebra = an_with_relations(3, &[(0, 2)], PrimeField::new(5).unwrap()).unwrap();
         assert_eq!(
-            dynkin_indecomposables(&algebra, PrimeField::new(5).unwrap()).unwrap_err(),
-            DynkinError::NonzeroIdeal { forbidden_words: 1 }
+            dynkin_indecomposables(&algebra).unwrap_err(),
+            DynkinError::NonzeroIdeal { relations: 1 }
         );
     }
 
     #[test]
     fn the_kronecker_algebra_is_rejected_as_affine_a_1() {
         assert_eq!(
-            dynkin_indecomposables(&kronecker(2), PrimeField::new(5).unwrap()).unwrap_err(),
+            dynkin_indecomposables(&kronecker(2, PrimeField::new(5).unwrap())).unwrap_err(),
             DynkinError::NotDynkin {
                 euclidean: Some(EuclideanType::A(1)),
             }
@@ -992,8 +1002,8 @@ mod tests {
         ] {
             let quiver = dynkin_quiver(t).unwrap();
             let roots = positive_roots(&quiver).unwrap();
-            let algebra = path_algebra(quiver);
-            let built: Vec<Vec<usize>> = dynkin_indecomposables(&algebra, field)
+            let algebra = path_algebra(quiver, field);
+            let built: Vec<Vec<usize>> = dynkin_indecomposables(&algebra)
                 .unwrap()
                 .iter()
                 .map(|(m, _)| m.dim_vector().to_vec())
@@ -1006,8 +1016,8 @@ mod tests {
     fn every_constructed_module_is_certified_indecomposable() {
         let field = PrimeField::new(2).unwrap();
         for t in [DynkinType::A(5), DynkinType::D(4)] {
-            let algebra = path_algebra(dynkin_quiver(t).unwrap());
-            for (_, certificate) in dynkin_indecomposables(&algebra, field).unwrap() {
+            let algebra = path_algebra(dynkin_quiver(t).unwrap(), field);
+            for (_, certificate) in dynkin_indecomposables(&algebra).unwrap() {
                 assert_eq!(certificate, Certificate::Indecomposable, "{t}");
             }
         }
@@ -1021,8 +1031,8 @@ mod tests {
             (DynkinType::E7, 63),
             (DynkinType::E8, 120),
         ] {
-            let algebra = path_algebra(dynkin_quiver(t).unwrap());
-            let modules = dynkin_indecomposables(&algebra, field).unwrap();
+            let algebra = path_algebra(dynkin_quiver(t).unwrap(), field);
+            let modules = dynkin_indecomposables(&algebra).unwrap();
             assert_eq!(modules.len(), count, "{t}");
             assert_eq!(t.indecomposable_count(), Some(count));
         }
@@ -1082,8 +1092,8 @@ mod tests {
     #[test]
     fn constructed_modules_are_pairwise_non_isomorphic() {
         let field = PrimeField::new(5).unwrap();
-        let algebra = path_algebra(dynkin_quiver(DynkinType::D(4)).unwrap());
-        let modules = dynkin_indecomposables(&algebra, field).unwrap();
+        let algebra = path_algebra(dynkin_quiver(DynkinType::D(4)).unwrap(), field);
+        let modules = dynkin_indecomposables(&algebra).unwrap();
         assert_eq!(modules.len(), 12);
         for (i, (m, _)) in modules.iter().enumerate() {
             for (n, _) in modules.iter().skip(i + 1) {

@@ -4,8 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "auslander"
-version = "0.2.0"
-description = "Finite-dimensional monomial bound quiver algebras kQ/I over prime fields, and their right modules"
+version = "0.3.0"
+description = "Finite-dimensional bound quiver algebras kQ/I over prime fields, and their right modules"
 requires-python = ">=3.10"
 license = "MIT OR Apache-2.0"
 license-files = ["LICENSE-MIT", "LICENSE-APACHE"]

@@ -22,8 +22,8 @@
 use std::fmt;
 use std::sync::Arc;
 
-use crate::algebra::MonomialAlgebra;
-use crate::field::{Fp, PrimeField};
+use crate::algebra::Algebra;
+use crate::field::Fp;
 use crate::hom::Morphism;
 use crate::linalg::DenseMat;
 use crate::module::Module;
@@ -33,17 +33,16 @@ use crate::resolution::{Bounded, projective_dimension, resolve};
 /// Rejected Ext input.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExtError {
-    /// The modules live over different algebras (distinct [`Arc`]s).
+    /// The modules live over different algebras (distinct [`Arc`]s). The
+    /// field comes from the algebra, so a shared algebra implies a shared
+    /// field.
     DifferentAlgebras,
-    /// The modules live over different fields.
-    DifferentFields,
 }
 
 impl fmt::Display for ExtError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DifferentAlgebras => f.write_str("modules live over different algebras"),
-            Self::DifferentFields => f.write_str("modules live over different fields"),
         }
     }
 }
@@ -163,15 +162,12 @@ fn check_pair(m: &Module, n: &Module) -> Result<(), ExtError> {
     if !Arc::ptr_eq(m.algebra(), n.algebra()) {
         return Err(ExtError::DifferentAlgebras);
     }
-    if m.field() != n.field() {
-        return Err(ExtError::DifferentFields);
-    }
     Ok(())
 }
 
 /// `[dim Ext^0(m, n), …, dim Ext^max_k(m, n)]`, each entry exact (see the module
 /// docs: the resolution prefix is always long enough). Errors when the modules
-/// do not share one algebra and field.
+/// do not share one algebra.
 pub fn ext_table(m: &Module, n: &Module, max_k: usize) -> Result<Vec<usize>, ExtError> {
     check_pair(m, n)?;
     let res = resolve(m, max_k + 1);
@@ -204,7 +200,7 @@ pub fn ext_table(m: &Module, n: &Module, max_k: usize) -> Result<Vec<usize>, Ext
 }
 
 /// `dim Ext^k_A(m, n)`, exact for every `k`. `Ext^0` is `dim Hom_A(m, n)`.
-/// Errors when the modules do not share one algebra and field.
+/// Errors when the modules do not share one algebra.
 pub fn ext_dim(m: &Module, n: &Module, k: usize) -> Result<usize, ExtError> {
     Ok(ext_table(m, n, k)?[k])
 }
@@ -212,21 +208,17 @@ pub fn ext_dim(m: &Module, n: &Module, k: usize) -> Result<usize, ExtError> {
 /// The global dimension of the algebra, resolved up to `bound` differentials.
 ///
 /// Infallible on valid input: the simples it resolves are constructed here over
-/// the given algebra and field, so no endpoint or field mismatch can arise.
+/// the given algebra, so no endpoint mismatch can arise.
 /// For a finite-dimensional algebra `gldim A = pd (A/rad A) = max_v pd S_v`: every
 /// module has a finite composition series with simple factors, so the supremum of
 /// projective dimensions is attained on the simples. Returns `Exact` when every
 /// simple resolves within `bound`, otherwise `AtLeast(bound + 1)` (the minimal
 /// resolution of some simple has a nonzero syzygy past the bound).
-pub fn global_dimension(
-    algebra: &Arc<MonomialAlgebra>,
-    field: PrimeField,
-    bound: usize,
-) -> Bounded<usize> {
+pub fn global_dimension(algebra: &Arc<Algebra>, bound: usize) -> Bounded<usize> {
     let mut max = 0usize;
     let mut cut = false;
     for v in 0..algebra.quiver().num_vertices() {
-        match projective_dimension(&Module::simple(algebra, field, v), bound) {
+        match projective_dimension(&Module::simple(algebra, v), bound) {
             Bounded::Exact(d) => max = max.max(d),
             Bounded::AtLeast(_) => cut = true,
         }
@@ -245,6 +237,7 @@ mod tests {
         an_with_relations, dual_numbers, kronecker, linear_an, radical_square_zero_cycle,
         truncated_poly,
     };
+    use crate::field::PrimeField;
     use crate::hom::hom_dim;
     use crate::module::direct_sum;
 
@@ -260,9 +253,9 @@ mod tests {
     // backwards; ASS III.2.12 states it for right modules).
     #[test]
     fn a3_ext_1_between_simples_counts_arrows_source_to_target() {
-        let algebra = linear_an(3);
         let field = f5();
-        let simples: Vec<Module> = (0..3).map(|v| Module::simple(&algebra, field, v)).collect();
+        let algebra = linear_an(3, field);
+        let simples: Vec<Module> = (0..3).map(|v| Module::simple(&algebra, v)).collect();
         for i in 0..3 {
             for j in 0..3 {
                 let expected = usize::from(j == i + 1);
@@ -281,7 +274,7 @@ mod tests {
             }
         }
         assert_eq!(ext_dim(&simples[1], &simples[0], 1).unwrap(), 0);
-        assert_eq!(global_dimension(&algebra, field, 5), Bounded::Exact(1));
+        assert_eq!(global_dimension(&algebra, 5), Bounded::Exact(1));
     }
 
     // kA_3/(ab), right modules: pd S_0 = 2 via 0 → P_2 → P_1 → P_0 → S_0 → 0.
@@ -293,9 +286,9 @@ mod tests {
     // ordered pairs, with no right-vs-left discrepancy.
     #[test]
     fn a3_mod_ab_ext_1_and_2_among_simples() {
-        let algebra = an_with_relations(3, &[(0, 2)]).unwrap();
         let field = f5();
-        let simples: Vec<Module> = (0..3).map(|v| Module::simple(&algebra, field, v)).collect();
+        let algebra = an_with_relations(3, &[(0, 2)], field).unwrap();
+        let simples: Vec<Module> = (0..3).map(|v| Module::simple(&algebra, v)).collect();
         for i in 0..3 {
             for j in 0..3 {
                 let ext1 = usize::from(j == i + 1);
@@ -313,16 +306,16 @@ mod tests {
                 assert_eq!(ext_dim(&simples[i], &simples[j], 3).unwrap(), 0);
             }
         }
-        assert_eq!(global_dimension(&algebra, field, 5), Bounded::Exact(2));
+        assert_eq!(global_dimension(&algebra, 5), Bounded::Exact(2));
     }
 
     #[test]
     fn dual_numbers_ext_table_of_the_simple_is_all_ones() {
-        let algebra = dual_numbers();
         let field = f5();
-        let s = Module::simple(&algebra, field, 0);
+        let algebra = dual_numbers(field);
+        let s = Module::simple(&algebra, 0);
         assert_eq!(ext_table(&s, &s, 4).unwrap(), vec![1, 1, 1, 1, 1]);
-        assert_eq!(global_dimension(&algebra, field, 6), Bounded::AtLeast(7));
+        assert_eq!(global_dimension(&algebra, 6), Bounded::AtLeast(7));
     }
 
     // k[x]/(x³) over F_3: the minimal resolution of S is Ω-periodic with period 2
@@ -330,9 +323,9 @@ mod tests {
     // Hom(P, S) = k with zero differentials throughout.
     #[test]
     fn truncated_poly_3_ext_table_of_the_simple_is_all_ones() {
-        let algebra = truncated_poly(3).unwrap();
         let field = PrimeField::new(3).unwrap();
-        let s = Module::simple(&algebra, field, 0);
+        let algebra = truncated_poly(3, field).unwrap();
+        let s = Module::simple(&algebra, 0);
         let res = resolve(&s, 5);
         for term in &res.terms {
             assert_eq!(term.dim_vector(), &[3]);
@@ -346,9 +339,9 @@ mod tests {
     // from arrow source to arrow target.
     #[test]
     fn radical_square_zero_cycle_ext_1_follows_the_arrows() {
-        let algebra = radical_square_zero_cycle(3);
         let field = f5();
-        let simples: Vec<Module> = (0..3).map(|v| Module::simple(&algebra, field, v)).collect();
+        let algebra = radical_square_zero_cycle(3, field);
+        let simples: Vec<Module> = (0..3).map(|v| Module::simple(&algebra, v)).collect();
         for i in 0..3 {
             for j in 0..3 {
                 let expected = usize::from(j == (i + 1) % 3);
@@ -359,38 +352,38 @@ mod tests {
                 );
             }
         }
-        assert_eq!(global_dimension(&algebra, field, 4), Bounded::AtLeast(5));
+        assert_eq!(global_dimension(&algebra, 4), Bounded::AtLeast(5));
     }
 
     // Regression against the old examples-db, which listed hereditary Kronecker
     // algebras as having infinite global dimension.
     #[test]
     fn kronecker_2_is_hereditary_with_global_dimension_1() {
-        let algebra = kronecker(2);
-        assert_eq!(global_dimension(&algebra, f5(), 5), Bounded::Exact(1));
+        let algebra = kronecker(2, f5());
+        assert_eq!(global_dimension(&algebra, 5), Bounded::Exact(1));
     }
 
     fn assorted_pairs() -> Vec<(Module, Module)> {
         let field = f5();
         let mut pairs = Vec::new();
         for algebra in [
-            linear_an(3),
-            an_with_relations(3, &[(0, 2)]).unwrap(),
-            dual_numbers(),
-            radical_square_zero_cycle(3),
+            linear_an(3, field),
+            an_with_relations(3, &[(0, 2)], field).unwrap(),
+            dual_numbers(field),
+            radical_square_zero_cycle(3, field),
         ] {
             let n = algebra.quiver().num_vertices();
             for v in 0..n {
-                let s = Module::simple(&algebra, field, v);
-                let p = Module::projective(&algebra, field, v);
-                let i = Module::injective(&algebra, field, v);
+                let s = Module::simple(&algebra, v);
+                let p = Module::projective(&algebra, v);
+                let i = Module::injective(&algebra, v);
                 pairs.push((s.clone(), i.clone()));
                 pairs.push((i, s.clone()));
                 pairs.push((s.clone(), p.clone()));
                 pairs.push((p, s));
             }
-            let s0 = Module::simple(&algebra, field, 0);
-            let i_last = Module::injective(&algebra, field, n - 1);
+            let s0 = Module::simple(&algebra, 0);
+            let i_last = Module::injective(&algebra, n - 1);
             let (sum, _, _) = direct_sum(&[&s0, &i_last]);
             pairs.push((sum.clone(), s0));
             pairs.push((sum.clone(), sum));
@@ -436,10 +429,10 @@ mod tests {
 
     #[test]
     fn ext_beyond_a_finite_resolution_is_zero() {
-        let algebra = an_with_relations(3, &[(0, 2)]).unwrap();
         let field = f5();
-        let s0 = Module::simple(&algebra, field, 0);
-        let s2 = Module::simple(&algebra, field, 2);
+        let algebra = an_with_relations(3, &[(0, 2)], field).unwrap();
+        let s0 = Module::simple(&algebra, 0);
+        let s2 = Module::simple(&algebra, 2);
         assert_eq!(ext_table(&s0, &s2, 6).unwrap(), vec![0, 0, 1, 0, 0, 0, 0]);
     }
 }

@@ -488,9 +488,9 @@ mod tests {
     #[test]
     fn split_new_accepts_direct_sum_data_and_rejects_swapped_projections() {
         let field = PrimeField::new(5).unwrap();
-        let a = linear_an(3);
-        let p0 = Module::projective(&a, field, 0);
-        let p0_copy = Module::projective(&a, field, 0);
+        let a = linear_an(3, field);
+        let p0 = Module::projective(&a, 0);
+        let p0_copy = Module::projective(&a, 0);
         let (sum, inclusions, projections) = direct_sum(&[&p0, &p0_copy]);
         let summands = vec![p0.clone(), p0_copy.clone()];
         assert!(
@@ -527,8 +527,8 @@ mod tests {
     #[test]
     fn split_new_rejects_a_projection_that_does_not_split_its_inclusion() {
         let field = PrimeField::new(5).unwrap();
-        let a = linear_an(3);
-        let p0 = Module::projective(&a, field, 0);
+        let a = linear_an(3, field);
+        let p0 = Module::projective(&a, 0);
         let (sum, inclusions, projections) = direct_sum(&[&p0]);
         let zero = zero_morphism(&sum, &p0).unwrap();
         assert_eq!(
@@ -555,9 +555,9 @@ mod tests {
     #[test]
     fn split_new_rejects_a_partial_family_of_summands() {
         let field = PrimeField::new(5).unwrap();
-        let a = linear_an(3);
-        let p0 = Module::projective(&a, field, 0);
-        let s2 = Module::simple(&a, field, 2);
+        let a = linear_an(3, field);
+        let p0 = Module::projective(&a, 0);
+        let s2 = Module::simple(&a, 2);
         let (sum, inclusions, projections) = direct_sum(&[&p0, &s2]);
         // Dropping the second summand leaves Σ π ι ≠ id on the total.
         assert_eq!(
@@ -578,7 +578,7 @@ mod tests {
     #[test]
     fn decompose_splits_the_f4_kronecker_double_via_the_fitting_fallback() {
         let field = PrimeField::new(2).unwrap();
-        let a = kronecker(2);
+        let a = kronecker(2, field);
         let id = DenseMat::from_rows(&[
             vec![field.one(), field.zero()],
             vec![field.zero(), field.one()],
@@ -588,7 +588,7 @@ mod tests {
             vec![field.zero(), field.one()],
             vec![field.one(), field.one()],
         ]);
-        let m = Module::new(a, field, vec![2, 2], vec![id, c]).unwrap();
+        let m = Module::new(a, vec![2, 2], vec![id, c]).unwrap();
         let (sum, _, _) = direct_sum(&[&m, &m]);
         let d = decompose(&sum);
         assert_eq!(d.summands().len(), 2);
@@ -606,8 +606,8 @@ mod tests {
 
     #[test]
     fn decompose_of_the_zero_module_has_no_summands() {
-        let a = linear_an(3);
-        let d = decompose(&Module::zero(&a, PrimeField::new(5).unwrap()));
+        let a = linear_an(3, PrimeField::new(5).unwrap());
+        let d = decompose(&Module::zero(&a));
         assert!(d.summands().is_empty());
         assert!(d.certificates().is_empty());
     }
@@ -615,12 +615,12 @@ mod tests {
     #[test]
     fn decompose_of_indecomposables_is_a_single_certified_summand() {
         for field in fields() {
-            let a3 = linear_an(3);
-            let dn = dual_numbers();
+            let a3 = linear_an(3, field);
+            let dn = dual_numbers(field);
             for m in [
-                Module::projective(&a3, field, 0),
-                Module::simple(&a3, field, 1),
-                Module::projective(&dn, field, 0),
+                Module::projective(&a3, 0),
+                Module::simple(&a3, 1),
+                Module::projective(&dn, 0),
             ] {
                 let d = decompose(&m);
                 assert_eq!(d.summands().len(), 1);
@@ -633,9 +633,9 @@ mod tests {
     #[test]
     fn decompose_of_p0_plus_s2_finds_both_certified_summands() {
         for field in fields() {
-            let a = linear_an(3);
-            let p0 = Module::projective(&a, field, 0);
-            let s2 = Module::simple(&a, field, 2);
+            let a = linear_an(3, field);
+            let p0 = Module::projective(&a, 0);
+            let s2 = Module::simple(&a, 2);
             let (sum, _, _) = direct_sum(&[&p0, &s2]);
             let d = decompose(&sum);
             assert_eq!(d.summands().len(), 2);
@@ -656,8 +656,8 @@ mod tests {
     #[test]
     fn decompose_of_two_isomorphic_simples_splits_via_the_fitting_fallback() {
         for field in fields() {
-            let a = linear_an(3);
-            let s = Module::simple(&a, field, 0);
+            let a = linear_an(3, field);
+            let s = Module::simple(&a, 0);
             let (sum, _, _) = direct_sum(&[&s, &s]);
             let endo = EndoAlgebra::new(&sum);
             assert!(
@@ -681,8 +681,8 @@ mod tests {
     #[test]
     fn decompose_of_the_truncated_polynomial_square_finds_two_local_summands() {
         for field in fields() {
-            let a = truncated_poly(3).unwrap();
-            let p = Module::projective(&a, field, 0);
+            let a = truncated_poly(3, field).unwrap();
+            let p = Module::projective(&a, 0);
             let (sum, _, _) = direct_sum(&[&p, &p]);
             let d = decompose(&sum);
             assert_eq!(d.summands().len(), 2);
@@ -714,9 +714,9 @@ mod tests {
     #[test]
     fn krull_schmidt_of_p_plus_s_plus_p_has_multiplicities_2_and_1() {
         for field in fields() {
-            let a = linear_an(3);
-            let p0 = Module::projective(&a, field, 0);
-            let s2 = Module::simple(&a, field, 2);
+            let a = linear_an(3, field);
+            let p0 = Module::projective(&a, 0);
+            let s2 = Module::simple(&a, 2);
             let (sum, _, _) = direct_sum(&[&p0, &s2, &p0]);
             let classes = classes_of(&sum);
             assert_eq!(
@@ -729,9 +729,9 @@ mod tests {
     #[test]
     fn krull_schmidt_is_invariant_under_permutation_of_summands() {
         for field in fields() {
-            let a = linear_an(3);
-            let s0 = Module::simple(&a, field, 0);
-            let p1 = Module::projective(&a, field, 1);
+            let a = linear_an(3, field);
+            let s0 = Module::simple(&a, 0);
+            let p1 = Module::projective(&a, 1);
             let (shuffled, _, _) = direct_sum(&[&s0, &p1, &s0, &p1]);
             let (reordered, _, _) = direct_sum(&[&p1, &s0, &p1, &s0]);
             let left = classes_of(&shuffled);
@@ -758,8 +758,8 @@ mod tests {
     #[test]
     fn krull_schmidt_of_an_indecomposable_is_a_single_class() {
         let field = PrimeField::new(5).unwrap();
-        let a = dual_numbers();
-        let p = Module::projective(&a, field, 0);
+        let a = dual_numbers(field);
+        let p = Module::projective(&a, 0);
         let classes = classes_of(&p);
         assert_eq!(classes.len(), 1);
         assert_eq!(classes[0].multiplicity, 1);
@@ -768,17 +768,17 @@ mod tests {
 
     #[test]
     fn krull_schmidt_of_the_zero_module_has_no_classes() {
-        let a = linear_an(3);
-        let z = Module::zero(&a, PrimeField::new(2).unwrap());
+        let a = linear_an(3, PrimeField::new(2).unwrap());
+        let z = Module::zero(&a);
         assert!(classes_of(&z).is_empty());
     }
 
     #[test]
     fn decompose_is_deterministic_across_calls() {
         let field = PrimeField::new(2).unwrap();
-        let a = linear_an(3);
-        let s = Module::simple(&a, field, 0);
-        let p1 = Module::projective(&a, field, 1);
+        let a = linear_an(3, field);
+        let s = Module::simple(&a, 0);
+        let p1 = Module::projective(&a, 1);
         let (sum, _, _) = direct_sum(&[&s, &p1, &s]);
         let first = decompose(&sum);
         let second = decompose(&sum);

@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use auslander::algebra::{
-    MonomialAlgebra, cyclic_nakayama, dual_numbers, kronecker, linear_an,
+    Algebra, commutative_square, cyclic_nakayama, dual_numbers, kronecker, linear_an,
     radical_square_zero_cycle, truncated_poly,
 };
 use auslander::ar::tau;
@@ -28,14 +28,15 @@ fn fields() -> [PrimeField; 2] {
     [PrimeField::new(2).unwrap(), PrimeField::new(5).unwrap()]
 }
 
-fn fixtures() -> Vec<Arc<MonomialAlgebra>> {
+fn fixtures(field: PrimeField) -> Vec<Arc<Algebra>> {
     vec![
-        linear_an(3),
-        kronecker(2),
-        dual_numbers(),
-        truncated_poly(3).unwrap(),
-        cyclic_nakayama(&[3, 3, 3]).unwrap(),
-        radical_square_zero_cycle(3),
+        linear_an(3, field),
+        kronecker(2, field),
+        dual_numbers(field),
+        truncated_poly(3, field).unwrap(),
+        cyclic_nakayama(&[3, 3, 3], field).unwrap(),
+        radical_square_zero_cycle(3, field),
+        commutative_square(field),
     ]
 }
 
@@ -51,10 +52,10 @@ fn assert_isomorphic(m: &Module, n: &Module, context: &str) {
 #[test]
 fn decompose_of_p_plus_s_plus_p_finds_three_certified_summands_and_reassembles() {
     for field in fields() {
-        for algebra in fixtures() {
+        for algebra in fixtures(field) {
             let last = algebra.quiver().num_vertices() - 1;
-            let p = Module::projective(&algebra, field, 0);
-            let s = Module::simple(&algebra, field, last);
+            let p = Module::projective(&algebra, 0);
+            let s = Module::simple(&algebra, last);
             let (sum, _, _) = direct_sum(&[&p, &s, &p]);
             let d = decompose(&sum);
             let context = format!(
@@ -101,10 +102,10 @@ fn decompose_of_p_plus_s_plus_p_finds_three_certified_summands_and_reassembles()
 #[test]
 fn decompose_splits_repeated_summands_over_a_large_field() {
     let field = PrimeField::new(32003).unwrap();
-    for algebra in fixtures() {
+    for algebra in fixtures(field) {
         let last = algebra.quiver().num_vertices() - 1;
-        let p = Module::projective(&algebra, field, 0);
-        let s = Module::simple(&algebra, field, last);
+        let p = Module::projective(&algebra, 0);
+        let s = Module::simple(&algebra, last);
         for n in 2..=4usize {
             let mut parts: Vec<&Module> = (0..n).map(|_| &p).collect();
             parts.push(&s);
@@ -152,7 +153,7 @@ fn decompose_splits_repeated_summands_over_a_large_field() {
 #[test]
 fn decompose_splits_a_repeated_summand_with_an_extension_endomorphism_field() {
     let field = PrimeField::new(32003).unwrap();
-    let algebra = kronecker(2);
+    let algebra = kronecker(2, field);
     let mut identity = DenseMat::zero(3, 3);
     for i in 0..3 {
         identity.set(i, i, field.elem(1));
@@ -162,7 +163,7 @@ fn decompose_splits_a_repeated_summand_with_an_extension_endomorphism_field() {
     companion.set(2, 1, field.elem(1));
     companion.set(0, 2, field.elem(-5));
     companion.set(1, 2, field.elem(-1));
-    let w = Module::new(algebra, field, vec![3, 3], vec![identity, companion]).unwrap();
+    let w = Module::new(algebra, vec![3, 3], vec![identity, companion]).unwrap();
 
     let endo_w = EndoAlgebra::new(&w);
     assert!(endo_w.is_local(), "End(W) should be the field F_{{p³}}");
@@ -205,10 +206,10 @@ fn decompose_splits_a_repeated_summand_with_an_extension_endomorphism_field() {
 #[test]
 fn krull_schmidt_reports_the_multiplicity_of_a_repeated_summand() {
     let field = PrimeField::new(32003).unwrap();
-    for algebra in fixtures() {
+    for algebra in fixtures(field) {
         let last = algebra.quiver().num_vertices() - 1;
-        let p = Module::projective(&algebra, field, 0);
-        let s = Module::simple(&algebra, field, last);
+        let p = Module::projective(&algebra, 0);
+        let s = Module::simple(&algebra, last);
         for n in 2..=4usize {
             let mut parts: Vec<&Module> = (0..n).map(|_| &p).collect();
             parts.push(&s);
@@ -243,12 +244,16 @@ fn krull_schmidt_reports_the_multiplicity_of_a_repeated_summand() {
 fn is_isomorphic_distinguishes_the_twelve_fixture_simples_and_projectives() {
     for field in fields() {
         let mut count = 0;
-        for algebra in [linear_an(3), kronecker(2), dual_numbers()] {
+        for algebra in [
+            linear_an(3, field),
+            kronecker(2, field),
+            dual_numbers(field),
+        ] {
             let n = algebra.quiver().num_vertices();
             let mut modules = Vec::new();
             for v in 0..n {
-                modules.push(Module::simple(&algebra, field, v));
-                modules.push(Module::projective(&algebra, field, v));
+                modules.push(Module::simple(&algebra, v));
+                modules.push(Module::projective(&algebra, v));
             }
             count += modules.len();
             for (i, m) in modules.iter().enumerate() {
@@ -279,10 +284,10 @@ fn is_isomorphic_distinguishes_the_twelve_fixture_simples_and_projectives() {
 #[test]
 fn krull_schmidt_is_permutation_invariant_on_shuffled_fixture_sums() {
     for field in fields() {
-        for algebra in fixtures() {
+        for algebra in fixtures(field) {
             let last = algebra.quiver().num_vertices() - 1;
-            let s = Module::simple(&algebra, field, 0);
-            let p = Module::projective(&algebra, field, last);
+            let s = Module::simple(&algebra, 0);
+            let p = Module::projective(&algebra, last);
             let (shuffled, _, _) = direct_sum(&[&s, &p, &s, &p]);
             let (reordered, _, _) = direct_sum(&[&p, &s, &p, &s]);
             let classes = |m: &Module| -> Vec<(Vec<usize>, usize)> {

@@ -25,9 +25,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use auslander::algebra::{
-    MonomialAlgebra, an_with_relations, cyclic_nakayama, dual_numbers, kronecker, linear_an,
-    linear_nakayama, radical_square_zero_cycle, truncated_poly,
+    Algebra, MonomialPresentation, an_with_relations, cyclic_nakayama, dual_numbers, kronecker,
+    linear_an, linear_nakayama, radical_square_zero_cycle, truncated_poly,
 };
+use auslander::completion::CompletionLimits;
 use auslander::decompose::{Certificate, decompose};
 use auslander::ext::{ext_table, global_dimension};
 use auslander::field::PrimeField;
@@ -69,20 +70,25 @@ fn ext_expected(n: usize, entries: &[(usize, usize, usize, usize)]) -> Vec<Vec<V
     table
 }
 
-fn check(algebra: &Arc<MonomialAlgebra>, expected: &Expected) {
-    assert_eq!(algebra.dim(), expected.dim, "algebra dimension");
-    assert_eq!(algebra.cartan_matrix(), expected.cartan, "Cartan matrix");
-    let n = algebra.quiver().num_vertices();
+fn check(build: impl Fn(PrimeField) -> Arc<Algebra>, expected: &Expected) {
     for field in fields() {
+        let algebra = build(field);
         let p = field.modulus();
+        assert_eq!(algebra.dim(), expected.dim, "algebra dimension over F_{p}");
+        assert_eq!(
+            algebra.cartan_matrix(),
+            expected.cartan,
+            "Cartan matrix over F_{p}"
+        );
+        let n = algebra.quiver().num_vertices();
         for v in 0..n {
-            let proj = Module::projective(algebra, field, v);
+            let proj = Module::projective(&algebra, v);
             assert_eq!(
                 proj.dim_vector(),
                 expected.cartan[v as usize].as_slice(),
                 "dim P_{v} = Cartan row {v} over F_{p}"
             );
-            let inj = Module::injective(algebra, field, v);
+            let inj = Module::injective(&algebra, v);
             let column: Vec<usize> = expected.cartan.iter().map(|row| row[v as usize]).collect();
             assert_eq!(
                 inj.dim_vector(),
@@ -98,7 +104,7 @@ fn check(algebra: &Arc<MonomialAlgebra>, expected: &Expected) {
                 "radical series of P_{v} over F_{p}"
             );
         }
-        let simples: Vec<Module> = (0..n).map(|v| Module::simple(algebra, field, v)).collect();
+        let simples: Vec<Module> = (0..n).map(|v| Module::simple(&algebra, v)).collect();
         for (i, si) in simples.iter().enumerate() {
             for (j, sj) in simples.iter().enumerate() {
                 assert_eq!(
@@ -114,7 +120,7 @@ fn check(algebra: &Arc<MonomialAlgebra>, expected: &Expected) {
             );
         }
         assert_eq!(
-            global_dimension(algebra, field, PD_BOUND),
+            global_dimension(&algebra, PD_BOUND),
             expected.gldim,
             "global dimension over F_{p}"
         );
@@ -171,7 +177,7 @@ fn truncated_expected(n: usize) -> Expected {
 #[test]
 fn linear_a2() {
     check(
-        &linear_an(2),
+        |field| linear_an(2, field),
         &Expected {
             dim: 3,
             cartan: vec![vec![1, 1], vec![0, 1]],
@@ -188,7 +194,7 @@ fn linear_a2() {
 
 #[test]
 fn linear_a3() {
-    check(&linear_an(3), &a3_expected());
+    check(|field| linear_an(3, field), &a3_expected());
 }
 
 // The path algebra of A_3 is hereditary, so gldim kA_3 = 1. The archive's
@@ -196,12 +202,9 @@ fn linear_a3() {
 // is a regression test against that error.
 #[test]
 fn linear_a3_is_hereditary() {
-    let algebra = linear_an(3);
     for field in fields() {
-        assert_eq!(
-            global_dimension(&algebra, field, PD_BOUND),
-            Bounded::Exact(1)
-        );
+        let algebra = linear_an(3, field);
+        assert_eq!(global_dimension(&algebra, PD_BOUND), Bounded::Exact(1));
     }
 }
 
@@ -210,10 +213,12 @@ fn linear_a3_is_hereditary() {
 // vector (1, 1, 1, 1).
 #[test]
 fn d4_three_arrows_into_a_center() {
-    let quiver = Quiver::new(4, &[(0, 3), (1, 3), (2, 3)]).unwrap();
-    let algebra = MonomialAlgebra::new(quiver, Vec::new()).unwrap();
     check(
-        &algebra,
+        |field| {
+            let quiver = Quiver::new(4, &[(0, 3), (1, 3), (2, 3)]).unwrap();
+            let presentation = MonomialPresentation::new(quiver, Vec::new()).unwrap();
+            Algebra::from_monomial(field, &presentation, &CompletionLimits::default()).unwrap()
+        },
         &Expected {
             dim: 7,
             cartan: vec![
@@ -242,18 +247,21 @@ fn d4_three_arrows_into_a_center() {
 
 #[test]
 fn dual_numbers_k_x_mod_x_squared() {
-    check(&dual_numbers(), &truncated_expected(2));
+    check(dual_numbers, &truncated_expected(2));
 }
 
 #[test]
 fn truncated_poly_k_x_mod_x_cubed() {
-    check(&truncated_poly(3).unwrap(), &truncated_expected(3));
+    check(
+        |field| truncated_poly(3, field).unwrap(),
+        &truncated_expected(3),
+    );
 }
 
 #[test]
 fn a3_mod_ab() {
     check(
-        &an_with_relations(3, &[(0, 2)]).unwrap(),
+        |field| an_with_relations(3, &[(0, 2)], field).unwrap(),
         &a3_mod_ab_expected(),
     );
 }
@@ -264,7 +272,7 @@ fn a3_mod_ab() {
 #[test]
 fn kronecker_2_is_hereditary() {
     check(
-        &kronecker(2),
+        |field| kronecker(2, field),
         &Expected {
             dim: 4,
             cartan: vec![vec![1, 2], vec![0, 1]],
@@ -290,7 +298,7 @@ fn radical_square_zero_cycle_3() {
         }
     }
     check(
-        &radical_square_zero_cycle(3),
+        |field| radical_square_zero_cycle(3, field),
         &Expected {
             dim: 6,
             cartan: vec![vec![1, 1, 0], vec![0, 1, 1], vec![1, 0, 1]],
@@ -310,9 +318,12 @@ fn radical_square_zero_cycle_3() {
 // linearly oriented A_3 and every A_3 expectation applies verbatim.
 #[test]
 fn linear_nakayama_3_2_1() {
-    let algebra = linear_nakayama(&[3, 2, 1]).unwrap();
-    assert!(algebra.forbidden().is_empty());
-    check(&algebra, &a3_expected());
+    let algebra = linear_nakayama(&[3, 2, 1], PrimeField::new(5).unwrap()).unwrap();
+    assert!(algebra.relations().is_empty());
+    check(
+        |field| linear_nakayama(&[3, 2, 1], field).unwrap(),
+        &a3_expected(),
+    );
 }
 
 // Regression: the old library hung on the Kupisch series [2, 2, 1]. The algebra is
@@ -324,9 +335,12 @@ fn linear_nakayama_2_2_1_child() {
     if env::var("AUSLANDER_WATCHDOG_CHILD").is_err() {
         return;
     }
-    let algebra = linear_nakayama(&[2, 2, 1]).unwrap();
+    let algebra = linear_nakayama(&[2, 2, 1], PrimeField::new(5).unwrap()).unwrap();
     assert_eq!(algebra.dim(), 5);
-    check(&algebra, &a3_mod_ab_expected());
+    check(
+        |field| linear_nakayama(&[2, 2, 1], field).unwrap(),
+        &a3_mod_ab_expected(),
+    );
 }
 
 // Spawns the current test binary on the child test alone, polls it, and kills it
@@ -382,7 +396,7 @@ fn cyclic_nakayama_3_3_3() {
         }
     }
     check(
-        &cyclic_nakayama(&[3, 3, 3]).unwrap(),
+        |field| cyclic_nakayama(&[3, 3, 3], field).unwrap(),
         &Expected {
             dim: 9,
             cartan: vec![vec![1, 1, 1]; 3],
@@ -413,10 +427,13 @@ fn cyclic_nakayama_3_3_3() {
 // so pd S_1 = 1; S_2 and S_3 are projective.
 #[test]
 fn gentle_branch_a_0_1_b_1_2_c_1_3_with_ab_zero() {
-    let quiver = Quiver::new(4, &[(0, 1), (1, 2), (1, 3)]).unwrap();
-    let algebra = MonomialAlgebra::new(quiver, vec![vec![ArrowId(0), ArrowId(1)]]).unwrap();
     check(
-        &algebra,
+        |field| {
+            let quiver = Quiver::new(4, &[(0, 1), (1, 2), (1, 3)]).unwrap();
+            let presentation =
+                MonomialPresentation::new(quiver, vec![vec![ArrowId(0), ArrowId(1)]]).unwrap();
+            Algebra::from_monomial(field, &presentation, &CompletionLimits::default()).unwrap()
+        },
         &Expected {
             dim: 8,
             cartan: vec![
@@ -451,20 +468,20 @@ fn gentle_branch_a_0_1_b_1_2_c_1_3_with_ab_zero() {
 // Mirrors the quick-start example in the repo README. Keep the two in sync.
 #[test]
 fn readme_quick_start_example() {
-    let algebra = an_with_relations(3, &[(0, 2)]).unwrap();
     let field = PrimeField::new(5).unwrap();
-    let s0 = Module::simple(&algebra, field, 0);
-    let s2 = Module::simple(&algebra, field, 2);
+    let algebra = an_with_relations(3, &[(0, 2)], field).unwrap();
+    let s0 = Module::simple(&algebra, 0);
+    let s2 = Module::simple(&algebra, 2);
     assert_eq!(ext_table(&s0, &s2, 4).unwrap(), vec![0, 0, 1, 0, 0]);
 }
 
 // Mirrors the decomposition example in the repo README. Keep the two in sync.
 #[test]
 fn readme_decomposition_example() {
-    let algebra = truncated_poly(3).unwrap();
     let field = PrimeField::new(32003).unwrap();
-    let p = Module::projective(&algebra, field, 0);
-    let s = Module::simple(&algebra, field, 0);
+    let algebra = truncated_poly(3, field).unwrap();
+    let p = Module::projective(&algebra, 0);
+    let s = Module::simple(&algebra, 0);
     let (m, _, _) = direct_sum(&[&p, &p, &s]);
     let d = decompose(&m);
     assert_eq!(d.summands().len(), 3);

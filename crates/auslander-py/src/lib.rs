@@ -1,21 +1,25 @@
-//! Python façade for the `auslander` crate: prime fields, quivers, monomial bound
-//! quiver algebras, and their right modules.
+//! Python façade for the `auslander` crate: prime fields, quivers, bound
+//! quiver algebras with monomial or general admissible relations, and their
+//! right modules.
 //!
 //! The surface is small and algebra-owned: modules are created only through
-//! `MonomialAlgebra` methods, so every Python-visible `Module` is a validated
+//! `Algebra` methods, so every Python-visible `Module` is a validated
 //! `kQ/I`-module. Library errors cross the boundary as `ValueError` carrying the
 //! Rust `Display` message. A rejection with variants gets one `ValueError`
 //! subclass per variant, with its payload attached as attributes, so the failed
-//! precondition is never reduced to a message string.
+//! precondition is never reduced to a message string. Engine limits and defects
+//! are `RuntimeError`, never `ValueError`.
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use pyo3::create_exception;
 use pyo3::exceptions::{PyOverflowError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
-use auslander::algebra::{self, MonomialAlgebra};
+use auslander::algebra::{self, Algebra, AlgebraBuildError, MonomialPresentation};
 use auslander::ar::{self, Tau};
+use auslander::completion::{CompletionLimits, TruncationDiagnostics, TruncationReason};
 use auslander::decompose::{self, Certificate, KrullSchmidtOutcome};
 use auslander::dynkin::{self, DynkinType, EuclideanType};
 use auslander::enumerate;
@@ -28,12 +32,75 @@ use auslander::linalg::DenseMat;
 use auslander::module::Module;
 use auslander::quiver::{ArrowId, Quiver};
 use auslander::radical;
+use auslander::relation::{Presentation, Relation};
 use auslander::resolution::{
     Bounded, ProjectiveResolution, ResolutionEnd, projective_cover, projective_dimension, resolve,
 };
+use auslander::verify;
 
 fn value_error(e: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(e.to_string())
+}
+
+/// An engine limit or defect (a failed pipeline run inside the library), not
+/// bad input. It becomes a RuntimeError, like the tau cross-check failures.
+fn engine_error(e: impl std::fmt::Display) -> PyErr {
+    PyRuntimeError::new_err(e.to_string())
+}
+
+/// An exhausted completion budget as a TruncationError with the diagnostics
+/// counts attached as attributes, so the consumed budget survives the boundary.
+fn truncation_error(d: &TruncationDiagnostics) -> PyErr {
+    let reason = match d.reason {
+        TruncationReason::BasisBudget => "basis_budget",
+        TruncationReason::WordLenBudget => "word_len_budget",
+        TruncationReason::StepBudget => "step_budget",
+    };
+    let err = TruncationError::new_err(format!(
+        "completion ran out of budget ({reason}): basis {}, pending ambiguities {}, steps {}",
+        d.basis_len, d.pending_ambiguities, d.steps_used
+    ));
+    Python::with_gil(|py| {
+        let value = err.value(py);
+        let attached = value
+            .setattr("basis_len", d.basis_len)
+            .and_then(|()| value.setattr("pending_ambiguities", d.pending_ambiguities))
+            .and_then(|()| value.setattr("steps_used", d.steps_used))
+            .and_then(|()| value.setattr("reason", reason));
+        match attached {
+            Ok(()) => err,
+            Err(failure) => failure,
+        }
+    })
+}
+
+/// A build failure of an initial construction, where the presentation is
+/// user input. Rejected input is ValueError with the Rust message; an
+/// infinite-dimensional quotient is rejected input too, and its message
+/// carries the witness words. An exhausted budget is TruncationError (a
+/// RuntimeError). A certificate the verifier rejected for any other reason
+/// is an engine defect: plain RuntimeError.
+fn build_error(e: AlgebraBuildError) -> PyErr {
+    match e {
+        AlgebraBuildError::Monomial(_)
+        | AlgebraBuildError::Relation(_)
+        | AlgebraBuildError::InfiniteDimensional { .. } => value_error(e),
+        AlgebraBuildError::Truncated(d) => truncation_error(&d),
+        AlgebraBuildError::Verification(_) => engine_error(e),
+    }
+}
+
+/// A build failure of a derived completion (the opposite algebra under
+/// tau, injective envelopes, coresolutions, and injective dimensions).
+/// An exhausted budget is TruncationError with the diagnostics attached.
+/// Everything else is RuntimeError: the reversed relations come from a
+/// verified algebra, so an infinite opposite or a rejected reversed
+/// relation is a library defect, not user input.
+fn downstream_build_error(e: AlgebraBuildError) -> PyErr {
+    match e {
+        AlgebraBuildError::Truncated(d) => truncation_error(&d),
+        other => engine_error(other),
+    }
 }
 
 /// One matrix from a list of integer rows, entries reduced mod p. A matrix given
@@ -140,25 +207,100 @@ impl PyQuiver {
     }
 }
 
-/// The monomial bound quiver algebra kQ/I, I generated by forbidden paths.
+/// How a Python Algebra holds its verified runtime algebras.
+enum AlgebraKind {
+    /// Field-free monomial combinatorics. Each field gets one verified
+    /// runtime algebra, built on first use and cached.
+    Monomial {
+        presentation: Box<MonomialPresentation>,
+        per_field: Mutex<BTreeMap<u64, Arc<Algebra>>>,
+    },
+    /// A general-relation algebra, bound to the one field it was verified
+    /// over.
+    General(Arc<Algebra>),
+}
+
+/// The bound quiver algebra kQ/I over a checked prime field.
 ///
-/// Forbidden words are lists of arrow ids, each of length >= 2 (admissibility) and
-/// composable left to right. Construction certifies the standard-path basis finite
-/// or raises ValueError, so `dim` and the Cartan matrix are exact. The algebra is
-/// field-free; a field enters only when building modules, and modules can interact
-/// (hom, ext) only when built from the same MonomialAlgebra object.
-#[pyclass(name = "MonomialAlgebra", module = "auslander")]
+/// Two kinds share this class. `Algebra(quiver, forbidden)` and the named
+/// constructors build a monomial algebra: forbidden words are lists of arrow
+/// ids, each of length >= 2 (admissibility) and composable left to right. A
+/// monomial presentation is field-free; a field enters only when building
+/// modules, and each field gets one verified runtime algebra, built on first
+/// use and cached. `Algebra.from_relations` and `Algebra.from_certificate`
+/// build a general-relation algebra. Its dimension and structure constants
+/// depend on the field, so it is bound to the one field it was verified over
+/// and raises ValueError for any other; `field` names that field (None for a
+/// monomial algebra). Every runtime algebra passes completion and independent
+/// certificate verification before use, so `dim` and the Cartan matrix are
+/// exact. Modules interact (hom, ext) only when built from the same Algebra
+/// object over equal fields. `MonomialAlgebra` is an alias of this class.
+#[pyclass(name = "Algebra", module = "auslander")]
 struct PyAlgebra {
-    inner: Arc<MonomialAlgebra>,
+    kind: AlgebraKind,
 }
 
 impl PyAlgebra {
-    fn wrap(inner: Arc<MonomialAlgebra>) -> PyAlgebra {
-        PyAlgebra { inner }
+    fn wrap(presentation: MonomialPresentation) -> PyAlgebra {
+        PyAlgebra {
+            kind: AlgebraKind::Monomial {
+                presentation: Box::new(presentation),
+                per_field: Mutex::new(BTreeMap::new()),
+            },
+        }
+    }
+
+    fn pinned(algebra: Arc<Algebra>) -> PyAlgebra {
+        PyAlgebra {
+            kind: AlgebraKind::General(algebra),
+        }
+    }
+
+    /// The verified runtime algebra over `field`. A monomial algebra builds
+    /// one per field on first use and caches it; a general-relation algebra
+    /// returns its own and raises ValueError for any other field.
+    fn over(&self, field: PrimeField) -> PyResult<Arc<Algebra>> {
+        match &self.kind {
+            AlgebraKind::Monomial {
+                presentation,
+                per_field,
+            } => {
+                let mut cache = per_field.lock().expect("no panics while holding the lock");
+                if let Some(found) = cache.get(&field.modulus()) {
+                    return Ok(found.clone());
+                }
+                let built = Algebra::from_monomial(
+                    field,
+                    presentation,
+                    &algebra::monomial_completion_limits(presentation),
+                )
+                .map_err(build_error)?;
+                cache.insert(field.modulus(), built.clone());
+                Ok(built)
+            }
+            AlgebraKind::General(algebra) => {
+                if algebra.field().modulus() == field.modulus() {
+                    return Ok(algebra.clone());
+                }
+                Err(PyValueError::new_err(format!(
+                    "this algebra was built over F_{}; a general-relation algebra is \
+                     field-dependent, so it cannot be used over F_{}",
+                    algebra.field().modulus(),
+                    field.modulus()
+                )))
+            }
+        }
+    }
+
+    fn quiver_ref(&self) -> &Quiver {
+        match &self.kind {
+            AlgebraKind::Monomial { presentation, .. } => presentation.quiver(),
+            AlgebraKind::General(algebra) => algebra.quiver(),
+        }
     }
 
     fn check_vertex(&self, v: u32) -> PyResult<()> {
-        let n = self.inner.quiver().num_vertices();
+        let n = self.quiver_ref().num_vertices();
         if v >= n {
             return Err(PyValueError::new_err(format!(
                 "vertex {v} out of range: the quiver has vertices 0..{n}"
@@ -181,15 +323,100 @@ impl PyAlgebra {
             .map(|word| word.into_iter().map(ArrowId).collect())
             .collect();
         Ok(PyAlgebra::wrap(
-            MonomialAlgebra::new(quiver.inner.clone(), forbidden).map_err(value_error)?,
+            MonomialPresentation::new(quiver.inner.clone(), forbidden).map_err(value_error)?,
         ))
+    }
+
+    /// kQ/I for a general admissible ideal over one prime field. Each relation
+    /// is a list of (coefficient, path) terms; a path is a list of arrow ids
+    /// composed left to right, and coefficients are integers reduced mod p.
+    /// The terms of one relation must share one source and one target, every
+    /// path needs length >= 2, and a coefficient that reduces to zero is
+    /// rejected. Construction runs completion and verifies the emitted
+    /// certificate; the result is bound to `field` and refuses any other.
+    /// The optional keywords cap the completion budgets; an exhausted budget
+    /// raises TruncationError. Raises ValueError on a rejected relation and on
+    /// an infinite-dimensional quotient (the message carries a cyclic word
+    /// witness).
+    #[staticmethod]
+    #[pyo3(signature = (quiver, relations, field, *, max_basis = None, max_word_len = None, max_steps = None))]
+    fn from_relations(
+        quiver: &PyQuiver,
+        relations: Vec<Vec<(i64, Vec<u32>)>>,
+        field: &PyPrimeField,
+        max_basis: Option<usize>,
+        max_word_len: Option<usize>,
+        max_steps: Option<usize>,
+    ) -> PyResult<PyAlgebra> {
+        let f = field.inner;
+        let mut checked = Vec::with_capacity(relations.len());
+        for (i, terms) in relations.into_iter().enumerate() {
+            let terms = terms
+                .into_iter()
+                .map(|(coeff, word)| (f.elem(coeff), word.into_iter().map(ArrowId).collect()))
+                .collect();
+            checked.push(
+                Relation::new(&quiver.inner, f, terms)
+                    .map_err(|e| PyValueError::new_err(format!("relation {i} rejected: {e}")))?,
+            );
+        }
+        let presentation = Presentation::new(quiver.inner.clone(), f, checked)
+            .map_err(|e| PyValueError::new_err(format!("relation rejected: {e}")))?;
+        let mut limits = CompletionLimits::default();
+        if let Some(n) = max_basis {
+            limits.max_basis = n;
+        }
+        if let Some(n) = max_word_len {
+            limits.max_word_len = n;
+        }
+        if let Some(n) = max_steps {
+            limits.max_steps = n;
+        }
+        Ok(PyAlgebra::pinned(
+            Algebra::new(presentation, &limits).map_err(build_error)?,
+        ))
+    }
+
+    /// The algebra rebuilt from certificate bytes: the bytes are verified from
+    /// scratch, then the algebra is built from the verified data alone. The
+    /// result is bound to the certificate's field, exactly like a
+    /// `from_relations` algebra, whatever kind of algebra dumped the bytes.
+    /// The optional keywords set the rebuilt algebra's completion limits,
+    /// used only by later derived completions such as tau and the injective
+    /// constructions; omitted keywords keep the defaults. Certificate bytes
+    /// never carry budgets: untrusted input must not choose resource
+    /// envelopes, so preserving raised budgets across a reload takes these
+    /// explicit keywords. Raises ValueError with the verifier's message when
+    /// the bytes fail any check, an infinite-dimensional quotient included.
+    #[staticmethod]
+    #[pyo3(signature = (json, *, max_basis = None, max_word_len = None, max_steps = None))]
+    fn from_certificate(
+        json: &str,
+        max_basis: Option<usize>,
+        max_word_len: Option<usize>,
+        max_steps: Option<usize>,
+    ) -> PyResult<PyAlgebra> {
+        let verified = verify::verify(json).map_err(value_error)?;
+        let mut limits = CompletionLimits::default();
+        if let Some(n) = max_basis {
+            limits.max_basis = n;
+        }
+        if let Some(n) = max_word_len {
+            limits.max_word_len = n;
+        }
+        if let Some(n) = max_steps {
+            limits.max_steps = n;
+        }
+        Ok(PyAlgebra::pinned(Algebra::from_verified_with_limits(
+            verified, &limits,
+        )))
     }
 
     /// Path algebra of linearly oriented A_n: vertices 0..n, arrows i -> i+1.
     #[staticmethod]
     #[pyo3(text_signature = "(n)")]
     fn linear_an(n: usize) -> PyAlgebra {
-        PyAlgebra::wrap(algebra::linear_an(n))
+        PyAlgebra::wrap(algebra::linear_an_presentation(n))
     }
 
     /// Kronecker-type algebra: vertices 0, 1 and m parallel arrows 0 -> 1;
@@ -197,14 +424,16 @@ impl PyAlgebra {
     #[staticmethod]
     #[pyo3(text_signature = "(m)")]
     fn kronecker(m: usize) -> PyAlgebra {
-        PyAlgebra::wrap(algebra::kronecker(m))
+        PyAlgebra::wrap(algebra::kronecker_presentation(m))
     }
 
     /// k[x]/(x^2): one vertex, one loop x, forbidden word xx.
     #[staticmethod]
     #[pyo3(text_signature = "()")]
     fn dual_numbers() -> PyAlgebra {
-        PyAlgebra::wrap(algebra::dual_numbers())
+        PyAlgebra::wrap(
+            algebra::truncated_poly_presentation(2).expect("x^2 is an admissible relation"),
+        )
     }
 
     /// k[x]/(x^n): one vertex, one loop x, forbidden word x^n; raises ValueError
@@ -213,7 +442,7 @@ impl PyAlgebra {
     #[pyo3(text_signature = "(n)")]
     fn truncated_poly(n: usize) -> PyResult<PyAlgebra> {
         Ok(PyAlgebra::wrap(
-            algebra::truncated_poly(n).map_err(value_error)?,
+            algebra::truncated_poly_presentation(n).map_err(value_error)?,
         ))
     }
 
@@ -224,7 +453,7 @@ impl PyAlgebra {
     #[pyo3(text_signature = "(kupisch)")]
     fn linear_nakayama(kupisch: Vec<usize>) -> PyResult<PyAlgebra> {
         Ok(PyAlgebra::wrap(
-            algebra::linear_nakayama(&kupisch).map_err(value_error)?,
+            algebra::linear_nakayama_presentation(&kupisch).map_err(value_error)?,
         ))
     }
 
@@ -235,7 +464,7 @@ impl PyAlgebra {
     #[pyo3(text_signature = "(kupisch)")]
     fn cyclic_nakayama(kupisch: Vec<usize>) -> PyResult<PyAlgebra> {
         Ok(PyAlgebra::wrap(
-            algebra::cyclic_nakayama(&kupisch).map_err(value_error)?,
+            algebra::cyclic_nakayama_presentation(&kupisch).map_err(value_error)?,
         ))
     }
 
@@ -244,7 +473,7 @@ impl PyAlgebra {
     #[staticmethod]
     #[pyo3(text_signature = "(n)")]
     fn radical_square_zero_cycle(n: usize) -> PyAlgebra {
-        PyAlgebra::wrap(algebra::radical_square_zero_cycle(n))
+        PyAlgebra::wrap(algebra::radical_square_zero_cycle_presentation(n))
     }
 
     /// Linearly oriented A_n with zero relations: each (start, length) pair kills
@@ -255,27 +484,65 @@ impl PyAlgebra {
     #[pyo3(text_signature = "(n, zero_paths)")]
     fn an_with_relations(n: usize, zero_paths: Vec<(usize, usize)>) -> PyResult<PyAlgebra> {
         Ok(PyAlgebra::wrap(
-            algebra::an_with_relations(n, &zero_paths).map_err(value_error)?,
+            algebra::an_with_relations_presentation(n, &zero_paths).map_err(value_error)?,
         ))
     }
 
-    /// dim_k of the algebra: the number of standard paths, trivial paths included.
+    /// dim_k of the algebra: the number of basis paths, trivial paths included.
+    /// A monomial algebra reports its field-independent standard-path count; a
+    /// general-relation algebra reports the normal-word count over its bound
+    /// field.
     #[getter]
     fn dim(&self) -> usize {
-        self.inner.dim()
+        match &self.kind {
+            AlgebraKind::Monomial { presentation, .. } => presentation.dim(),
+            AlgebraKind::General(algebra) => algebra.dim(),
+        }
+    }
+
+    /// The bound prime field of a general-relation algebra; None for a
+    /// monomial algebra, which pairs with any field.
+    #[getter]
+    fn field(&self) -> Option<PyPrimeField> {
+        match &self.kind {
+            AlgebraKind::Monomial { .. } => None,
+            AlgebraKind::General(algebra) => Some(PyPrimeField {
+                inner: algebra.field(),
+            }),
+        }
+    }
+
+    /// The effective completion limits as a dict with keys "max_basis",
+    /// "max_word_len", and "max_steps". Derived completions (tau, injective
+    /// envelopes, coresolutions, injective dimensions) run with them. A
+    /// general-relation algebra reports its stored limits; a field-free
+    /// monomial algebra reports the limits derived from its presentation.
+    #[getter]
+    fn completion_limits(&self) -> BTreeMap<&'static str, usize> {
+        let limits = match &self.kind {
+            AlgebraKind::Monomial { presentation, .. } => {
+                algebra::monomial_completion_limits(presentation)
+            }
+            AlgebraKind::General(algebra) => algebra.completion_limits().clone(),
+        };
+        BTreeMap::from([
+            ("max_basis", limits.max_basis),
+            ("max_word_len", limits.max_word_len),
+            ("max_steps", limits.max_steps),
+        ])
     }
 
     /// Number of vertices of the underlying quiver.
     #[getter]
     fn num_vertices(&self) -> u32 {
-        self.inner.quiver().num_vertices()
+        self.quiver_ref().num_vertices()
     }
 
     /// Number of arrows of the underlying quiver (the length `module` expects of
     /// its maps argument).
     #[getter]
     fn num_arrows(&self) -> usize {
-        self.inner.quiver().num_arrows()
+        self.quiver_ref().num_arrows()
     }
 
     /// The underlying quiver, as a fresh Quiver object; the argument the
@@ -283,23 +550,47 @@ impl PyAlgebra {
     #[getter]
     fn quiver(&self) -> PyQuiver {
         PyQuiver {
-            inner: self.inner.quiver().clone(),
+            inner: self.quiver_ref().clone(),
         }
     }
 
-    /// The Cartan matrix C with C[i][j] = dim e_i A e_j, the number of standard
+    /// The Cartan matrix C with C[i][j] = dim e_i A e_j, the number of basis
     /// paths i -> j; row i is the dimension vector of the projective P_i.
     #[pyo3(text_signature = "($self)")]
     fn cartan_matrix(&self) -> Vec<Vec<usize>> {
-        self.inner.cartan_matrix()
+        match &self.kind {
+            AlgebraKind::Monomial { presentation, .. } => presentation.cartan_matrix(),
+            AlgebraKind::General(algebra) => algebra.cartan_matrix(),
+        }
+    }
+
+    /// The canonical JSON bytes of the verified completion certificate; feed
+    /// them to Algebra.from_certificate to rebuild the algebra. A
+    /// general-relation algebra serializes its own certificate, and `field`
+    /// must be omitted or equal to the bound field. A monomial presentation is
+    /// field-free and a certificate is not, so a monomial algebra requires
+    /// `field` and serializes the certificate of its algebra over that field.
+    #[pyo3(signature = (field = None))]
+    fn certificate_json(&self, field: Option<&PyPrimeField>) -> PyResult<String> {
+        let algebra = match (&self.kind, field) {
+            (AlgebraKind::General(algebra), None) => algebra.clone(),
+            (_, Some(field)) => self.over(field.inner)?,
+            (AlgebraKind::Monomial { .. }, None) => {
+                return Err(PyValueError::new_err(
+                    "a monomial presentation is field-free and a certificate is not; \
+                     pass a field to serialize the certificate of the algebra over it",
+                ));
+            }
+        };
+        Ok(algebra.certificate().to_canonical_json())
     }
 
     /// A right module from raw data: dims[v] is the dimension at vertex v, and
     /// maps[a] is a dims[source(a)] x dims[target(a)] integer matrix (list of rows)
     /// for arrow a, acting on row vectors; entries are reduced mod p. A path acts
     /// by the product of its arrow matrices in left-to-right word order. Raises
-    /// ValueError when shapes disagree with the quiver or a forbidden word acts as
-    /// a nonzero matrix.
+    /// ValueError when shapes disagree with the quiver or a relation acts as a
+    /// nonzero matrix.
     #[pyo3(text_signature = "($self, field, dims, maps)")]
     fn module(
         &self,
@@ -308,7 +599,8 @@ impl PyAlgebra {
         maps: Vec<Vec<Vec<i64>>>,
     ) -> PyResult<PyRightModule> {
         let f = field.inner;
-        let quiver = self.inner.quiver();
+        let algebra = self.over(f)?;
+        let quiver = algebra.quiver();
         let mut mats = Vec::with_capacity(maps.len());
         for (i, rows) in maps.iter().enumerate() {
             // The expected column count, so that e.g. dims [0, 1] accepts maps [[]].
@@ -325,7 +617,7 @@ impl PyAlgebra {
             )?);
         }
         Ok(PyRightModule {
-            inner: Module::new(self.inner.clone(), f, dims, mats).map_err(value_error)?,
+            inner: Module::new(algebra, dims, mats).map_err(value_error)?,
         })
     }
 
@@ -335,7 +627,7 @@ impl PyAlgebra {
     fn simple(&self, field: &PyPrimeField, v: u32) -> PyResult<PyRightModule> {
         self.check_vertex(v)?;
         Ok(PyRightModule {
-            inner: Module::simple(&self.inner, field.inner, v),
+            inner: Module::simple(&self.over(field.inner)?, v),
         })
     }
 
@@ -345,7 +637,7 @@ impl PyAlgebra {
     fn projective(&self, field: &PyPrimeField, v: u32) -> PyResult<PyRightModule> {
         self.check_vertex(v)?;
         Ok(PyRightModule {
-            inner: Module::projective(&self.inner, field.inner, v),
+            inner: Module::projective(&self.over(field.inner)?, v),
         })
     }
 
@@ -355,16 +647,24 @@ impl PyAlgebra {
     fn injective(&self, field: &PyPrimeField, v: u32) -> PyResult<PyRightModule> {
         self.check_vertex(v)?;
         Ok(PyRightModule {
-            inner: Module::injective(&self.inner, field.inner, v),
+            inner: Module::injective(&self.over(field.inner)?, v),
         })
     }
 
     fn __repr__(&self) -> String {
-        format!(
-            "MonomialAlgebra(dim={}, vertices={})",
-            self.inner.dim(),
-            self.inner.quiver().num_vertices()
-        )
+        match &self.kind {
+            AlgebraKind::Monomial { presentation, .. } => format!(
+                "Algebra(dim={}, vertices={})",
+                presentation.dim(),
+                presentation.quiver().num_vertices()
+            ),
+            AlgebraKind::General(algebra) => format!(
+                "Algebra(dim={}, vertices={}, field=F_{})",
+                algebra.dim(),
+                algebra.quiver().num_vertices(),
+                algebra.field().modulus()
+            ),
+        }
     }
 }
 
@@ -372,9 +672,9 @@ impl PyAlgebra {
 ///
 /// The module assigns to each vertex v the row-vector space k^dims[v] and to each
 /// arrow a matrix acting on row vectors; paths act by matrix products in
-/// left-to-right word order. Instances come only from MonomialAlgebra methods
+/// left-to-right word order. Instances come only from Algebra methods
 /// (`module`, `simple`, `projective`, `injective`), and two modules can be compared
-/// homologically only when they were built from the same MonomialAlgebra object
+/// homologically only when they were built from the same Algebra object
 /// over equal fields.
 #[pyclass(name = "Module", module = "auslander")]
 struct PyRightModule {
@@ -382,12 +682,11 @@ struct PyRightModule {
 }
 
 fn check_same_context(m: &Module, n: &Module) -> PyResult<()> {
-    if !Arc::ptr_eq(m.algebra(), n.algebra()) {
-        return Err(PyValueError::new_err(
-            "modules were built from different MonomialAlgebra objects; \
-             hom and ext need both sides over the same algebra object",
-        ));
+    if Arc::ptr_eq(m.algebra(), n.algebra()) {
+        return Ok(());
     }
+    // The runtime algebra is cached per field, so two modules from one
+    // Algebra object share their Arc exactly when their fields agree.
     if m.field() != n.field() {
         return Err(PyValueError::new_err(format!(
             "modules are over different fields F_{} and F_{}",
@@ -395,7 +694,10 @@ fn check_same_context(m: &Module, n: &Module) -> PyResult<()> {
             n.field().modulus()
         )));
     }
-    Ok(())
+    Err(PyValueError::new_err(
+        "modules were built from different Algebra objects; \
+         hom and ext need both sides over the same algebra object",
+    ))
 }
 
 #[pymethods]
@@ -534,36 +836,42 @@ impl PyRightModule {
     /// I(M) is the direct sum of I_v with multiplicity dim (soc M)_v and the
     /// embedding is a monomorphism with essential image, dual to the minimality
     /// of a projective cover. The embedding has this module as its source, so it
-    /// composes with anything else built from the same algebra object.
+    /// composes with anything else built from the same algebra object. An
+    /// exhausted completion budget while building the opposite algebra raises
+    /// TruncationError.
     #[pyo3(text_signature = "($self)")]
-    fn injective_envelope(&self) -> (PyRightModule, PyMorphism) {
-        let (envelope, embedding) = injective::injective_envelope(&self.inner);
-        (
+    fn injective_envelope(&self) -> PyResult<(PyRightModule, PyMorphism)> {
+        let (envelope, embedding) =
+            injective::injective_envelope(&self.inner).map_err(downstream_build_error)?;
+        Ok((
             PyRightModule { inner: envelope },
             PyMorphism { inner: embedding },
-        )
+        ))
     }
 
     /// A minimal injective coresolution prefix with at most `steps`
     /// differentials. The result records how it ended; see
-    /// InjectiveCoresolution.status.
+    /// InjectiveCoresolution.status. An exhausted completion budget while
+    /// building the opposite algebra raises TruncationError.
     #[pyo3(text_signature = "($self, steps)")]
-    fn coresolve(&self, steps: usize) -> PyInjectiveCoresolution {
-        PyInjectiveCoresolution {
-            inner: injective::coresolve(&self.inner, steps),
-        }
+    fn coresolve(&self, steps: usize) -> PyResult<PyInjectiveCoresolution> {
+        Ok(PyInjectiveCoresolution {
+            inner: injective::coresolve(&self.inner, steps).map_err(downstream_build_error)?,
+        })
     }
 
     /// The injective dimension, decided up to `bound` differentials: Exact(n)
     /// with n <= bound when the minimal coresolution reaches zero by step
     /// `bound`, AtLeast(bound + 1) otherwise. The coresolution is minimal, so
     /// the lower bound is genuine. The zero module is injective, so its
-    /// injective dimension is Exact(0).
+    /// injective dimension is Exact(0). An exhausted completion budget while
+    /// building the opposite algebra raises TruncationError.
     #[pyo3(text_signature = "($self, bound)")]
-    fn injective_dimension(&self, bound: usize) -> PyBounded {
-        PyBounded {
-            inner: injective::injective_dimension(&self.inner, bound),
-        }
+    fn injective_dimension(&self, bound: usize) -> PyResult<PyBounded> {
+        Ok(PyBounded {
+            inner: injective::injective_dimension(&self.inner, bound)
+                .map_err(downstream_build_error)?,
+        })
     }
 
     /// A verified direct-sum decomposition of the module with one certificate
@@ -589,20 +897,23 @@ impl PyRightModule {
         }
     }
 
-    /// The Auslander–Reiten translate τM as a Module, or None when τM = 0,
+    /// The Auslander-Reiten translate τM as a Module, or None when τM = 0,
     /// which happens exactly when the module is projective. This None is a
     /// definite mathematical answer (the translate is the zero module), not a
     /// partiality convention. Both computation routes (Nakayama kernel and
     /// transpose-then-dual) always run and are cross-checked. A certified
     /// disagreement raises RuntimeError, a library-bug signal distinct from the
-    /// ValueError used for input errors. A cross-check the isomorphism test
-    /// could not decide either way raises TauAgreementUnknown, which is a limit
-    /// of that test rather than evidence that the routes differ.
+    /// ValueError used for input errors. An exhausted completion budget while
+    /// building the opposite algebra raises TruncationError with the
+    /// diagnostics attached. A cross-check the isomorphism test could not
+    /// decide either way raises TauAgreementUnknown, which is a limit of that
+    /// test rather than evidence that the routes differ.
     #[pyo3(text_signature = "($self)")]
     fn tau(&self) -> PyResult<Option<PyRightModule>> {
         match ar::tau(&self.inner) {
             Ok(Tau::Zero) => Ok(None),
             Ok(Tau::Module(inner)) => Ok(Some(PyRightModule { inner })),
+            Err(ar::TauError::Opposite(e)) => Err(downstream_build_error(e)),
             Err(e @ ar::TauError::RoutesDisagree { .. }) => {
                 Err(PyRuntimeError::new_err(e.to_string()))
             }
@@ -905,7 +1216,7 @@ impl PyDecomposition {
 ///
 /// Exactly one of `classes` and `reason` is set: `classes` lists
 /// (representative Module, multiplicity) pairs (a multiset unique up to
-/// isomorphism by Krull–Schmidt) when every summand was certified
+/// isomorphism by Krull-Schmidt) when every summand was certified
 /// indecomposable, and `reason` says why grouping failed otherwise (no
 /// partial grouping is ever claimed). Instances are immutable and come only
 /// from Module.krull_schmidt.
@@ -1043,7 +1354,7 @@ impl PyResolutionStatus {
 /// terms[k], so there is one map fewer than there are terms; `augmentation` is
 /// the projective cover P_0 -> M. `status` says how the computed prefix ended;
 /// see ResolutionStatus. Minimality: every differential lands in the radical
-/// of its target, dual to the shape InjectiveCoresolution reports.
+/// of its target. InjectiveCoresolution states the dual condition.
 #[pyclass(name = "Resolution", module = "auslander")]
 struct PyResolution {
     module: Module,
@@ -1251,10 +1562,14 @@ impl PyBounded {
 /// bound, AtLeast(bound + 1) otherwise.
 #[pyfunction]
 #[pyo3(text_signature = "(algebra, field, bound)")]
-fn global_dimension(algebra: &PyAlgebra, field: &PyPrimeField, bound: usize) -> PyBounded {
-    PyBounded {
-        inner: ext::global_dimension(&algebra.inner, field.inner, bound),
-    }
+fn global_dimension(
+    algebra: &PyAlgebra,
+    field: &PyPrimeField,
+    bound: usize,
+) -> PyResult<PyBounded> {
+    Ok(PyBounded {
+        inner: ext::global_dimension(&algebra.over(field.inner)?, bound),
+    })
 }
 
 /// Every indecomposable right module of a Nakayama algebra, as
@@ -1272,7 +1587,7 @@ fn nakayama_indecomposables(
     field: &PyPrimeField,
 ) -> PyResult<Vec<(PyRightModule, PyCertificate)>> {
     Ok(
-        enumerate::nakayama_indecomposables(&algebra.inner, field.inner)
+        enumerate::nakayama_indecomposables(&algebra.over(field.inner)?)
             .map_err(value_error)?
             .into_iter()
             .map(|(inner, c)| (PyRightModule { inner }, PyCertificate { inner: c }))
@@ -1510,6 +1825,17 @@ create_exception!(
 
 create_exception!(
     auslander,
+    TruncationError,
+    PyRuntimeError,
+    "Completion ran out of budget before it produced a certificate. The \
+     consumed budget is attached: `basis_len`, `pending_ambiguities`, \
+     `steps_used`, and `reason` (\"basis_budget\", \"word_len_budget\", or \
+     \"step_budget\"). Nothing is claimed about the algebra; raise the limits \
+     and rebuild."
+);
+
+create_exception!(
+    auslander,
     DynkinError,
     PyValueError,
     "Base of the two rejections of dynkin_indecomposables; the variant is the \
@@ -1521,8 +1847,9 @@ create_exception!(
     NonzeroIdealError,
     DynkinError,
     "The algebra is a proper quotient of kQ, so Gabriel's theorem does not list \
-     its indecomposables. `forbidden_words` is the number of minimal forbidden \
-     words the algebra carries."
+     its indecomposables. `forbidden_words` is the number of relations in the \
+     reduced Groebner basis; for a monomial algebra these are exactly its \
+     minimal forbidden words."
 );
 
 create_exception!(
@@ -1542,8 +1869,10 @@ fn dynkin_error(py: Python<'_>, e: dynkin::DynkinError) -> PyErr {
         dynkin::DynkinError::NotDynkin { .. } => NotDynkinError::new_err(e.to_string()),
     };
     let attached = match e {
-        dynkin::DynkinError::NonzeroIdeal { forbidden_words } => {
-            err.value(py).setattr("forbidden_words", forbidden_words)
+        // The Groebner relation count; for monomial input these relations are
+        // exactly the minimal forbidden words.
+        dynkin::DynkinError::NonzeroIdeal { relations } => {
+            err.value(py).setattr("forbidden_words", relations)
         }
         dynkin::DynkinError::NotDynkin { euclidean } => err.value(py).setattr(
             "euclidean",
@@ -1649,22 +1978,25 @@ fn dynkin_indecomposables(
     algebra: &PyAlgebra,
     field: &PyPrimeField,
 ) -> PyResult<Vec<(PyRightModule, PyCertificate)>> {
-    Ok(dynkin::dynkin_indecomposables(&algebra.inner, field.inner)
+    Ok(dynkin::dynkin_indecomposables(&algebra.over(field.inner)?)
         .map_err(|e| dynkin_error(py, e))?
         .into_iter()
         .map(|(inner, c)| (PyRightModule { inner }, PyCertificate { inner: c }))
         .collect())
 }
 
-/// Finite-dimensional basic algebras kQ/I over a checked prime field, where I is
-/// an admissible monomial ideal, and their finite-dimensional right modules.
-/// Convention: paths compose left to right, and modules are right modules whose
-/// arrow matrices act on row vectors.
+/// Finite-dimensional basic algebras kQ/I over a checked prime field, where I
+/// is an admissible ideal given by forbidden words or by general relations,
+/// and their finite-dimensional right modules. Convention: paths compose left
+/// to right, and modules are right modules whose arrow matrices act on row
+/// vectors.
 #[pymodule(name = "auslander")]
 fn auslander_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPrimeField>()?;
     m.add_class::<PyQuiver>()?;
     m.add_class::<PyAlgebra>()?;
+    // The v0.2 name of the class: one type under two names.
+    m.add("MonomialAlgebra", m.py().get_type::<PyAlgebra>())?;
     m.add_class::<PyRightModule>()?;
     m.add_class::<PyMorphism>()?;
     m.add_class::<PyIsoResult>()?;
@@ -1683,6 +2015,7 @@ fn auslander_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "TauAgreementUnknown",
         m.py().get_type::<TauAgreementUnknown>(),
     )?;
+    m.add("TruncationError", m.py().get_type::<TruncationError>())?;
     m.add("DynkinError", m.py().get_type::<DynkinError>())?;
     m.add("NonzeroIdealError", m.py().get_type::<NonzeroIdealError>())?;
     m.add("NotDynkinError", m.py().get_type::<NotDynkinError>())?;

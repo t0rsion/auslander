@@ -22,8 +22,8 @@
 use std::sync::Arc;
 
 use auslander::algebra::{
-    MonomialAlgebra, an_with_relations, cyclic_nakayama, dual_numbers, kronecker, linear_an,
-    linear_nakayama, radical_square_zero_cycle, truncated_poly,
+    Algebra, an_with_relations, commutative_square, cyclic_nakayama, dual_numbers, kronecker,
+    linear_an, linear_nakayama, radical_square_zero_cycle, truncated_poly,
 };
 use auslander::ext::global_dimension;
 use auslander::field::PrimeField;
@@ -44,31 +44,32 @@ fn fields() -> [PrimeField; 3] {
     ]
 }
 
-fn fixtures() -> Vec<Arc<MonomialAlgebra>> {
+fn fixtures(field: PrimeField) -> Vec<Arc<Algebra>> {
     vec![
-        linear_an(3),
-        an_with_relations(3, &[(0, 2)]).unwrap(),
-        kronecker(2),
-        dual_numbers(),
-        truncated_poly(3).unwrap(),
-        radical_square_zero_cycle(3),
-        cyclic_nakayama(&[3, 3, 3]).unwrap(),
-        cyclic_nakayama(&[2, 2, 3]).unwrap(),
-        linear_nakayama(&[3, 2, 1]).unwrap(),
-        linear_nakayama(&[2, 2, 1]).unwrap(),
+        linear_an(3, field),
+        an_with_relations(3, &[(0, 2)], field).unwrap(),
+        kronecker(2, field),
+        dual_numbers(field),
+        truncated_poly(3, field).unwrap(),
+        radical_square_zero_cycle(3, field),
+        cyclic_nakayama(&[3, 3, 3], field).unwrap(),
+        cyclic_nakayama(&[2, 2, 3], field).unwrap(),
+        linear_nakayama(&[3, 2, 1], field).unwrap(),
+        linear_nakayama(&[2, 2, 1], field).unwrap(),
+        commutative_square(field),
     ]
 }
 
-fn assorted(algebra: &Arc<MonomialAlgebra>, field: PrimeField) -> Vec<Module> {
+fn assorted(algebra: &Arc<Algebra>) -> Vec<Module> {
     let n = algebra.quiver().num_vertices();
-    let mut modules = vec![Module::zero(algebra, field)];
+    let mut modules = vec![Module::zero(algebra)];
     for v in 0..n {
-        modules.push(Module::simple(algebra, field, v));
-        modules.push(Module::projective(algebra, field, v));
-        modules.push(Module::injective(algebra, field, v));
+        modules.push(Module::simple(algebra, v));
+        modules.push(Module::projective(algebra, v));
+        modules.push(Module::injective(algebra, v));
     }
-    let s0 = Module::simple(algebra, field, 0);
-    let i_last = Module::injective(algebra, field, n - 1);
+    let s0 = Module::simple(algebra, 0);
+    let i_last = Module::injective(algebra, n - 1);
     modules.push(direct_sum(&[&s0, &i_last]).0);
     modules
 }
@@ -77,16 +78,15 @@ fn assorted(algebra: &Arc<MonomialAlgebra>, field: PrimeField) -> Vec<Module> {
 /// of off a projective cover over the opposite algebra.
 fn socle_injective_sum(m: &Module) -> Module {
     let algebra = m.algebra();
-    let field = m.field();
     let (soc, _) = socle(m);
     let mut parts = Vec::new();
     for v in 0..algebra.quiver().num_vertices() {
         for _ in 0..soc.dim_at(v) {
-            parts.push(Module::injective(algebra, field, v));
+            parts.push(Module::injective(algebra, v));
         }
     }
     if parts.is_empty() {
-        return Module::zero(algebra, field);
+        return Module::zero(algebra);
     }
     let refs: Vec<&Module> = parts.iter().collect();
     direct_sum(&refs).0
@@ -100,10 +100,10 @@ fn is_mono(f: &Morphism) -> bool {
 
 #[test]
 fn envelope_agrees_with_the_socle_construction_on_every_fixture() {
-    for algebra in fixtures() {
-        for field in fields() {
-            for m in assorted(&algebra, field) {
-                let (envelope, embedding) = injective_envelope(&m);
+    for field in fields() {
+        for algebra in fixtures(field) {
+            for m in assorted(&algebra) {
+                let (envelope, embedding) = injective_envelope(&m).unwrap();
                 let by_socle = socle_injective_sum(&m);
                 assert_eq!(
                     envelope.dim_vector(),
@@ -129,10 +129,10 @@ fn envelope_agrees_with_the_socle_construction_on_every_fixture() {
 // essential and the envelope is minimal.
 #[test]
 fn envelope_embeddings_have_essential_image() {
-    for algebra in fixtures() {
-        for field in fields() {
-            for m in assorted(&algebra, field) {
-                let (envelope, embedding) = injective_envelope(&m);
+    for field in fields() {
+        for algebra in fixtures(field) {
+            for m in assorted(&algebra) {
+                let (envelope, embedding) = injective_envelope(&m).unwrap();
                 assert!(is_mono(&embedding));
                 assert_eq!(
                     socle(&envelope).0.dim_vector(),
@@ -148,14 +148,14 @@ fn envelope_embeddings_have_essential_image() {
 
 #[test]
 fn envelope_is_isomorphic_to_the_socle_construction() {
-    for algebra in [
-        linear_an(3),
-        an_with_relations(3, &[(0, 2)]).unwrap(),
-        cyclic_nakayama(&[2, 2, 3]).unwrap(),
-    ] {
-        for field in fields() {
-            for m in assorted(&algebra, field) {
-                let (envelope, _) = injective_envelope(&m);
+    for field in fields() {
+        for algebra in [
+            linear_an(3, field),
+            an_with_relations(3, &[(0, 2)], field).unwrap(),
+            cyclic_nakayama(&[2, 2, 3], field).unwrap(),
+        ] {
+            for m in assorted(&algebra) {
+                let (envelope, _) = injective_envelope(&m).unwrap();
                 assert!(
                     matches!(
                         is_isomorphic(&envelope, &socle_injective_sum(&m)).unwrap(),
@@ -173,12 +173,12 @@ fn envelope_is_isomorphic_to_the_socle_construction() {
 #[test]
 fn linear_an_simples_have_injective_dimensions_0_then_1() {
     for n in 2..6 {
-        let algebra = linear_an(n);
         for field in fields() {
+            let algebra = linear_an(n, field);
             for v in 0..algebra.quiver().num_vertices() {
                 let expected = usize::from(v > 0);
                 assert_eq!(
-                    injective_dimension(&Module::simple(&algebra, field, v), 5),
+                    injective_dimension(&Module::simple(&algebra, v), 5).unwrap(),
                     Bounded::Exact(expected),
                     "id S_{v} over A_{n}, F_{}",
                     field.modulus()
@@ -191,15 +191,15 @@ fn linear_an_simples_have_injective_dimensions_0_then_1() {
 #[test]
 fn a3_mod_ab_simples_coresolve_through_the_hand_derived_injectives() {
     for field in fields() {
-        let algebra = an_with_relations(3, &[(0, 2)]).unwrap();
+        let algebra = an_with_relations(3, &[(0, 2)], field).unwrap();
         let expected: [Vec<Vec<usize>>; 3] = [
             vec![vec![1, 0, 0]],
             vec![vec![1, 1, 0], vec![1, 0, 0]],
             vec![vec![0, 1, 1], vec![1, 1, 0], vec![1, 0, 0]],
         ];
         for v in 0..3u32 {
-            let s = Module::simple(&algebra, field, v);
-            let coresolution = coresolve(&s, 5);
+            let s = Module::simple(&algebra, v);
+            let coresolution = coresolve(&s, 5).unwrap();
             assert_eq!(coresolution.end, ResolutionEnd::Finite, "S_{v}");
             let dims: Vec<Vec<usize>> = coresolution
                 .terms
@@ -208,7 +208,7 @@ fn a3_mod_ab_simples_coresolve_through_the_hand_derived_injectives() {
                 .collect();
             assert_eq!(dims, expected[v as usize], "coresolution of S_{v}");
             assert_eq!(
-                injective_dimension(&s, 5),
+                injective_dimension(&s, 5).unwrap(),
                 Bounded::Exact(expected[v as usize].len() - 1),
                 "id S_{v}"
             );
@@ -220,14 +220,18 @@ fn a3_mod_ab_simples_coresolve_through_the_hand_derived_injectives() {
 fn truncated_poly_is_self_injective() {
     for field in fields() {
         for n in 2..5 {
-            let algebra = truncated_poly(n).unwrap();
-            let p = Module::projective(&algebra, field, 0);
-            let i = Module::injective(&algebra, field, 0);
-            assert_eq!(injective_dimension(&p, 6), Bounded::Exact(0), "id A, x^{n}");
-            assert_eq!(projective_dimension(&i, 6), Bounded::Exact(0), "pd D(A)");
-            let s = Module::simple(&algebra, field, 0);
+            let algebra = truncated_poly(n, field).unwrap();
+            let p = Module::projective(&algebra, 0);
+            let i = Module::injective(&algebra, 0);
             assert_eq!(
-                injective_dimension(&s, 6),
+                injective_dimension(&p, 6).unwrap(),
+                Bounded::Exact(0),
+                "id A, x^{n}"
+            );
+            assert_eq!(projective_dimension(&i, 6), Bounded::Exact(0), "pd D(A)");
+            let s = Module::simple(&algebra, 0);
+            assert_eq!(
+                injective_dimension(&s, 6).unwrap(),
                 Bounded::AtLeast(7),
                 "id S, x^{n}"
             );
@@ -239,15 +243,15 @@ fn truncated_poly_is_self_injective() {
 fn cyclic_nakayama_with_constant_kupisch_is_self_injective() {
     for field in fields() {
         for kupisch in [vec![3, 3, 3], vec![2, 2, 2], vec![2, 2, 2, 2]] {
-            let algebra = cyclic_nakayama(&kupisch).unwrap();
+            let algebra = cyclic_nakayama(&kupisch, field).unwrap();
             for v in 0..algebra.quiver().num_vertices() {
                 assert_eq!(
-                    injective_dimension(&Module::projective(&algebra, field, v), 6),
+                    injective_dimension(&Module::projective(&algebra, v), 6).unwrap(),
                     Bounded::Exact(0),
                     "id P_{v} for {kupisch:?}"
                 );
                 assert_eq!(
-                    projective_dimension(&Module::injective(&algebra, field, v), 6),
+                    projective_dimension(&Module::injective(&algebra, v), 6),
                     Bounded::Exact(0),
                     "pd I_{v} for {kupisch:?}"
                 );
@@ -259,10 +263,10 @@ fn cyclic_nakayama_with_constant_kupisch_is_self_injective() {
 #[test]
 fn cyclic_nakayama_2_2_3_coresolves_p0_in_three_steps() {
     for field in fields() {
-        let algebra = cyclic_nakayama(&[2, 2, 3]).unwrap();
-        let p0 = Module::projective(&algebra, field, 0);
+        let algebra = cyclic_nakayama(&[2, 2, 3], field).unwrap();
+        let p0 = Module::projective(&algebra, 0);
         assert_eq!(p0.dim_vector(), &[1, 1, 0]);
-        let coresolution = coresolve(&p0, 6);
+        let coresolution = coresolve(&p0, 6).unwrap();
         assert_eq!(coresolution.end, ResolutionEnd::Finite);
         let dims: Vec<Vec<usize>> = coresolution
             .terms
@@ -273,14 +277,14 @@ fn cyclic_nakayama_2_2_3_coresolves_p0_in_three_steps() {
             dims,
             vec![vec![1, 1, 1], vec![0, 1, 1], vec![1, 1, 1], vec![1, 0, 1]]
         );
-        assert_eq!(injective_dimension(&p0, 6), Bounded::Exact(3));
+        assert_eq!(injective_dimension(&p0, 6).unwrap(), Bounded::Exact(3));
         // P_1 = I_2 and P_2 ≅ I_1, so only P_0 fails to be injective.
         assert_eq!(
-            injective_dimension(&Module::projective(&algebra, field, 1), 6),
+            injective_dimension(&Module::projective(&algebra, 1), 6).unwrap(),
             Bounded::Exact(0)
         );
         assert_eq!(
-            injective_dimension(&Module::projective(&algebra, field, 2), 6),
+            injective_dimension(&Module::projective(&algebra, 2), 6).unwrap(),
             Bounded::Exact(0)
         );
     }
@@ -289,26 +293,26 @@ fn cyclic_nakayama_2_2_3_coresolves_p0_in_three_steps() {
 #[test]
 fn linear_nakayama_3_2_1_has_a_non_injective_projective() {
     for field in fields() {
-        let algebra = linear_nakayama(&[3, 2, 1]).unwrap();
-        let p1 = Module::projective(&algebra, field, 1);
+        let algebra = linear_nakayama(&[3, 2, 1], field).unwrap();
+        let p1 = Module::projective(&algebra, 1);
         assert_eq!(p1.dim_vector(), &[0, 1, 1]);
-        let coresolution = coresolve(&p1, 5);
+        let coresolution = coresolve(&p1, 5).unwrap();
         let dims: Vec<Vec<usize>> = coresolution
             .terms
             .iter()
             .map(|t| t.dim_vector().to_vec())
             .collect();
         assert_eq!(dims, vec![vec![1, 1, 1], vec![1, 0, 0]]);
-        assert_eq!(injective_dimension(&p1, 5), Bounded::Exact(1));
+        assert_eq!(injective_dimension(&p1, 5).unwrap(), Bounded::Exact(1));
     }
 }
 
 #[test]
 fn coresolution_prefixes_are_exact_and_minimal() {
-    for algebra in fixtures() {
-        for field in fields() {
-            for m in assorted(&algebra, field) {
-                let coresolution = coresolve(&m, 4);
+    for field in fields() {
+        for algebra in fixtures(field) {
+            for m in assorted(&algebra) {
+                let coresolution = coresolve(&m, 4).unwrap();
                 assert!(is_mono(&coresolution.coaugmentation));
                 assert_eq!(coresolution.maps.len() + 1, coresolution.terms.len());
                 if let Some(d0) = coresolution.maps.first() {
@@ -350,10 +354,10 @@ fn coresolution_prefixes_are_exact_and_minimal() {
 // dimension vectors to be the dimension vector of the module.
 #[test]
 fn finite_coresolutions_have_the_euler_characteristic_of_the_module() {
-    for algebra in fixtures() {
-        for field in fields() {
-            for m in assorted(&algebra, field) {
-                let coresolution = coresolve(&m, 6);
+    for field in fields() {
+        for algebra in fixtures(field) {
+            for m in assorted(&algebra) {
+                let coresolution = coresolve(&m, 6).unwrap();
                 if coresolution.end != ResolutionEnd::Finite {
                     continue;
                 }
@@ -378,13 +382,13 @@ fn finite_coresolutions_have_the_euler_characteristic_of_the_module() {
 // suprema here.
 #[test]
 fn injective_dimensions_of_the_simples_attain_the_global_dimension() {
-    for algebra in fixtures() {
-        for field in fields() {
+    for field in fields() {
+        for algebra in fixtures(field) {
             let bound = 6;
             let mut max = 0usize;
             let mut cut = false;
             for v in 0..algebra.quiver().num_vertices() {
-                match injective_dimension(&Module::simple(&algebra, field, v), bound) {
+                match injective_dimension(&Module::simple(&algebra, v), bound).unwrap() {
                     Bounded::Exact(d) => max = max.max(d),
                     Bounded::AtLeast(_) => cut = true,
                 }
@@ -396,7 +400,7 @@ fn injective_dimensions_of_the_simples_attain_the_global_dimension() {
             };
             assert_eq!(
                 from_injectives,
-                global_dimension(&algebra, field, bound),
+                global_dimension(&algebra, bound),
                 "gldim over F_{}",
                 field.modulus()
             );
@@ -416,11 +420,11 @@ fn entrywise_equal(a: &Module, b: &Module) -> bool {
 // terms, and the transposed differentials.
 #[test]
 fn dualizing_a_coresolution_gives_the_projective_resolution_of_the_dual() {
-    for algebra in fixtures() {
-        let op = opposite(&algebra);
-        for field in fields() {
-            for m in assorted(&algebra, field) {
-                let coresolution = coresolve(&m, 4);
+    for field in fields() {
+        for algebra in fixtures(field) {
+            let op = opposite(&algebra).unwrap();
+            for m in assorted(&algebra) {
+                let coresolution = coresolve(&m, 4).unwrap();
                 let resolution = resolve(&dual(&m, &op).unwrap(), 4);
                 assert_eq!(coresolution.end, resolution.end);
                 assert_eq!(coresolution.terms.len(), resolution.terms.len());
@@ -451,12 +455,12 @@ fn dualizing_a_coresolution_gives_the_projective_resolution_of_the_dual() {
 
 #[test]
 fn injective_dimension_of_a_module_equals_the_projective_dimension_of_its_dual() {
-    for algebra in fixtures() {
-        let op = opposite(&algebra);
-        for field in fields() {
-            for m in assorted(&algebra, field) {
+    for field in fields() {
+        for algebra in fixtures(field) {
+            let op = opposite(&algebra).unwrap();
+            for m in assorted(&algebra) {
                 assert_eq!(
-                    injective_dimension(&m, 5),
+                    injective_dimension(&m, 5).unwrap(),
                     projective_dimension(&dual(&m, &op).unwrap(), 5),
                     "id {:?} over F_{}",
                     m.dim_vector(),

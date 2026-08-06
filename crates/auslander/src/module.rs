@@ -1,18 +1,18 @@
-//! Finite-dimensional right modules over a monomial algebra.
+//! Finite-dimensional right modules over an [`Algebra`].
 //!
 //! A module assigns to each vertex `v` the row-vector space `k^{dims[v]}` and to each
 //! arrow `a` a `dims[source(a)] × dims[target(a)]` matrix; a path acts by the product
 //! of its arrow matrices in word order, so `M(p·q) = M(p) M(q)` under the left-to-right
-//! convention of [`crate::quiver`]. Construction verifies that every minimal forbidden
-//! word acts as zero; this suffices for the whole ideal, because any longer element of
-//! `I` contains a forbidden factor whose matrix product is already zero. A `Module`
-//! value is therefore always a genuine `kQ/I`-module.
+//! convention of [`crate::quiver`]. The field comes from the algebra. Construction
+//! verifies that every relation of the reduced Groebner basis acts as zero; this
+//! suffices for the whole ideal, because the action of `u·r·v` factors through the
+//! matrix of `r`. A `Module` value is therefore always a genuine `kQ/I`-module.
 
 use std::fmt;
 use std::sync::Arc;
 
-use crate::algebra::MonomialAlgebra;
-use crate::field::PrimeField;
+use crate::algebra::{Algebra, BasisIdx};
+use crate::field::{Fp, PrimeField};
 use crate::hom::Morphism;
 use crate::linalg::DenseMat;
 use crate::quiver::{ArrowId, PathWord, QuiverError};
@@ -31,16 +31,16 @@ pub enum ModuleError {
         got: (usize, usize),
     },
     /// `maps[arrow]` holds an entry at `(row, col)` whose representative is not
-    /// canonical for the declared field (not below its modulus); the entry was
+    /// canonical for the algebra's field (not below its modulus); the entry was
     /// produced by a different field.
     NonCanonicalEntry {
         arrow: ArrowId,
         row: usize,
         col: usize,
     },
-    /// The arrow matrices along minimal forbidden word `index` have nonzero product,
-    /// so the data is a `kQ`-representation but not a `kQ/I`-module.
-    ForbiddenWordActsNonzero { index: usize },
+    /// Groebner relation `index` acts as a nonzero matrix, so the data is a
+    /// `kQ`-representation but not a `kQ/I`-module.
+    RelationActsNonzero { index: usize },
 }
 
 impl fmt::Display for ModuleError {
@@ -63,11 +63,11 @@ impl fmt::Display for ModuleError {
             ),
             Self::NonCanonicalEntry { arrow, row, col } => write!(
                 f,
-                "map for arrow {} has a non-canonical entry at ({row}, {col}) for the declared field",
+                "map for arrow {} has a non-canonical entry at ({row}, {col}) for the algebra's field",
                 arrow.0
             ),
-            Self::ForbiddenWordActsNonzero { index } => {
-                write!(f, "forbidden word {index} acts as a nonzero matrix")
+            Self::RelationActsNonzero { index } => {
+                write!(f, "relation {index} acts as a nonzero matrix")
             }
         }
     }
@@ -87,8 +87,7 @@ pub struct Module(Arc<ModuleInner>);
 
 #[derive(Debug)]
 struct ModuleInner {
-    algebra: Arc<MonomialAlgebra>,
-    field: PrimeField,
+    algebra: Arc<Algebra>,
     dims: Vec<usize>,
     // One matrix per arrow, dims[source] × dims[target], acting on row vectors.
     maps: Vec<DenseMat>,
@@ -99,14 +98,14 @@ fn is_zero_mat(m: &DenseMat) -> bool {
 }
 
 impl Module {
-    /// Builds a module after checking map shapes, entry canonicity for `field`,
-    /// and that every minimal forbidden word acts as zero.
+    /// Builds a module after checking map shapes, entry canonicity for the
+    /// algebra's field, and that every Groebner relation acts as zero.
     pub fn new(
-        algebra: Arc<MonomialAlgebra>,
-        field: PrimeField,
+        algebra: Arc<Algebra>,
         dims: Vec<usize>,
         maps: Vec<DenseMat>,
     ) -> Result<Module, ModuleError> {
+        let field = algebra.field();
         let quiver = algebra.quiver();
         let num_vertices = quiver.num_vertices() as usize;
         if dims.len() != num_vertices {
@@ -145,18 +144,28 @@ impl Module {
                 });
             }
         }
-        for (index, word) in algebra.forbidden().iter().enumerate() {
-            let mut acc = maps[word[0].index()].clone();
-            for &a in &word[1..] {
-                acc = acc.mul(&maps[a.index()], &field);
+        for (index, relation) in algebra.relations().iter().enumerate() {
+            let source = relation.source() as usize;
+            let target = relation.target() as usize;
+            let mut acc = DenseMat::zero(dims[source], dims[target]);
+            for (coeff, word) in relation.terms() {
+                let mut action = DenseMat::identity(dims[source]);
+                for &a in word.arrows() {
+                    action = action.mul(&maps[a.index()], &field);
+                }
+                for r in 0..acc.rows() {
+                    for c in 0..acc.cols() {
+                        let scaled = field.mul(*coeff, action.get(r, c));
+                        acc.set(r, c, field.add(acc.get(r, c), scaled));
+                    }
+                }
             }
             if !is_zero_mat(&acc) {
-                return Err(ModuleError::ForbiddenWordActsNonzero { index });
+                return Err(ModuleError::RelationActsNonzero { index });
             }
         }
         Ok(Module(Arc::new(ModuleInner {
             algebra,
-            field,
             dims,
             maps,
         })))
@@ -170,10 +179,10 @@ impl Module {
     }
 
     /// The zero module.
-    pub fn zero(algebra: &Arc<MonomialAlgebra>, field: PrimeField) -> Module {
+    pub fn zero(algebra: &Arc<Algebra>) -> Module {
         let dims = vec![0; algebra.quiver().num_vertices() as usize];
         let maps = vec![DenseMat::zero(0, 0); algebra.quiver().num_arrows()];
-        Module::new(algebra.clone(), field, dims, maps).expect("the zero module is a module")
+        Module::new(algebra.clone(), dims, maps).expect("the zero module is a module")
     }
 
     /// The simple module `S_v`: one-dimensional at `v`, zero elsewhere, all arrows
@@ -181,7 +190,7 @@ impl Module {
     ///
     /// # Panics
     /// Panics if `v` is not a vertex of the algebra's quiver.
-    pub fn simple(algebra: &Arc<MonomialAlgebra>, field: PrimeField, v: u32) -> Module {
+    pub fn simple(algebra: &Arc<Algebra>, v: u32) -> Module {
         let quiver = algebra.quiver();
         assert!(v < quiver.num_vertices(), "simple: vertex {v} out of range");
         let dims: Vec<usize> = (0..quiver.num_vertices())
@@ -196,22 +205,22 @@ impl Module {
                 )
             })
             .collect();
-        Module::new(algebra.clone(), field, dims, maps).expect("S_v is a module")
+        Module::new(algebra.clone(), dims, maps).expect("S_v is a module")
     }
 
     /// The indecomposable projective `P_v = e_v A`: at vertex `w` the basis is the
-    /// standard paths `v → w`, and an arrow `a` sends the basis path `p` to
-    /// `p·a` when that is standard and to zero otherwise.
+    /// normal words `v → w`, and an arrow `a` sends the basis word `p` to the
+    /// normal form of `p·a`.
     ///
     /// # Panics
     /// Panics if `v` is not a vertex of the algebra's quiver.
-    pub fn projective(algebra: &Arc<MonomialAlgebra>, field: PrimeField, v: u32) -> Module {
+    pub fn projective(algebra: &Arc<Algebra>, v: u32) -> Module {
         let quiver = algebra.quiver();
         assert!(
             v < quiver.num_vertices(),
             "projective: vertex {v} out of range"
         );
-        // pos[b] = position of basis path b inside its component's ordered basis.
+        // pos[b] = position of basis word b inside its component's ordered basis.
         let mut pos = vec![usize::MAX; algebra.dim()];
         let mut dims = vec![0usize; quiver.num_vertices() as usize];
         for w in 0..quiver.num_vertices() {
@@ -227,26 +236,26 @@ impl Module {
                 let (s, t) = (quiver.source(a), quiver.target(a));
                 let mut mat = DenseMat::zero(dims[s as usize], dims[t as usize]);
                 for (row, &p) in algebra.paths_between(v, s).iter().enumerate() {
-                    if let Some(q) = algebra.right_mul(p, a) {
-                        mat.set(row, pos[q], field.one());
+                    for &(q, c) in algebra.right_mul(p, a) {
+                        mat.set(row, pos[q], c);
                     }
                 }
                 mat
             })
             .collect();
-        Module::new(algebra.clone(), field, dims, maps).expect("P_v is a module")
+        Module::new(algebra.clone(), dims, maps).expect("P_v is a module")
     }
 
     /// The indecomposable injective `I_v = D(A e_v)`: at vertex `w` the basis is the
-    /// dual basis `{p* : p a standard path w → v}`.
+    /// dual basis `{p* : p a normal word w → v}`.
     ///
     /// The right action dualizes left multiplication: `(f·a)(x) = f(a·x)`, so for an
     /// arrow `a: w → w'` the matrix entry at row `q ∈ paths(w, v)`, column
-    /// `p ∈ paths(w', v)` is 1 exactly when `a·p = q`.
+    /// `p ∈ paths(w', v)` is the coefficient of `q` in the normal form of `a·p`.
     ///
     /// # Panics
     /// Panics if `v` is not a vertex of the algebra's quiver.
-    pub fn injective(algebra: &Arc<MonomialAlgebra>, field: PrimeField, v: u32) -> Module {
+    pub fn injective(algebra: &Arc<Algebra>, v: u32) -> Module {
         let quiver = algebra.quiver();
         assert!(
             v < quiver.num_vertices(),
@@ -267,24 +276,25 @@ impl Module {
                 let (s, t) = (quiver.source(a), quiver.target(a));
                 let mut mat = DenseMat::zero(dims[s as usize], dims[t as usize]);
                 for (col, &p) in algebra.paths_between(t, v).iter().enumerate() {
-                    if let Some(q) = algebra.left_mul(a, p) {
-                        mat.set(pos[q], col, field.one());
+                    for &(q, c) in algebra.left_mul(a, p) {
+                        mat.set(pos[q], col, c);
                     }
                 }
                 mat
             })
             .collect();
-        Module::new(algebra.clone(), field, dims, maps).expect("I_v is a module")
+        Module::new(algebra.clone(), dims, maps).expect("I_v is a module")
     }
 
     #[inline]
-    pub fn algebra(&self) -> &Arc<MonomialAlgebra> {
+    pub fn algebra(&self) -> &Arc<Algebra> {
         &self.0.algebra
     }
 
+    /// The algebra's field.
     #[inline]
     pub fn field(&self) -> PrimeField {
-        self.0.field
+        self.0.algebra.field()
     }
 
     /// The dimension vector, indexed by vertex.
@@ -320,11 +330,45 @@ impl Module {
     /// `word` is not a path of this algebra's quiver (see [`PathWord::validate_in`]).
     pub fn word_action(&self, word: &PathWord) -> Result<DenseMat, QuiverError> {
         word.validate_in(self.0.algebra.quiver())?;
+        let field = self.field();
         let mut acc = DenseMat::identity(self.0.dims[word.source() as usize]);
         for &a in word.arrows() {
-            acc = acc.mul(&self.0.maps[a.index()], &self.0.field);
+            acc = acc.mul(&self.0.maps[a.index()], &field);
         }
         Ok(acc)
+    }
+
+    /// The matrix of the uniform element `Σ c_i · basis[i]` acting on row
+    /// vectors, `dims[u] × dims[v]` for the shared source `u` and target `v`
+    /// of the named basis words.
+    ///
+    /// # Panics
+    /// Panics when `terms` is empty, names a basis index out of range, or
+    /// mixes sources or targets.
+    pub fn element_action(&self, terms: &[(BasisIdx, Fp)]) -> DenseMat {
+        assert!(!terms.is_empty(), "element_action: terms are empty");
+        let basis = self.0.algebra.basis();
+        let source = basis[terms[0].0].source();
+        let target = basis[terms[0].0].target();
+        let field = self.field();
+        let mut acc = DenseMat::zero(self.0.dims[source as usize], self.0.dims[target as usize]);
+        for &(index, coeff) in terms {
+            let word = &basis[index];
+            assert!(
+                word.source() == source && word.target() == target,
+                "element_action: terms mix sources or targets"
+            );
+            let action = self
+                .word_action(word)
+                .expect("algebra basis words are valid in their own quiver");
+            for r in 0..acc.rows() {
+                for c in 0..acc.cols() {
+                    let scaled = field.mul(coeff, action.get(r, c));
+                    acc.set(r, c, field.add(acc.get(r, c), scaled));
+                }
+            }
+        }
+        acc
     }
 }
 
@@ -334,7 +378,7 @@ impl Module {
 /// `inclusions[j].then(projections[k])` is zero for `j != k`.
 ///
 /// # Panics
-/// Panics on an empty slice or when the summands do not share one algebra and field.
+/// Panics on an empty slice or when the summands do not share one algebra.
 pub fn direct_sum(summands: &[&Module]) -> (Module, Vec<Morphism>, Vec<Morphism>) {
     assert!(!summands.is_empty(), "direct_sum: needs a summand");
     let first = summands[0];
@@ -343,7 +387,6 @@ pub fn direct_sum(summands: &[&Module]) -> (Module, Vec<Morphism>, Vec<Morphism>
             Arc::ptr_eq(first.algebra(), s.algebra()),
             "direct_sum: mixed algebras"
         );
-        assert_eq!(first.field(), s.field(), "direct_sum: mixed fields");
     }
     let quiver = first.algebra().quiver();
     let n = quiver.num_vertices() as usize;
@@ -372,7 +415,7 @@ pub fn direct_sum(summands: &[&Module]) -> (Module, Vec<Morphism>, Vec<Morphism>
             mat
         })
         .collect();
-    let sum = Module::new(first.algebra().clone(), field, dims, maps)
+    let sum = Module::new(first.algebra().clone(), dims, maps)
         .expect("a direct sum of modules is a module");
     let mut inclusions = Vec::with_capacity(summands.len());
     let mut projections = Vec::with_capacity(summands.len());
@@ -398,8 +441,9 @@ pub fn direct_sum(summands: &[&Module]) -> (Module, Vec<Morphism>, Vec<Morphism>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::algebra::{an_with_relations, cyclic_nakayama, dual_numbers, linear_an};
-    use crate::field::Fp;
+    use crate::algebra::{
+        an_with_relations, commutative_square, cyclic_nakayama, dual_numbers, linear_an,
+    };
     use crate::hom::{identity, zero_morphism};
 
     fn f5() -> PrimeField {
@@ -416,28 +460,50 @@ mod tests {
 
     #[test]
     fn invertible_loop_action_is_rejected() {
-        let a = dual_numbers();
-        let field = f5();
-        let result = Module::new(a, field, vec![1], vec![mat(&field, &[&[1]])]);
+        let a = dual_numbers(f5());
+        let result = Module::new(a, vec![1], vec![mat(&f5(), &[&[1]])]);
         assert_eq!(
             result.unwrap_err(),
-            ModuleError::ForbiddenWordActsNonzero { index: 0 }
+            ModuleError::RelationActsNonzero { index: 0 }
         );
     }
 
     #[test]
     fn nilpotent_loop_action_is_accepted() {
-        let a = dual_numbers();
-        let field = f5();
-        let m = Module::new(a, field, vec![2], vec![mat(&field, &[&[0, 1], &[0, 0]])]).unwrap();
+        let a = dual_numbers(f5());
+        let m = Module::new(a, vec![2], vec![mat(&f5(), &[&[0, 1], &[0, 0]])]).unwrap();
         assert_eq!(m.total_dim(), 2);
         assert!(!m.is_zero());
     }
 
     #[test]
+    fn commutative_square_relation_is_enforced() {
+        // One-dimensional everywhere; ab acts as 1. The relation ab - cd
+        // rejects cd acting as 0 and accepts cd acting as 1.
+        let a = commutative_square(f5());
+        let one = mat(&f5(), &[&[1]]);
+        let zero = mat(&f5(), &[&[0]]);
+        let rejected = Module::new(
+            a.clone(),
+            vec![1, 1, 1, 1],
+            vec![one.clone(), one.clone(), one.clone(), zero],
+        );
+        assert_eq!(
+            rejected.unwrap_err(),
+            ModuleError::RelationActsNonzero { index: 0 }
+        );
+        let accepted = Module::new(
+            a,
+            vec![1, 1, 1, 1],
+            vec![one.clone(), one.clone(), one.clone(), one],
+        );
+        assert!(accepted.is_ok());
+    }
+
+    #[test]
     fn wrong_dims_length_is_rejected() {
-        let a = linear_an(3);
-        let result = Module::new(a, f5(), vec![1, 1], vec![DenseMat::zero(1, 1); 2]);
+        let a = linear_an(3, f5());
+        let result = Module::new(a, vec![1, 1], vec![DenseMat::zero(1, 1); 2]);
         assert_eq!(
             result.unwrap_err(),
             ModuleError::DimsLengthMismatch {
@@ -449,9 +515,9 @@ mod tests {
 
     #[test]
     fn wrong_map_shape_is_rejected() {
-        let a = linear_an(3);
+        let a = linear_an(3, f5());
         let maps = vec![DenseMat::zero(1, 1), DenseMat::zero(2, 1)];
-        let result = Module::new(a, f5(), vec![1, 1, 1], maps);
+        let result = Module::new(a, vec![1, 1, 1], maps);
         assert_eq!(
             result.unwrap_err(),
             ModuleError::MapShapeMismatch {
@@ -464,8 +530,8 @@ mod tests {
 
     #[test]
     fn zero_module_has_dimension_zero() {
-        let a = linear_an(3);
-        let z = Module::zero(&a, f5());
+        let a = linear_an(3, f5());
+        let z = Module::zero(&a);
         assert!(z.is_zero());
         assert_eq!(z.total_dim(), 0);
         assert_eq!(z.dim_vector(), &[0, 0, 0]);
@@ -473,9 +539,9 @@ mod tests {
 
     #[test]
     fn word_action_multiplies_arrow_matrices_in_word_order() {
-        let a = linear_an(3);
+        let a = linear_an(3, f5());
         let field = f5();
-        let p0 = Module::projective(&a, field, 0);
+        let p0 = Module::projective(&a, 0);
         let word =
             PathWord::from_arrows(a.quiver(), &[ArrowId(0), ArrowId(1)]).expect("path a·b in A_3");
         let expected = p0.map(ArrowId(0)).mul(p0.map(ArrowId(1)), &field);
@@ -486,9 +552,9 @@ mod tests {
 
     #[test]
     fn word_action_rejects_a_word_from_another_quiver() {
-        let a = linear_an(3);
-        let other = dual_numbers();
-        let p0 = Module::projective(&a, f5(), 0);
+        let a = linear_an(3, f5());
+        let other = dual_numbers(f5());
+        let p0 = Module::projective(&a, 0);
         let word = PathWord::from_arrows(other.quiver(), &[ArrowId(0)]).unwrap();
         assert_eq!(
             p0.word_action(&word),
@@ -500,14 +566,42 @@ mod tests {
     }
 
     #[test]
+    fn element_action_sums_scaled_word_actions() {
+        let field = f5();
+        let a = commutative_square(field);
+        let p0 = Module::projective(&a, 0);
+        let ab = a
+            .path_index(&PathWord::from_arrows(a.quiver(), &[ArrowId(0), ArrowId(1)]).unwrap())
+            .unwrap()
+            .unwrap();
+        let action = p0.element_action(&[(ab, field.elem(3))]);
+        let word_mat = p0.word_action(&a.basis()[ab]).expect("basis word is valid");
+        for r in 0..action.rows() {
+            for c in 0..action.cols() {
+                assert_eq!(
+                    action.get(r, c),
+                    field.mul(field.elem(3), word_mat.get(r, c))
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "mix sources")]
+    fn element_action_rejects_mixed_endpoints() {
+        let a = linear_an(3, f5());
+        let p0 = Module::projective(&a, 0);
+        p0.element_action(&[(0, f5().one()), (1, f5().one())]);
+    }
+
+    #[test]
     fn non_canonical_entry_is_rejected_before_relation_checks() {
         // The entry 3 is canonical in F_5 but not in F_2; over F_2 the loop's square
         // would also violate x² = 0, and the canonicity error must win.
-        let a = dual_numbers();
-        let f2 = PrimeField::new(2).unwrap();
+        let a = dual_numbers(PrimeField::new(2).unwrap());
         let maps = vec![mat(&f5(), &[&[3]])];
         assert_eq!(
-            Module::new(a, f2, vec![1], maps).unwrap_err(),
+            Module::new(a, vec![1], maps).unwrap_err(),
             ModuleError::NonCanonicalEntry {
                 arrow: ArrowId(0),
                 row: 0,
@@ -518,9 +612,9 @@ mod tests {
 
     #[test]
     fn simple_is_one_dimensional_at_its_vertex() {
-        let a = an_with_relations(3, &[(0, 2)]).unwrap();
+        let a = an_with_relations(3, &[(0, 2)], f5()).unwrap();
         for v in 0..3 {
-            let s = Module::simple(&a, f5(), v);
+            let s = Module::simple(&a, v);
             let expected: Vec<usize> = (0..3).map(|w| usize::from(w == v as usize)).collect();
             assert_eq!(s.dim_vector(), expected.as_slice());
         }
@@ -530,15 +624,15 @@ mod tests {
     // P_i = e_i A and column j is the dimension vector of I_j = D(A e_j).
     #[test]
     fn projective_dim_vectors_are_cartan_rows() {
-        let field = f5();
         for algebra in [
-            linear_an(3),
-            an_with_relations(3, &[(0, 2)]).unwrap(),
-            cyclic_nakayama(&[2, 2, 2]).unwrap(),
+            linear_an(3, f5()),
+            an_with_relations(3, &[(0, 2)], f5()).unwrap(),
+            cyclic_nakayama(&[2, 2, 2], f5()).unwrap(),
+            commutative_square(f5()),
         ] {
             let cartan = algebra.cartan_matrix();
             for v in 0..algebra.quiver().num_vertices() {
-                let p = Module::projective(&algebra, field, v);
+                let p = Module::projective(&algebra, v);
                 assert_eq!(p.dim_vector(), cartan[v as usize].as_slice(), "P_{v}");
             }
         }
@@ -546,15 +640,15 @@ mod tests {
 
     #[test]
     fn injective_dim_vectors_are_cartan_columns() {
-        let field = f5();
         for algebra in [
-            linear_an(3),
-            an_with_relations(3, &[(0, 2)]).unwrap(),
-            cyclic_nakayama(&[2, 2, 2]).unwrap(),
+            linear_an(3, f5()),
+            an_with_relations(3, &[(0, 2)], f5()).unwrap(),
+            cyclic_nakayama(&[2, 2, 2], f5()).unwrap(),
+            commutative_square(f5()),
         ] {
             let cartan = algebra.cartan_matrix();
             for v in 0..algebra.quiver().num_vertices() {
-                let i = Module::injective(&algebra, field, v);
+                let i = Module::injective(&algebra, v);
                 let column: Vec<usize> = cartan.iter().map(|row| row[v as usize]).collect();
                 assert_eq!(i.dim_vector(), column.as_slice(), "I_{v}");
             }
@@ -563,18 +657,17 @@ mod tests {
 
     #[test]
     fn a3_mod_ab_projective_p0_has_dimension_vector_1_1_0() {
-        let a = an_with_relations(3, &[(0, 2)]).unwrap();
-        let p0 = Module::projective(&a, f5(), 0);
+        let a = an_with_relations(3, &[(0, 2)], f5()).unwrap();
+        let p0 = Module::projective(&a, 0);
         assert_eq!(p0.dim_vector(), &[1, 1, 0]);
     }
 
     #[test]
     fn direct_sum_projections_split_inclusions() {
-        let a = linear_an(3);
-        let field = f5();
-        let p0 = Module::projective(&a, field, 0);
-        let p1 = Module::projective(&a, field, 1);
-        let s2 = Module::simple(&a, field, 2);
+        let a = linear_an(3, f5());
+        let p0 = Module::projective(&a, 0);
+        let p1 = Module::projective(&a, 1);
+        let s2 = Module::simple(&a, 2);
         let parts = [&p0, &p1, &s2];
         let (sum, inclusions, projections) = direct_sum(&parts);
         for v in 0..3 {

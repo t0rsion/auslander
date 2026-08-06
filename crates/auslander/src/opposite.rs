@@ -1,24 +1,26 @@
 //! Opposite algebras, the k-dual functor `D`, and the Nakayama functor `ν` on
 //! maps between projectives.
 //!
-//! The opposite of the monomial algebra `kQ/I` is `kQ^op/I^op`: same vertices,
-//! arrow `a: i → j` reversed to the same-id arrow `j → i`, and every word
-//! `a_1 ⋯ a_k` (in particular every forbidden word) reversed to `a_k ⋯ a_1`.
-//! Reversal is a bijection between the standard paths of the two sides, so both
-//! algebras have the same dimension. `D` sends a right `A`-module to a right
-//! `A^op`-module on the dual spaces: same dimension vector,
-//! `DM(a^op) = M(a)ᵀ`. Applied twice through one [`OppositeMap`], `D` restores
-//! the original module entry for entry.
+//! The opposite of `kQ/I` is `kQ^op/I^op`: same vertices, arrow `a: i → j`
+//! reversed to the same-id arrow `j → i`, and every relation word reversed.
+//! [`opposite`] runs the full completion and verification pipeline on the
+//! reversed relations. Reversing the reduced Groebner basis of `I` gives a
+//! generating set of `I^op`, not necessarily its reduced Groebner basis;
+//! completion recompletes it. Both sides have the same dimension. `D` sends a
+//! right `A`-module to a right `A^op`-module on the dual spaces: same
+//! dimension vector, `DM(a^op) = M(a)ᵀ`. Applied twice through one
+//! [`OppositeMap`], `D` restores the original module entry for entry.
 
 use std::fmt;
 use std::sync::Arc;
 
-use crate::algebra::{BasisIdx, MonomialAlgebra};
+use crate::algebra::{Algebra, AlgebraBuildError};
 use crate::field::{Fp, PrimeField};
 use crate::hom::Morphism;
 use crate::linalg::DenseMat;
 use crate::module::{Module, direct_sum};
 use crate::quiver::{ArrowId, PathWord, Quiver, QuiverError};
+use crate::relation::{Presentation, Relation};
 
 /// Rejected duality or element-matrix input.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,7 +41,7 @@ pub enum OppositeError {
         expected: usize,
         got: usize,
     },
-    /// Entry `(row, col)` needs one coefficient per standard path from
+    /// Entry `(row, col)` needs one coefficient per normal word from
     /// `targets[col]` to `sources[row]`.
     CoefficientCountMismatch {
         row: usize,
@@ -48,7 +50,7 @@ pub enum OppositeError {
         got: usize,
     },
     /// Entry `(row, col)` holds a coefficient at `index` whose representative is
-    /// not canonical for the declared field.
+    /// not canonical for the algebra's field.
     NonCanonicalCoefficient {
         row: usize,
         col: usize,
@@ -95,7 +97,7 @@ impl fmt::Display for OppositeError {
             ),
             Self::NonCanonicalCoefficient { row, col, index } => write!(
                 f,
-                "entry ({row}, {col}) has a non-canonical coefficient at index {index} for the declared field"
+                "entry ({row}, {col}) has a non-canonical coefficient at index {index} for the algebra's field"
             ),
             Self::SourceNotTheDeclaredSum => f.write_str(
                 "the morphism's source is not the standard direct sum of the declared source summands",
@@ -117,48 +119,69 @@ impl std::error::Error for OppositeError {}
 /// to its reversal.
 #[derive(Clone, Debug)]
 pub struct OppositeMap {
-    algebra: Arc<MonomialAlgebra>,
-    opposite: Arc<MonomialAlgebra>,
+    algebra: Arc<Algebra>,
+    opposite: Arc<Algebra>,
 }
 
 /// The opposite algebra of `algebra` with its arrow/word correspondence: same
-/// vertices, arrows reversed keeping their ids, forbidden words reversed.
+/// vertices, arrows reversed keeping their ids, every relation word reversed.
+/// The reversed relations run through the full completion and verification
+/// pipeline independently, with the completion limits stored on `algebra`,
+/// so an algebra built with raised limits keeps them here. An error is
+/// possible in principle (a budget or engine failure), never an infinite
+/// dimension: reversal bijects paths, so the opposite has the same
+/// dimension.
 ///
 /// ```
 /// use auslander::algebra::an_with_relations;
+/// use auslander::field::PrimeField;
 /// use auslander::opposite::opposite;
-/// let a = an_with_relations(3, &[(0, 2)]).unwrap();
-/// let op = opposite(&a);
+/// let field = PrimeField::new(5).unwrap();
+/// let a = an_with_relations(3, &[(0, 2)], field).unwrap();
+/// let op = opposite(&a).unwrap();
 /// assert_eq!(op.opposite().dim(), a.dim());
 /// ```
-pub fn opposite(algebra: &Arc<MonomialAlgebra>) -> OppositeMap {
+pub fn opposite(algebra: &Arc<Algebra>) -> Result<OppositeMap, AlgebraBuildError> {
     let quiver = algebra.quiver();
+    let field = algebra.field();
     let arrows: Vec<(u32, u32)> = quiver.arrows().iter().map(|&(s, t)| (t, s)).collect();
     let reversed_quiver = Quiver::new(quiver.num_vertices(), &arrows)
         .expect("reversing endpoints keeps them in range");
-    let forbidden = algebra
-        .forbidden()
+    let relations = algebra
+        .relations()
         .iter()
-        .map(|word| word.iter().rev().copied().collect())
-        .collect();
-    let opposite = MonomialAlgebra::new(reversed_quiver, forbidden)
-        .expect("reversal bijects standard paths, so the opposite stays finite-dimensional");
-    OppositeMap {
+        .map(|relation| {
+            let terms = relation
+                .terms()
+                .iter()
+                .map(|(coeff, word)| {
+                    let reversed: Vec<ArrowId> = word.arrows().iter().rev().copied().collect();
+                    (*coeff, reversed)
+                })
+                .collect();
+            Relation::new(&reversed_quiver, field, terms)
+        })
+        .collect::<Result<Vec<Relation>, _>>()
+        .map_err(AlgebraBuildError::Relation)?;
+    let presentation = Presentation::new(reversed_quiver, field, relations)
+        .map_err(AlgebraBuildError::Relation)?;
+    let opposite = Algebra::new(presentation, algebra.completion_limits())?;
+    Ok(OppositeMap {
         algebra: algebra.clone(),
         opposite,
-    }
+    })
 }
 
 impl OppositeMap {
     /// The original algebra.
     #[inline]
-    pub fn algebra(&self) -> &Arc<MonomialAlgebra> {
+    pub fn algebra(&self) -> &Arc<Algebra> {
         &self.algebra
     }
 
     /// The opposite algebra.
     #[inline]
-    pub fn opposite(&self) -> &Arc<MonomialAlgebra> {
+    pub fn opposite(&self) -> &Arc<Algebra> {
         &self.opposite
     }
 
@@ -199,10 +222,7 @@ impl OppositeMap {
         Ok(reversed(word, self.algebra.quiver()))
     }
 
-    fn other_side(
-        &self,
-        algebra: &Arc<MonomialAlgebra>,
-    ) -> Result<&Arc<MonomialAlgebra>, OppositeError> {
+    fn other_side(&self, algebra: &Arc<Algebra>) -> Result<&Arc<Algebra>, OppositeError> {
         if Arc::ptr_eq(algebra, &self.algebra) {
             Ok(&self.opposite)
         } else if Arc::ptr_eq(algebra, &self.opposite) {
@@ -233,16 +253,12 @@ pub fn dual(m: &Module, op: &OppositeMap) -> Result<Module, OppositeError> {
     let maps = (0..m.algebra().quiver().num_arrows())
         .map(|i| m.map(ArrowId(i as u32)).transpose())
         .collect();
-    Ok(
-        Module::new(target, m.field(), m.dim_vector().to_vec(), maps).expect(
-            "a reversed forbidden word acts by the transposed original product, which is zero",
-        ),
-    )
+    Ok(Module::new(target, m.dim_vector().to_vec(), maps)
+        .expect("a reversed relation acts by the transposed original combination, which is zero"))
 }
 
 fn same_entries(a: &Module, b: &Module) -> bool {
     Arc::ptr_eq(a.algebra(), b.algebra())
-        && a.field() == b.field()
         && a.dim_vector() == b.dim_vector()
         && (0..a.algebra().quiver().num_arrows())
             .all(|i| a.map(ArrowId(i as u32)) == b.map(ArrowId(i as u32)))
@@ -283,12 +299,11 @@ pub fn dual_morphism(
 /// left multiplication. Writing elements of the sums as row tuples, the map
 /// acts componentwise as `v_l = Σ_k x_{k,l}·u_k`, so the entry at `(k, l)` lies
 /// in `e_{targets[l]} A e_{sources[k]}`. The entry is stored as its
-/// coefficients on the standard-path basis
+/// coefficients on the normal-word basis
 /// `paths_between(targets[l], sources[k])`, in that order.
 #[derive(Clone, Debug)]
 pub struct ElementMatrix {
-    algebra: Arc<MonomialAlgebra>,
-    field: PrimeField,
+    algebra: Arc<Algebra>,
     sources: Vec<u32>,
     targets: Vec<u32>,
     entries: Vec<Vec<Vec<Fp>>>,
@@ -296,14 +311,14 @@ pub struct ElementMatrix {
 
 impl ElementMatrix {
     /// Builds an element matrix after checking summand vertices, entry shapes,
-    /// and coefficient canonicity for `field`.
+    /// and coefficient canonicity for the algebra's field.
     pub fn new(
-        algebra: Arc<MonomialAlgebra>,
-        field: PrimeField,
+        algebra: Arc<Algebra>,
         sources: Vec<u32>,
         targets: Vec<u32>,
         entries: Vec<Vec<Vec<Fp>>>,
     ) -> Result<ElementMatrix, OppositeError> {
+        let field = algebra.field();
         let num_vertices = algebra.quiver().num_vertices();
         for &vertex in sources.iter().chain(&targets) {
             if vertex >= num_vertices {
@@ -344,7 +359,6 @@ impl ElementMatrix {
         }
         Ok(ElementMatrix {
             algebra,
-            field,
             sources,
             targets,
             entries,
@@ -352,13 +366,13 @@ impl ElementMatrix {
     }
 
     #[inline]
-    pub fn algebra(&self) -> &Arc<MonomialAlgebra> {
+    pub fn algebra(&self) -> &Arc<Algebra> {
         &self.algebra
     }
 
     #[inline]
     pub fn field(&self) -> PrimeField {
-        self.field
+        self.algebra.field()
     }
 
     /// The source summand vertices, `k`-th summand `P_{sources()[k]}`.
@@ -393,7 +407,6 @@ impl ElementMatrix {
         targets: &[u32],
     ) -> Result<ElementMatrix, OppositeError> {
         let algebra = f.source().algebra().clone();
-        let field = f.source().field();
         let num_vertices = algebra.quiver().num_vertices();
         for &vertex in sources.iter().chain(targets) {
             if vertex >= num_vertices {
@@ -403,10 +416,10 @@ impl ElementMatrix {
                 });
             }
         }
-        if !same_entries(f.source(), &projective_sum(&algebra, field, sources)) {
+        if !same_entries(f.source(), &projective_sum(&algebra, sources)) {
             return Err(OppositeError::SourceNotTheDeclaredSum);
         }
-        if !same_entries(f.target(), &projective_sum(&algebra, field, targets)) {
+        if !same_entries(f.target(), &projective_sum(&algebra, targets)) {
             return Err(OppositeError::TargetNotTheDeclaredSum);
         }
         let positions = component_positions(&algebra);
@@ -429,7 +442,6 @@ impl ElementMatrix {
         }
         Ok(ElementMatrix {
             algebra,
-            field,
             sources: sources.to_vec(),
             targets: targets.to_vec(),
             entries,
@@ -439,19 +451,19 @@ impl ElementMatrix {
     /// The morphism the element matrix records, between freshly built standard
     /// sums `⊕_k P_{sources[k]} → ⊕_l P_{targets[l]}`.
     pub fn morphism(&self) -> Morphism {
-        let source = projective_sum(&self.algebra, self.field, &self.sources);
-        let target = projective_sum(&self.algebra, self.field, &self.targets);
+        let source = projective_sum(&self.algebra, &self.sources);
+        let target = projective_sum(&self.algebra, &self.targets);
         let maps = self.vertex_matrices();
         Morphism::new(&source, &target, maps)
             .expect("left multiplication by fixed algebra elements is A-linear")
     }
 
-    /// One matrix per vertex `w`. The `(k, l)` block sends the basis path
-    /// `u: sources[k] → w` to `Σ_r c_r (r·u)` over the coefficient paths `r` of
-    /// entry `(k, l)`.
+    /// One matrix per vertex `w`. The `(k, l)` block sends the basis word
+    /// `u: sources[k] → w` to `Σ_r c_r (r·u)` over the coefficient words `r` of
+    /// entry `(k, l)`, each product expanded to its normal form.
     fn vertex_matrices(&self) -> Vec<DenseMat> {
         let algebra = &self.algebra;
-        let field = self.field;
+        let field = self.field();
         let positions = component_positions(algebra);
         (0..algebra.quiver().num_vertices())
             .map(|w| {
@@ -476,10 +488,11 @@ impl ElementMatrix {
                                 continue;
                             }
                             for (ui, &u) in algebra.paths_between(s, w).iter().enumerate() {
-                                if let Some(product) = mul_paths(algebra, r, u) {
+                                for &(product, pc) in &algebra.mul_basis(r, u) {
                                     let row = row_offset + ui;
                                     let col = col_offset + positions[product];
-                                    mat.set(row, col, field.add(mat.get(row, col), c));
+                                    let add = field.mul(c, pc);
+                                    mat.set(row, col, field.add(mat.get(row, col), add));
                                 }
                             }
                         }
@@ -494,12 +507,15 @@ impl ElementMatrix {
 
     /// The image of the matrix under `Hom_A(−, A)`: a map
     /// `⊕_l P^op_{targets[l]} → ⊕_k P^op_{sources[k]}` over the other side of
-    /// `op`, with entry `(l, k)` the reversed word of entry `(k, l)`.
+    /// `op`, with entry `(l, k)` the reversed element of entry `(k, l)`.
     /// `Hom_A(e_v A, A) ≅ A e_v = e_v A^op`, and precomposing left
-    /// multiplication turns it into right multiplication. Applying
-    /// `transpose_over` twice restores the matrix.
+    /// multiplication turns it into right multiplication. A reversed normal
+    /// word need not be normal on the other side, so every reversed word is
+    /// expanded to its normal form there. Applying `transpose_over` twice
+    /// restores the matrix.
     pub fn transpose_over(&self, op: &OppositeMap) -> Result<ElementMatrix, OppositeError> {
         let to = op.other_side(&self.algebra)?.clone();
+        let field = self.field();
         let positions = component_positions(&to);
         let entries = self
             .targets
@@ -510,19 +526,20 @@ impl ElementMatrix {
                     .iter()
                     .enumerate()
                     .map(|(k, &s)| {
-                        let mut coefficients =
-                            vec![self.field.zero(); to.paths_between(s, t).len()];
+                        let mut coefficients = vec![field.zero(); to.paths_between(s, t).len()];
                         for (ri, &r) in self.algebra.paths_between(t, s).iter().enumerate() {
                             let c = self.entries[k][l][ri];
                             if c.is_zero() {
                                 continue;
                             }
                             let word = reversed(&self.algebra.basis()[r], to.quiver());
-                            let index = to
-                                .path_index(&word)
-                                .expect("reversed words are paths of the opposite quiver")
-                                .expect("the reversal of a standard path is standard");
-                            coefficients[positions[index]] = c;
+                            let normal = to
+                                .nf_word(&word)
+                                .expect("reversed words are paths of the opposite quiver");
+                            for &(index, nc) in &normal {
+                                let slot = &mut coefficients[positions[index]];
+                                *slot = field.add(*slot, field.mul(c, nc));
+                            }
                         }
                         coefficients
                     })
@@ -531,7 +548,6 @@ impl ElementMatrix {
             .collect();
         Ok(ElementMatrix {
             algebra: to,
-            field: self.field,
             sources: self.targets.clone(),
             targets: self.sources.clone(),
             entries,
@@ -548,20 +564,21 @@ impl ElementMatrix {
 /// (see [`ElementMatrix`]). `Hom_A(−, A)` turns it into right multiplication
 /// `·x: A e_{t_l} → A e_{s_k}`. `D` of that is
 /// `ν(x): D(A e_{s_k}) = I_{s_k} → D(A e_{t_l}) = I_{t_l}`. So `ν` is
-/// covariant and `ν(P_i) = I_i` exactly. On the dual path bases of
-/// [`Module::injective`], `ν(x)(q^*) = q^* ∘ (·x)` evaluates on a basis path
-/// `p: w → t_l` to the coefficient of `q` in `p·x`, so in the row-vector
-/// convention the matrix at vertex `w` has entry `Σ_r c_r [p·r = q]` at row
-/// `q ∈ paths(w, s_k)`, column `p ∈ paths(w, t_l)`. Applied to a minimal
-/// presentation `P_1 → P_0 → M → 0`, this is the map whose kernel is `τ M`:
+/// covariant and `ν(P_i) = I_i` exactly. On the dual bases of
+/// [`Module::injective`], `ν(x)(q^*) = q^* ∘ (·x)` evaluates on a basis word
+/// `p: w → t_l` to the coefficient of `q` in the normal form of `p·x`, so in
+/// the row-vector convention the matrix at vertex `w` has entry
+/// `Σ_r c_r · [q](p·r)` at row `q ∈ paths(w, s_k)`, column
+/// `p ∈ paths(w, t_l)`. Applied to a minimal presentation
+/// `P_1 → P_0 → M → 0`, this is the map whose kernel is `τ M`:
 /// `Hom_A(−, A)` gives `0 → Hom(M, A) → Hom(P_0, A) → Hom(P_1, A) → Tr M → 0`,
 /// and dualizing gives `0 → τ M → ν P_1 → ν P_0 → ν M → 0`.
 pub fn nu_of_presentation_map(matrix: &ElementMatrix) -> Morphism {
     let algebra = matrix.algebra();
     let field = matrix.field();
     let positions = component_positions(algebra);
-    let source = injective_sum(algebra, field, matrix.sources());
-    let target = injective_sum(algebra, field, matrix.targets());
+    let source = injective_sum(algebra, matrix.sources());
+    let target = injective_sum(algebra, matrix.targets());
     let maps = (0..algebra.quiver().num_vertices())
         .map(|w| {
             let rows = matrix
@@ -585,10 +602,11 @@ pub fn nu_of_presentation_map(matrix: &ElementMatrix) -> Morphism {
                             continue;
                         }
                         for (pi, &p) in algebra.paths_between(w, t).iter().enumerate() {
-                            if let Some(q) = mul_paths(algebra, p, r) {
+                            for &(q, qc) in &algebra.mul_basis(p, r) {
                                 let row = row_offset + positions[q];
                                 let col = col_offset + pi;
-                                mat.set(row, col, field.add(mat.get(row, col), c));
+                                let add = field.mul(c, qc);
+                                mat.set(row, col, field.add(mat.get(row, col), add));
                             }
                         }
                     }
@@ -603,9 +621,9 @@ pub fn nu_of_presentation_map(matrix: &ElementMatrix) -> Morphism {
         .expect("ν of an element matrix is A-linear between the injective sums")
 }
 
-/// Position of each standard path within `paths_between` of its own endpoints,
-/// indexed by [`BasisIdx`].
-fn component_positions(algebra: &MonomialAlgebra) -> Vec<usize> {
+/// Position of each normal word within `paths_between` of its own endpoints,
+/// indexed by [`crate::algebra::BasisIdx`].
+fn component_positions(algebra: &Algebra) -> Vec<usize> {
     let n = algebra.quiver().num_vertices();
     let mut positions = vec![usize::MAX; algebra.dim()];
     for u in 0..n {
@@ -618,47 +636,35 @@ fn component_positions(algebra: &MonomialAlgebra) -> Vec<usize> {
     positions
 }
 
-/// `basis[p] · basis[q]` as a basis index, `None` when the product is zero.
-/// Caller guarantees `target(p) == source(q)`.
-fn mul_paths(algebra: &MonomialAlgebra, p: BasisIdx, q: BasisIdx) -> Option<BasisIdx> {
-    debug_assert_eq!(algebra.basis()[p].target(), algebra.basis()[q].source());
-    let mut acc = p;
-    for &a in algebra.basis()[q].arrows() {
-        acc = algebra.right_mul(acc, a)?;
-    }
-    Some(acc)
-}
-
 fn summand_sum(
-    algebra: &Arc<MonomialAlgebra>,
-    field: PrimeField,
+    algebra: &Arc<Algebra>,
     vertices: &[u32],
-    build: fn(&Arc<MonomialAlgebra>, PrimeField, u32) -> Module,
+    build: fn(&Arc<Algebra>, u32) -> Module,
 ) -> Module {
     match vertices {
-        [] => Module::zero(algebra, field),
-        &[v] => build(algebra, field, v),
+        [] => Module::zero(algebra),
+        &[v] => build(algebra, v),
         _ => {
-            let parts: Vec<Module> = vertices.iter().map(|&v| build(algebra, field, v)).collect();
+            let parts: Vec<Module> = vertices.iter().map(|&v| build(algebra, v)).collect();
             let refs: Vec<&Module> = parts.iter().collect();
             direct_sum(&refs).0
         }
     }
 }
 
-fn projective_sum(algebra: &Arc<MonomialAlgebra>, field: PrimeField, vertices: &[u32]) -> Module {
-    summand_sum(algebra, field, vertices, Module::projective)
+fn projective_sum(algebra: &Arc<Algebra>, vertices: &[u32]) -> Module {
+    summand_sum(algebra, vertices, Module::projective)
 }
 
-fn injective_sum(algebra: &Arc<MonomialAlgebra>, field: PrimeField, vertices: &[u32]) -> Module {
-    summand_sum(algebra, field, vertices, Module::injective)
+fn injective_sum(algebra: &Arc<Algebra>, vertices: &[u32]) -> Module {
+    summand_sum(algebra, vertices, Module::injective)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::algebra::{
-        an_with_relations, cyclic_nakayama, dual_numbers, kronecker, linear_an,
+        an_with_relations, commutative_square, cyclic_nakayama, dual_numbers, kronecker, linear_an,
         radical_square_zero_cycle,
     };
     use crate::hom::{hom, identity, kernel};
@@ -677,51 +683,98 @@ mod tests {
 
     #[test]
     fn opposite_reverses_arrows_and_keeps_ids() {
-        let a = linear_an(3);
-        let op = opposite(&a);
+        let a = linear_an(3, f5());
+        let op = opposite(&a).unwrap();
         assert_eq!(op.opposite().quiver().arrows(), &[(1, 0), (2, 1)]);
         assert_eq!(op.arrow_to_op(ArrowId(1)), ArrowId(1));
         assert_eq!(op.arrow_from_op(ArrowId(0)), ArrowId(0));
     }
 
     #[test]
-    fn opposite_reverses_forbidden_words() {
-        let a = an_with_relations(3, &[(0, 2)]).unwrap();
-        let op = opposite(&a);
-        assert_eq!(op.opposite().forbidden(), &[vec![ArrowId(1), ArrowId(0)]]);
+    fn opposite_reverses_relation_words() {
+        let a = an_with_relations(3, &[(0, 2)], f5()).unwrap();
+        let op = opposite(&a).unwrap();
+        let relations = op.opposite().relations();
+        assert_eq!(relations.len(), 1);
+        assert_eq!(
+            relations[0].terms()[0].1.arrows(),
+            &[ArrowId(1), ArrowId(0)]
+        );
+    }
+
+    /// x^65 as a general relation needs `max_word_len = 129`; the default
+    /// 64 truncates. The opposite recompletes the reversed relation with
+    /// the STORED limits, so it inherits the raised budget. Rebuilding
+    /// the same algebra from its certificate with `from_verified` resets
+    /// to the defaults by policy, and there the opposite truncates.
+    #[test]
+    fn opposite_and_tau_inherit_raised_completion_limits() {
+        use crate::algebra::AlgebraBuildError;
+        use crate::ar::{Tau, tau};
+        use crate::completion::CompletionLimits;
+        use crate::verify::verify;
+        let field = f5();
+        let quiver = Quiver::new(1, &[(0, 0)]).unwrap();
+        let relation =
+            Relation::new(&quiver, field, vec![(field.one(), vec![ArrowId(0); 65])]).unwrap();
+        let presentation = Presentation::new(quiver, field, vec![relation]).unwrap();
+        let raised = CompletionLimits {
+            max_word_len: 129,
+            ..CompletionLimits::default()
+        };
+        let a = crate::algebra::Algebra::new(presentation, &raised).unwrap();
+        assert_eq!(a.dim(), 65);
+        let op = opposite(&a).unwrap();
+        assert_eq!(op.opposite().dim(), 65);
+        assert_eq!(op.opposite().completion_limits(), &raised);
+        // Over the symmetric algebra k[x]/(x^65), tau = Omega^2 and
+        // Omega(k[x]/(x)) = k[x]/(x^64), so tau S = S.
+        match tau(&Module::simple(&a, 0)).unwrap() {
+            Tau::Module(t) => assert_eq!(t.dim_vector(), &[1]),
+            Tau::Zero => panic!("the simple over k[x]/(x^65) is not projective"),
+        }
+        let defaults = crate::algebra::Algebra::from_verified(
+            verify(&a.certificate().to_canonical_json()).unwrap(),
+        );
+        assert!(matches!(
+            opposite(&defaults),
+            Err(AlgebraBuildError::Truncated(_))
+        ));
     }
 
     #[test]
     fn opposite_preserves_dimension() {
         for a in [
-            linear_an(4),
-            an_with_relations(3, &[(0, 2)]).unwrap(),
-            kronecker(3),
-            dual_numbers(),
-            cyclic_nakayama(&[3, 3, 3]).unwrap(),
-            radical_square_zero_cycle(3),
+            linear_an(4, f5()),
+            an_with_relations(3, &[(0, 2)], f5()).unwrap(),
+            kronecker(3, f5()),
+            dual_numbers(f5()),
+            cyclic_nakayama(&[3, 3, 3], f5()).unwrap(),
+            radical_square_zero_cycle(3, f5()),
+            commutative_square(f5()),
         ] {
-            assert_eq!(opposite(&a).opposite().dim(), a.dim());
+            assert_eq!(opposite(&a).unwrap().opposite().dim(), a.dim());
         }
     }
 
     #[test]
     fn opposite_of_the_opposite_restores_quiver_and_relations() {
         for a in [
-            linear_an(3),
-            an_with_relations(3, &[(0, 2)]).unwrap(),
-            cyclic_nakayama(&[3, 3, 3]).unwrap(),
+            linear_an(3, f5()),
+            an_with_relations(3, &[(0, 2)], f5()).unwrap(),
+            cyclic_nakayama(&[3, 3, 3], f5()).unwrap(),
+            commutative_square(f5()),
         ] {
-            let double = opposite(opposite(&a).opposite());
+            let double = opposite(opposite(&a).unwrap().opposite()).unwrap();
             assert_eq!(double.opposite().quiver(), a.quiver());
-            assert_eq!(double.opposite().forbidden(), a.forbidden());
+            assert_eq!(double.opposite().relations(), a.relations());
         }
     }
 
     #[test]
     fn word_to_op_reverses_the_arrow_word_and_round_trips() {
-        let a = linear_an(3);
-        let op = opposite(&a);
+        let a = linear_an(3, f5());
+        let op = opposite(&a).unwrap();
         let word = PathWord::from_arrows(a.quiver(), &[ArrowId(0), ArrowId(1)]).unwrap();
         let rev = op.word_to_op(&word).unwrap();
         assert_eq!(rev.arrows(), &[ArrowId(1), ArrowId(0)]);
@@ -733,8 +786,8 @@ mod tests {
 
     #[test]
     fn word_to_op_rejects_words_from_the_other_side() {
-        let a = linear_an(3);
-        let op = opposite(&a);
+        let a = linear_an(3, f5());
+        let op = opposite(&a).unwrap();
         let backwards =
             PathWord::from_arrows(op.opposite().quiver(), &[ArrowId(1), ArrowId(0)]).unwrap();
         assert!(op.word_to_op(&backwards).is_err());
@@ -743,16 +796,10 @@ mod tests {
 
     #[test]
     fn dual_transposes_each_arrow_matrix() {
-        let a = dual_numbers();
+        let a = dual_numbers(f5());
         let field = f5();
-        let m = Module::new(
-            a.clone(),
-            field,
-            vec![2],
-            vec![mat(&field, &[&[0, 1], &[0, 0]])],
-        )
-        .unwrap();
-        let op = opposite(&a);
+        let m = Module::new(a.clone(), vec![2], vec![mat(&field, &[&[0, 1], &[0, 0]])]).unwrap();
+        let op = opposite(&a).unwrap();
         let d = dual(&m, &op).unwrap();
         assert!(Arc::ptr_eq(d.algebra(), op.opposite()));
         assert_eq!(d.dim_vector(), m.dim_vector());
@@ -761,19 +808,19 @@ mod tests {
 
     #[test]
     fn dual_of_a_module_over_the_opposite_lands_back_over_the_algebra() {
-        let a = linear_an(3);
-        let op = opposite(&a);
-        let m = Module::projective(op.opposite(), f5(), 0);
+        let a = linear_an(3, f5());
+        let op = opposite(&a).unwrap();
+        let m = Module::projective(op.opposite(), 0);
         let d = dual(&m, &op).unwrap();
         assert!(Arc::ptr_eq(d.algebra(), &a));
     }
 
     #[test]
     fn dual_rejects_a_module_outside_the_pair() {
-        let a = linear_an(3);
-        let other = linear_an(3);
-        let op = opposite(&a);
-        let m = Module::simple(&other, f5(), 0);
+        let a = linear_an(3, f5());
+        let other = linear_an(3, f5());
+        let op = opposite(&a).unwrap();
+        let m = Module::simple(&other, 0);
         assert_eq!(
             dual(&m, &op).unwrap_err(),
             OppositeError::AlgebraOutsidePair
@@ -782,14 +829,13 @@ mod tests {
 
     #[test]
     fn double_dual_is_the_identity_entry_for_entry() {
-        let a = an_with_relations(3, &[(0, 2)]).unwrap();
-        let field = f5();
-        let op = opposite(&a);
+        let a = an_with_relations(3, &[(0, 2)], f5()).unwrap();
+        let op = opposite(&a).unwrap();
         for v in 0..3 {
             for m in [
-                Module::simple(&a, field, v),
-                Module::projective(&a, field, v),
-                Module::injective(&a, field, v),
+                Module::simple(&a, v),
+                Module::projective(&a, v),
+                Module::injective(&a, v),
             ] {
                 let dd = dual(&dual(&m, &op).unwrap(), &op).unwrap();
                 assert!(same_entries(&dd, &m), "D(D(M)) != M at vertex {v}");
@@ -799,10 +845,9 @@ mod tests {
 
     #[test]
     fn dual_of_the_identity_is_the_identity() {
-        let a = linear_an(3);
-        let field = f5();
-        let op = opposite(&a);
-        let p0 = Module::projective(&a, field, 0);
+        let a = linear_an(3, f5());
+        let op = opposite(&a).unwrap();
+        let p0 = Module::projective(&a, 0);
         let dp0 = dual(&p0, &op).unwrap();
         let d_id = dual_morphism(&identity(&p0), &dp0, &dp0, &op).unwrap();
         assert_eq!(d_id, identity(&dp0));
@@ -810,11 +855,10 @@ mod tests {
 
     #[test]
     fn dual_morphism_transposes_vertex_matrices() {
-        let a = linear_an(3);
-        let field = f5();
-        let op = opposite(&a);
-        let p1 = Module::projective(&a, field, 1);
-        let p0 = Module::projective(&a, field, 0);
+        let a = linear_an(3, f5());
+        let op = opposite(&a).unwrap();
+        let p1 = Module::projective(&a, 1);
+        let p0 = Module::projective(&a, 0);
         let f = hom(&p1, &p0).unwrap().remove(0);
         let dp1 = dual(&p1, &op).unwrap();
         let dp0 = dual(&p0, &op).unwrap();
@@ -829,12 +873,11 @@ mod tests {
     #[test]
     fn dual_morphism_is_contravariant_on_a_composition() {
         // Right-module Hom runs down the arrows: f: P_2 → P_1, g: P_1 → P_0.
-        let a = linear_an(3);
-        let field = f5();
-        let op = opposite(&a);
-        let p2 = Module::projective(&a, field, 2);
-        let p1 = Module::projective(&a, field, 1);
-        let p0 = Module::projective(&a, field, 0);
+        let a = linear_an(3, f5());
+        let op = opposite(&a).unwrap();
+        let p2 = Module::projective(&a, 2);
+        let p1 = Module::projective(&a, 1);
+        let p0 = Module::projective(&a, 0);
         let f = hom(&p2, &p1).unwrap().remove(0);
         let g = hom(&p1, &p0).unwrap().remove(0);
         let d2 = dual(&p2, &op).unwrap();
@@ -851,13 +894,12 @@ mod tests {
 
     #[test]
     fn dual_morphism_rejects_a_wrong_dual() {
-        let a = linear_an(3);
-        let field = f5();
-        let op = opposite(&a);
-        let p0 = Module::projective(&a, field, 0);
+        let a = linear_an(3, f5());
+        let op = opposite(&a).unwrap();
+        let p0 = Module::projective(&a, 0);
         let f = identity(&p0);
         let dp0 = dual(&p0, &op).unwrap();
-        let wrong = Module::simple(op.opposite(), field, 0);
+        let wrong = Module::simple(op.opposite(), 0);
         assert_eq!(
             dual_morphism(&f, &wrong, &dp0, &op).unwrap_err(),
             OppositeError::NotDualOfTarget
@@ -870,25 +912,23 @@ mod tests {
 
     #[test]
     fn element_matrix_new_rejects_shape_and_canonicity_violations() {
-        let a = linear_an(3);
-        let field = f5();
+        let a = linear_an(3, f5());
         assert_eq!(
-            ElementMatrix::new(a.clone(), field, vec![3], Vec::new(), vec![Vec::new()])
-                .unwrap_err(),
+            ElementMatrix::new(a.clone(), vec![3], Vec::new(), vec![Vec::new()]).unwrap_err(),
             OppositeError::SummandOutOfRange {
                 vertex: 3,
                 num_vertices: 3
             }
         );
         assert_eq!(
-            ElementMatrix::new(a.clone(), field, vec![0], vec![0], Vec::new()).unwrap_err(),
+            ElementMatrix::new(a.clone(), vec![0], vec![0], Vec::new()).unwrap_err(),
             OppositeError::RowCountMismatch {
                 expected: 1,
                 got: 0
             }
         );
         assert_eq!(
-            ElementMatrix::new(a.clone(), field, vec![0], vec![0], vec![Vec::new()]).unwrap_err(),
+            ElementMatrix::new(a.clone(), vec![0], vec![0], vec![Vec::new()]).unwrap_err(),
             OppositeError::ColumnCountMismatch {
                 row: 0,
                 expected: 1,
@@ -896,8 +936,7 @@ mod tests {
             }
         );
         assert_eq!(
-            ElementMatrix::new(a.clone(), field, vec![0], vec![0], vec![vec![Vec::new()]])
-                .unwrap_err(),
+            ElementMatrix::new(a.clone(), vec![0], vec![0], vec![vec![Vec::new()]]).unwrap_err(),
             OppositeError::CoefficientCountMismatch {
                 row: 0,
                 col: 0,
@@ -907,8 +946,7 @@ mod tests {
         );
         let f7 = PrimeField::new(7).unwrap();
         assert_eq!(
-            ElementMatrix::new(a, field, vec![0], vec![0], vec![vec![vec![f7.elem(6)]]])
-                .unwrap_err(),
+            ElementMatrix::new(a, vec![0], vec![0], vec![vec![vec![f7.elem(6)]]]).unwrap_err(),
             OppositeError::NonCanonicalCoefficient {
                 row: 0,
                 col: 0,
@@ -921,10 +959,8 @@ mod tests {
     fn element_matrix_realizes_left_multiplication() {
         // Hom(P_1, P_0) over A_3 is spanned by left multiplication by the arrow
         // a, sending e_1 ↦ a and b ↦ ab.
-        let a = linear_an(3);
-        let field = f5();
-        let em =
-            ElementMatrix::new(a, field, vec![1], vec![0], vec![vec![vec![field.one()]]]).unwrap();
+        let a = linear_an(3, f5());
+        let em = ElementMatrix::new(a, vec![1], vec![0], vec![vec![vec![f5().one()]]]).unwrap();
         let f = em.morphism();
         assert_eq!(f.source().dim_vector(), &[0, 1, 1]);
         assert_eq!(f.target().dim_vector(), &[1, 1, 1]);
@@ -935,10 +971,9 @@ mod tests {
 
     #[test]
     fn element_matrix_of_morphism_round_trips() {
-        let a = an_with_relations(3, &[(0, 2)]).unwrap();
+        let a = an_with_relations(3, &[(0, 2)], f5()).unwrap();
         let field = f5();
-        let em = ElementMatrix::new(a, field, vec![1], vec![0], vec![vec![vec![field.elem(3)]]])
-            .unwrap();
+        let em = ElementMatrix::new(a, vec![1], vec![0], vec![vec![vec![field.elem(3)]]]).unwrap();
         let back = ElementMatrix::of_morphism(&em.morphism(), &[1], &[0]).unwrap();
         assert_eq!(back.sources(), &[1]);
         assert_eq!(back.targets(), &[0]);
@@ -947,13 +982,13 @@ mod tests {
 
     #[test]
     fn of_morphism_recovers_a_two_summand_matrix() {
-        let a = kronecker(2);
+        let a = kronecker(2, f5());
         let field = f5();
         let entries = vec![
             vec![vec![field.elem(1), field.elem(2)]],
             vec![vec![field.elem(3), field.elem(4)]],
         ];
-        let em = ElementMatrix::new(a, field, vec![1, 1], vec![0], entries.clone()).unwrap();
+        let em = ElementMatrix::new(a, vec![1, 1], vec![0], entries.clone()).unwrap();
         let back = ElementMatrix::of_morphism(&em.morphism(), &[1, 1], &[0]).unwrap();
         assert_eq!(back.entry(0, 0), entries[0][0].as_slice());
         assert_eq!(back.entry(1, 0), entries[1][0].as_slice());
@@ -961,9 +996,8 @@ mod tests {
 
     #[test]
     fn of_morphism_rejects_endpoints_that_are_not_the_declared_sums() {
-        let a = linear_an(3);
-        let field = f5();
-        let p0 = Module::projective(&a, field, 0);
+        let a = linear_an(3, f5());
+        let p0 = Module::projective(&a, 0);
         let f = identity(&p0);
         assert_eq!(
             ElementMatrix::of_morphism(&f, &[1], &[0]).unwrap_err(),
@@ -977,18 +1011,12 @@ mod tests {
 
     #[test]
     fn transpose_over_swaps_summands_and_reverses_words() {
-        let a = linear_an(3);
+        let a = linear_an(3, f5());
         let field = f5();
-        let op = opposite(&a);
+        let op = opposite(&a).unwrap();
         // x = ab ∈ e_0 A e_2, the map P_2 → P_0.
-        let em = ElementMatrix::new(
-            a.clone(),
-            field,
-            vec![2],
-            vec![0],
-            vec![vec![vec![field.one()]]],
-        )
-        .unwrap();
+        let em =
+            ElementMatrix::new(a.clone(), vec![2], vec![0], vec![vec![vec![field.one()]]]).unwrap();
         let t = em.transpose_over(&op).unwrap();
         assert!(Arc::ptr_eq(t.algebra(), op.opposite()));
         assert_eq!(t.sources(), &[0]);
@@ -1002,8 +1030,48 @@ mod tests {
     }
 
     #[test]
+    fn transpose_over_expands_a_reversed_non_normal_word() {
+        // A commutative square with permuted arrow ids: a = 0: 0 → 1,
+        // d = 1: 2 → 3, c = 2: 0 → 2, b = 3: 1 → 3, relation ab - cd. The
+        // normal length-2 word is ab = [0, 3], but its reversal [3, 0] is the
+        // Groebner leading word on the opposite side, so it is not normal
+        // there. The transpose must expand it to the opposite normal form,
+        // and transposing back must restore the entry.
+        use crate::completion::CompletionLimits;
+        let field = f5();
+        let quiver = Quiver::new(4, &[(0, 1), (2, 3), (0, 2), (1, 3)]).unwrap();
+        let relation = Relation::new(
+            &quiver,
+            field,
+            vec![
+                (field.one(), vec![ArrowId(0), ArrowId(3)]),
+                (field.elem(-1), vec![ArrowId(2), ArrowId(1)]),
+            ],
+        )
+        .unwrap();
+        let presentation = Presentation::new(quiver, field, vec![relation]).unwrap();
+        let a = Algebra::new(presentation, &CompletionLimits::default()).unwrap();
+        let ab = PathWord::from_arrows(a.quiver(), &[ArrowId(0), ArrowId(3)]).unwrap();
+        assert!(a.path_index(&ab).unwrap().is_some(), "ab is normal");
+        let op = opposite(&a).unwrap();
+        let rev_ab =
+            PathWord::from_arrows(op.opposite().quiver(), &[ArrowId(3), ArrowId(0)]).unwrap();
+        assert_eq!(
+            op.opposite().path_index(&rev_ab).unwrap(),
+            None,
+            "the reversal of the normal word is not normal on the opposite side"
+        );
+        let em = ElementMatrix::new(a.clone(), vec![3], vec![0], vec![vec![vec![field.elem(2)]]])
+            .unwrap();
+        let t = em.transpose_over(&op).unwrap();
+        assert_eq!(t.entry(0, 0), &[field.elem(2)]);
+        let back = t.transpose_over(&op).unwrap();
+        assert_eq!(back.entry(0, 0), em.entry(0, 0));
+    }
+
+    #[test]
     fn nu_of_the_identity_on_p_v_is_the_identity_on_i_v() {
-        let a = an_with_relations(3, &[(0, 2)]).unwrap();
+        let a = an_with_relations(3, &[(0, 2)], f5()).unwrap();
         let field = f5();
         for v in 0..3u32 {
             let component = a.paths_between(v, v);
@@ -1014,10 +1082,9 @@ mod tests {
                 .expect("the trivial path lies in its own component");
             coefficients[position] = field.one();
             let em =
-                ElementMatrix::new(a.clone(), field, vec![v], vec![v], vec![vec![coefficients]])
-                    .unwrap();
+                ElementMatrix::new(a.clone(), vec![v], vec![v], vec![vec![coefficients]]).unwrap();
             let nu = nu_of_presentation_map(&em);
-            let injective = Module::injective(&a, field, v);
+            let injective = Module::injective(&a, v);
             assert!(same_entries(nu.source(), &injective), "ν(P_{v}) source");
             assert!(same_entries(nu.target(), &injective), "ν(P_{v}) target");
             for w in 0..3 {
@@ -1030,10 +1097,8 @@ mod tests {
     fn nu_kernel_of_the_a3_presentation_of_s0_is_s1() {
         // d_1 for S_0 over A_3 is left multiplication by a: P_1 → P_0. The
         // kernel of ν(d_1): I_1 → I_0 is the AR translate τ S_0 = S_1.
-        let a = linear_an(3);
-        let field = f5();
-        let em =
-            ElementMatrix::new(a, field, vec![1], vec![0], vec![vec![vec![field.one()]]]).unwrap();
+        let a = linear_an(3, f5());
+        let em = ElementMatrix::new(a, vec![1], vec![0], vec![vec![vec![f5().one()]]]).unwrap();
         let nu = nu_of_presentation_map(&em);
         assert_eq!(nu.source().dim_vector(), &[1, 1, 0]);
         assert_eq!(nu.target().dim_vector(), &[1, 0, 0]);
@@ -1043,14 +1108,13 @@ mod tests {
 
     #[test]
     fn nu_of_an_empty_source_is_a_map_from_the_zero_module() {
-        let a = linear_an(3);
-        let field = f5();
-        let em = ElementMatrix::new(a.clone(), field, Vec::new(), vec![2], Vec::new()).unwrap();
+        let a = linear_an(3, f5());
+        let em = ElementMatrix::new(a.clone(), Vec::new(), vec![2], Vec::new()).unwrap();
         let nu = nu_of_presentation_map(&em);
         assert!(nu.source().is_zero());
         assert_eq!(
             nu.target().dim_vector(),
-            Module::injective(&a, field, 2).dim_vector()
+            Module::injective(&a, 2).dim_vector()
         );
         let (ker, _) = kernel(&nu);
         assert!(ker.is_zero());

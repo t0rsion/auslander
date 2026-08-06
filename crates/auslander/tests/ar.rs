@@ -10,10 +10,11 @@
 use std::sync::Arc;
 
 use auslander::algebra::{
-    MonomialAlgebra, an_with_relations, cyclic_nakayama, dual_numbers, kronecker, linear_an,
-    linear_nakayama, radical_square_zero_cycle, truncated_poly,
+    Algebra, MonomialPresentation, an_with_relations, commutative_square, cyclic_nakayama,
+    dual_numbers, kronecker, linear_an, linear_nakayama, radical_square_zero_cycle, truncated_poly,
 };
 use auslander::ar::{Tau, tau, tau_via_nakayama_kernel, tau_via_transpose_dual};
+use auslander::completion::CompletionLimits;
 use auslander::decompose::{Certificate, KrullSchmidtOutcome, decompose, krull_schmidt};
 use auslander::enumerate::nakayama_indecomposables;
 use auslander::field::PrimeField;
@@ -28,22 +29,24 @@ fn fields() -> [PrimeField; 2] {
 
 /// `D_4` with the three arrows leaving the central vertex 0. It is hereditary, and
 /// the vertex order is topological, so the Cartan matrix is upper unitriangular.
-fn d4() -> Arc<MonomialAlgebra> {
+fn d4(field: PrimeField) -> Arc<Algebra> {
     let quiver = Quiver::new(4, &[(0, 1), (0, 2), (0, 3)]).unwrap();
-    MonomialAlgebra::new(quiver, Vec::new()).unwrap()
+    let presentation = MonomialPresentation::new(quiver, Vec::new()).unwrap();
+    Algebra::from_monomial(field, &presentation, &CompletionLimits::default()).unwrap()
 }
 
-fn fixtures() -> Vec<Arc<MonomialAlgebra>> {
+fn fixtures(field: PrimeField) -> Vec<Arc<Algebra>> {
     vec![
-        linear_an(4),
-        an_with_relations(3, &[(0, 2)]).unwrap(),
-        kronecker(2),
-        dual_numbers(),
-        truncated_poly(3).unwrap(),
-        linear_nakayama(&[3, 2, 1]).unwrap(),
-        cyclic_nakayama(&[3, 3, 3]).unwrap(),
-        radical_square_zero_cycle(3),
-        d4(),
+        linear_an(4, field),
+        an_with_relations(3, &[(0, 2)], field).unwrap(),
+        kronecker(2, field),
+        dual_numbers(field),
+        truncated_poly(3, field).unwrap(),
+        linear_nakayama(&[3, 2, 1], field).unwrap(),
+        cyclic_nakayama(&[3, 3, 3], field).unwrap(),
+        radical_square_zero_cycle(3, field),
+        d4(field),
+        commutative_square(field),
     ]
 }
 
@@ -62,24 +65,24 @@ fn tau_module(m: &Module) -> Module {
 /// isomorphic to some `P_v`.
 fn is_projective_indecomposable(m: &Module) -> bool {
     (0..m.algebra().quiver().num_vertices())
-        .any(|v| isomorphic(m, &Module::projective(m.algebra(), m.field(), v)))
+        .any(|v| isomorphic(m, &Module::projective(m.algebra(), v)))
 }
 
-fn indecomposable_samples(algebra: &Arc<MonomialAlgebra>, field: PrimeField) -> Vec<Module> {
+fn indecomposable_samples(algebra: &Arc<Algebra>) -> Vec<Module> {
     let mut modules = Vec::new();
     for v in 0..algebra.quiver().num_vertices() {
-        modules.push(Module::simple(algebra, field, v));
-        modules.push(Module::injective(algebra, field, v));
+        modules.push(Module::simple(algebra, v));
+        modules.push(Module::injective(algebra, v));
     }
     modules
 }
 
 #[test]
 fn tau_of_every_indecomposable_projective_is_zero() {
-    for algebra in fixtures() {
-        for field in fields() {
+    for field in fields() {
+        for algebra in fixtures(field) {
             for v in 0..algebra.quiver().num_vertices() {
-                let p = Module::projective(&algebra, field, v);
+                let p = Module::projective(&algebra, v);
                 assert!(
                     matches!(tau(&p).unwrap(), Tau::Zero),
                     "τ P_{v} over F_{}",
@@ -93,32 +96,20 @@ fn tau_of_every_indecomposable_projective_is_zero() {
 #[test]
 fn tau_matches_the_hand_derived_translates_of_duality_tests() {
     for field in fields() {
-        let a3 = linear_an(3);
-        assert_eq!(
-            tau_module(&Module::simple(&a3, field, 0)).dim_vector(),
-            &[0, 1, 0]
-        );
-        assert_eq!(
-            tau_module(&Module::simple(&a3, field, 1)).dim_vector(),
-            &[0, 0, 1]
-        );
-        let kron = kronecker(2);
-        assert_eq!(
-            tau_module(&Module::simple(&kron, field, 0)).dim_vector(),
-            &[3, 2]
-        );
-        let dn = dual_numbers();
-        assert_eq!(
-            tau_module(&Module::simple(&dn, field, 0)).dim_vector(),
-            &[1]
-        );
+        let a3 = linear_an(3, field);
+        assert_eq!(tau_module(&Module::simple(&a3, 0)).dim_vector(), &[0, 1, 0]);
+        assert_eq!(tau_module(&Module::simple(&a3, 1)).dim_vector(), &[0, 0, 1]);
+        let kron = kronecker(2, field);
+        assert_eq!(tau_module(&Module::simple(&kron, 0)).dim_vector(), &[3, 2]);
+        let dn = dual_numbers(field);
+        assert_eq!(tau_module(&Module::simple(&dn, 0)).dim_vector(), &[1]);
         for algebra in [
-            radical_square_zero_cycle(3),
-            cyclic_nakayama(&[3, 3, 3]).unwrap(),
+            radical_square_zero_cycle(3, field),
+            cyclic_nakayama(&[3, 3, 3], field).unwrap(),
         ] {
             for i in 0..3u32 {
-                let t = tau_module(&Module::simple(&algebra, field, i));
-                let next = Module::simple(&algebra, field, (i + 1) % 3);
+                let t = tau_module(&Module::simple(&algebra, i));
+                let next = Module::simple(&algebra, (i + 1) % 3);
                 assert!(isomorphic(&t, &next), "τ S_{i} over F_{}", field.modulus());
             }
         }
@@ -127,11 +118,11 @@ fn tau_matches_the_hand_derived_translates_of_duality_tests() {
 
 #[test]
 fn both_routes_are_certified_isomorphic_on_every_sample() {
-    for algebra in fixtures() {
-        for field in fields() {
-            for m in indecomposable_samples(&algebra, field) {
+    for field in fields() {
+        for algebra in fixtures(field) {
+            for m in indecomposable_samples(&algebra) {
                 let left = tau_via_nakayama_kernel(&m);
-                let right = tau_via_transpose_dual(&m);
+                let right = tau_via_transpose_dual(&m).unwrap();
                 assert!(
                     isomorphic(&left, &right),
                     "routes disagree on dim {:?} over F_{}",
@@ -161,7 +152,7 @@ fn both_routes_are_certified_isomorphic_on_every_sample() {
 /// All hereditary fixtures here list vertices in topological order, so `C` is
 /// upper unitriangular and `C⁻¹` is exact over the integers by back
 /// substitution.
-fn coxeter_matrix(algebra: &MonomialAlgebra) -> Vec<Vec<i64>> {
+fn coxeter_matrix(algebra: &Algebra) -> Vec<Vec<i64>> {
     let cartan = algebra.cartan_matrix();
     let n = cartan.len();
     let c: Vec<Vec<i64>> = cartan
@@ -203,21 +194,21 @@ fn apply_coxeter(phi: &[Vec<i64>], dim: &[usize]) -> Vec<i64> {
 fn coxeter_matrices_match_hand_computed_examples() {
     // A_3: C = [[1,1,1],[0,1,1],[0,0,1]], C⁻¹ = [[1,-1,0],[0,1,-1],[0,0,1]],
     // Φ = −C⁻¹Cᵀ = [[0,1,0],[0,0,1],[-1,-1,-1]]; check τ S_0 = S_1 on it.
-    let phi = coxeter_matrix(&linear_an(3));
+    let phi = coxeter_matrix(&linear_an(3, PrimeField::new(5).unwrap()));
     assert_eq!(phi, vec![vec![0, 1, 0], vec![0, 0, 1], vec![-1, -1, -1]]);
     assert_eq!(apply_coxeter(&phi, &[1, 0, 0]), vec![0, 1, 0]);
     // Kronecker: C = [[1,2],[0,1]], Φ = [[3,2],[-2,-1]]; τ S_0 = (3,2).
-    let phi = coxeter_matrix(&kronecker(2));
+    let phi = coxeter_matrix(&kronecker(2, PrimeField::new(5).unwrap()));
     assert_eq!(phi, vec![vec![3, 2], vec![-2, -1]]);
     assert_eq!(apply_coxeter(&phi, &[1, 0]), vec![3, 2]);
 }
 
 #[test]
 fn tau_dimension_vectors_follow_the_coxeter_transformation_on_hereditary_fixtures() {
-    for algebra in [linear_an(4), kronecker(2), d4()] {
-        let phi = coxeter_matrix(&algebra);
-        for field in fields() {
-            for m in indecomposable_samples(&algebra, field) {
+    for field in fields() {
+        for algebra in [linear_an(4, field), kronecker(2, field), d4(field)] {
+            let phi = coxeter_matrix(&algebra);
+            for m in indecomposable_samples(&algebra) {
                 if is_projective_indecomposable(&m) {
                     continue;
                 }
@@ -241,9 +232,9 @@ fn tau_dimension_vectors_follow_the_coxeter_transformation_on_hereditary_fixture
 
 #[test]
 fn tau_is_zero_exactly_on_the_projective_samples() {
-    for algebra in fixtures() {
-        for field in fields() {
-            for m in indecomposable_samples(&algebra, field) {
+    for field in fields() {
+        for algebra in fixtures(field) {
+            for m in indecomposable_samples(&algebra) {
                 let projective = is_projective_indecomposable(&m);
                 match tau(&m).unwrap() {
                     Tau::Zero => assert!(
@@ -269,14 +260,14 @@ fn tau_is_zero_exactly_on_the_projective_samples() {
 
 fn is_injective_indecomposable(m: &Module) -> bool {
     (0..m.algebra().quiver().num_vertices())
-        .any(|v| isomorphic(m, &Module::injective(m.algebra(), m.field(), v)))
+        .any(|v| isomorphic(m, &Module::injective(m.algebra(), v)))
 }
 
 #[test]
 fn tau_of_a_nonprojective_indecomposable_is_indecomposable_and_noninjective() {
-    for algebra in fixtures() {
-        for field in fields() {
-            for m in indecomposable_samples(&algebra, field) {
+    for field in fields() {
+        for algebra in fixtures(field) {
+            for m in indecomposable_samples(&algebra) {
                 if is_projective_indecomposable(&m) {
                     continue;
                 }
@@ -302,8 +293,8 @@ fn tau_of_a_nonprojective_indecomposable_is_indecomposable_and_noninjective() {
 #[test]
 fn the_kronecker_injective_presentation_has_multiple_projective_summands() {
     for field in fields() {
-        let a = kronecker(2);
-        let i1 = Module::injective(&a, field, 1);
+        let a = kronecker(2, field);
+        let i1 = Module::injective(&a, 1);
         assert_eq!(i1.dim_vector(), &[2, 1]);
         let d1 = minimal_presentation_matrix(&i1);
         assert_eq!(d1.targets(), &[0, 0]);
@@ -318,8 +309,8 @@ fn enumerated_index(kupisch: &[usize], i: usize, l: usize) -> usize {
 }
 
 /// The enumerated modules. Asserts the certificate that the API promises.
-fn enumerated(algebra: &Arc<MonomialAlgebra>, field: PrimeField) -> Vec<Module> {
-    nakayama_indecomposables(algebra, field)
+fn enumerated(algebra: &Arc<Algebra>) -> Vec<Module> {
+    nakayama_indecomposables(algebra)
         .unwrap()
         .into_iter()
         .map(|(m, c)| {
@@ -332,9 +323,9 @@ fn enumerated(algebra: &Arc<MonomialAlgebra>, field: PrimeField) -> Vec<Module> 
 #[test]
 fn tau_cycles_the_nonprojective_uniserials_of_the_cyclic_nakayama_algebra() {
     let kupisch = [3usize, 3, 3];
-    let algebra = cyclic_nakayama(&kupisch).unwrap();
     for field in fields() {
-        let modules = enumerated(&algebra, field);
+        let algebra = cyclic_nakayama(&kupisch, field).unwrap();
+        let modules = enumerated(&algebra);
         for i in 0..3 {
             for l in 1..=2 {
                 let m = &modules[enumerated_index(&kupisch, i, l)];
@@ -353,9 +344,9 @@ fn tau_cycles_the_nonprojective_uniserials_of_the_cyclic_nakayama_algebra() {
 #[test]
 fn tau_shifts_the_nonprojective_uniserials_of_the_linear_nakayama_algebra() {
     let kupisch = [3usize, 2, 1];
-    let algebra = linear_nakayama(&kupisch).unwrap();
     for field in fields() {
-        let modules = enumerated(&algebra, field);
+        let algebra = linear_nakayama(&kupisch, field).unwrap();
+        let modules = enumerated(&algebra);
         // Non-projective uniserials have l < c_i. τ moves the top one step
         // down the quiver and keeps the length: (i, l) ↦ (i + 1, l).
         for (i, l) in [(0usize, 1usize), (0, 2), (1, 1)] {
@@ -377,14 +368,17 @@ fn tau_shifts_the_nonprojective_uniserials_of_the_linear_nakayama_algebra() {
 
 #[test]
 fn every_enumerated_nakayama_module_is_certified_indecomposable() {
-    for (algebra, kupisch) in [
-        (linear_nakayama(&[3, 2, 1]).unwrap(), vec![3usize, 2, 1]),
-        (cyclic_nakayama(&[3, 3, 3]).unwrap(), vec![3, 3, 3]),
-        (radical_square_zero_cycle(3), vec![2, 2, 2]),
-        (truncated_poly(3).unwrap(), vec![3]),
-    ] {
-        for field in fields() {
-            let modules = enumerated(&algebra, field);
+    for field in fields() {
+        for (algebra, kupisch) in [
+            (
+                linear_nakayama(&[3, 2, 1], field).unwrap(),
+                vec![3usize, 2, 1],
+            ),
+            (cyclic_nakayama(&[3, 3, 3], field).unwrap(), vec![3, 3, 3]),
+            (radical_square_zero_cycle(3, field), vec![2, 2, 2]),
+            (truncated_poly(3, field).unwrap(), vec![3]),
+        ] {
+            let modules = enumerated(&algebra);
             assert_eq!(modules.len(), kupisch.iter().sum::<usize>());
             for m in &modules {
                 let d = decompose(m);
@@ -397,15 +391,15 @@ fn every_enumerated_nakayama_module_is_certified_indecomposable() {
 
 #[test]
 fn krull_schmidt_of_structured_sums_lands_in_the_enumerated_list() {
-    for algebra in [
-        linear_nakayama(&[3, 2, 1]).unwrap(),
-        cyclic_nakayama(&[3, 3, 3]).unwrap(),
-    ] {
-        for field in fields() {
-            let modules = enumerated(&algebra, field);
-            let p0 = Module::projective(&algebra, field, 0);
-            let s1 = Module::simple(&algebra, field, 1);
-            let i2 = Module::injective(&algebra, field, 2);
+    for field in fields() {
+        for algebra in [
+            linear_nakayama(&[3, 2, 1], field).unwrap(),
+            cyclic_nakayama(&[3, 3, 3], field).unwrap(),
+        ] {
+            let modules = enumerated(&algebra);
+            let p0 = Module::projective(&algebra, 0);
+            let s1 = Module::simple(&algebra, 1);
+            let i2 = Module::injective(&algebra, 2);
             let sums = [
                 direct_sum(&[&p0, &s1, &s1]).0,
                 direct_sum(&[&i2, &p0, &modules[1]]).0,

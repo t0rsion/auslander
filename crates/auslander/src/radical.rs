@@ -10,7 +10,6 @@ use crate::field::Fp;
 use crate::hom::{Morphism, quotient_with_projection, submodule_with_inclusion};
 use crate::linalg::DenseMat;
 use crate::module::Module;
-use crate::quiver::PathWord;
 
 /// Rows stacked into a matrix with an explicit column count (so zero rows keep the
 /// right width).
@@ -41,27 +40,36 @@ fn radical_bases(m: &Module) -> Vec<DenseMat> {
         .collect()
 }
 
-/// At each vertex, a row basis of the joint kernel of the actions of all standard
-/// paths of length exactly `k` leaving that vertex. For `k ≥ 1` this is
-/// `{x : x J^k = 0}`: a path word with a forbidden factor acts as zero on a valid
-/// module, so the standard paths span the image of `J^k`.
+/// At each vertex `v`, a row basis of `{x ∈ M_v : x J^k = 0}`. A spanning
+/// set of `e_v J^k` comes from [`crate::algebra::Algebra::radical_power_component`]
+/// over every target vertex, each spanning row acting through
+/// [`Module::element_action`]. Word length decides nothing here: an
+/// inhomogeneous relation can place a short normal word inside a deep
+/// radical power.
 fn joint_kernel_bases(m: &Module, k: usize) -> Vec<DenseMat> {
     let field = m.field();
-    let quiver = m.algebra().quiver();
+    let algebra = m.algebra();
+    let quiver = algebra.quiver();
     (0..quiver.num_vertices())
         .map(|v| {
             let mut rows: Vec<Vec<Fp>> = Vec::new();
-            for path in m.algebra().basis() {
-                if path.len() != k || path.source() != v {
-                    continue;
-                }
-                // x · A = 0 iff x is orthogonal to every column of A.
-                let columns = m
-                    .word_action(path)
-                    .expect("algebra basis words are valid in their own quiver")
-                    .transpose();
-                for r in 0..columns.rows() {
-                    rows.push(columns.row(r).to_vec());
+            for w in 0..quiver.num_vertices() {
+                let component = algebra.paths_between(v, w);
+                for coefficients in algebra.radical_power_component(v, w, k) {
+                    let terms: Vec<(usize, Fp)> = coefficients
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| !c.is_zero())
+                        .map(|(pos, &c)| (component[pos], c))
+                        .collect();
+                    if terms.is_empty() {
+                        continue;
+                    }
+                    // x · A = 0 iff x is orthogonal to every column of A.
+                    let columns = m.element_action(&terms).transpose();
+                    for r in 0..columns.rows() {
+                        rows.push(columns.row(r).to_vec());
+                    }
                 }
             }
             stacked(&rows, m.dim_at(v)).kernel_basis(&field)
@@ -97,17 +105,11 @@ pub fn radical_series(m: &Module) -> Vec<Module> {
 /// The ascending chain `0 = soc⁰ M ⊆ soc M ⊆ soc² M ⊆ …`, ending with `M` itself
 /// (each entry as an abstract module, not embedded in `m`).
 pub fn socle_series(m: &Module) -> Vec<Module> {
-    // soc^k M = {x : x J^k = 0}. Once k exceeds the longest standard path, J^k = 0
-    // and the condition is vacuous, so the loop reaches M.
-    let max_len = m
-        .algebra()
-        .basis()
-        .iter()
-        .map(PathWord::len)
-        .max()
-        .unwrap_or(0);
+    // soc^k M = {x : x J^k = 0}. At k = nilpotency_degree, J^k = 0 and the
+    // condition is vacuous, so the loop reaches M.
+    let degree = m.algebra().nilpotency_degree();
     let mut series = Vec::new();
-    for k in 0..=max_len + 1 {
+    for k in 0..=degree {
         let (sub, _) = submodule_with_inclusion(m, joint_kernel_bases(m, k));
         let reached_m = sub.dim_vector() == m.dim_vector();
         series.push(sub);
@@ -136,8 +138,8 @@ mod tests {
 
     #[test]
     fn radical_series_of_p0_over_a3_descends_3_2_1_0() {
-        let algebra = linear_an(3);
-        let p0 = Module::projective(&algebra, f5(), 0);
+        let algebra = linear_an(3, f5());
+        let p0 = Module::projective(&algebra, 0);
         let series = radical_series(&p0);
         let totals: Vec<usize> = series.iter().map(Module::total_dim).collect();
         assert_eq!(totals, vec![3, 2, 1, 0]);
@@ -148,8 +150,8 @@ mod tests {
 
     #[test]
     fn dual_numbers_regular_module_has_loewy_length_2() {
-        let algebra = dual_numbers();
-        let regular = Module::projective(&algebra, f5(), 0);
+        let algebra = dual_numbers(f5());
+        let regular = Module::projective(&algebra, 0);
         assert_eq!(loewy_length(&regular), 2);
         let (rad, _) = radical(&regular);
         assert_eq!(rad.dim_vector(), &[1]);
@@ -158,11 +160,14 @@ mod tests {
     #[test]
     fn top_of_a_projective_is_the_simple_at_its_vertex() {
         let field = f5();
-        for algebra in [linear_an(3), an_with_relations(3, &[(0, 2)]).unwrap()] {
+        for algebra in [
+            linear_an(3, field),
+            an_with_relations(3, &[(0, 2)], field).unwrap(),
+        ] {
             for v in 0..algebra.quiver().num_vertices() {
-                let p = Module::projective(&algebra, field, v);
+                let p = Module::projective(&algebra, v);
                 let (t, projection) = top(&p);
-                let simple = Module::simple(&algebra, field, v);
+                let simple = Module::simple(&algebra, v);
                 assert_eq!(t.dim_vector(), simple.dim_vector(), "top P_{v}");
                 assert!(!projection.is_zero());
             }
@@ -172,11 +177,14 @@ mod tests {
     #[test]
     fn socle_of_an_injective_is_the_simple_at_its_vertex() {
         let field = f5();
-        for algebra in [linear_an(3), an_with_relations(3, &[(0, 2)]).unwrap()] {
+        for algebra in [
+            linear_an(3, field),
+            an_with_relations(3, &[(0, 2)], field).unwrap(),
+        ] {
             for v in 0..algebra.quiver().num_vertices() {
-                let i = Module::injective(&algebra, field, v);
+                let i = Module::injective(&algebra, v);
                 let (s, inclusion) = socle(&i);
-                let simple = Module::simple(&algebra, field, v);
+                let simple = Module::simple(&algebra, v);
                 assert_eq!(s.dim_vector(), simple.dim_vector(), "soc I_{v}");
                 assert!(!inclusion.is_zero());
             }
@@ -185,16 +193,16 @@ mod tests {
 
     #[test]
     fn socle_of_p0_over_a3_is_s2() {
-        let algebra = linear_an(3);
-        let p0 = Module::projective(&algebra, f5(), 0);
+        let algebra = linear_an(3, f5());
+        let p0 = Module::projective(&algebra, 0);
         let (s, _) = socle(&p0);
         assert_eq!(s.dim_vector(), &[0, 0, 1]);
     }
 
     #[test]
     fn radical_of_a_simple_is_zero() {
-        let algebra = an_with_relations(3, &[(0, 2)]).unwrap();
-        let s1 = Module::simple(&algebra, f5(), 1);
+        let algebra = an_with_relations(3, &[(0, 2)], f5()).unwrap();
+        let s1 = Module::simple(&algebra, 1);
         let (rad, _) = radical(&s1);
         assert!(rad.is_zero());
         assert_eq!(loewy_length(&s1), 1);
@@ -202,9 +210,8 @@ mod tests {
 
     #[test]
     fn cokernel_of_the_radical_inclusion_is_the_top() {
-        let algebra = linear_an(3);
-        let field = f5();
-        let p0 = Module::projective(&algebra, field, 0);
+        let algebra = linear_an(3, f5());
+        let p0 = Module::projective(&algebra, 0);
         let (rad, inclusion) = radical(&p0);
         assert!(rad.ptr_eq(inclusion.source()));
         assert!(p0.ptr_eq(inclusion.target()));
@@ -218,12 +225,12 @@ mod tests {
     fn socle_series_ascends_from_zero_to_the_module() {
         let field = f5();
         for algebra in [
-            linear_an(3),
-            an_with_relations(3, &[(0, 2)]).unwrap(),
-            dual_numbers(),
+            linear_an(3, field),
+            an_with_relations(3, &[(0, 2)], field).unwrap(),
+            dual_numbers(field),
         ] {
             for v in 0..algebra.quiver().num_vertices() {
-                let p = Module::projective(&algebra, field, v);
+                let p = Module::projective(&algebra, v);
                 let series = socle_series(&p);
                 assert!(series.first().expect("nonempty").is_zero());
                 assert_eq!(
@@ -240,8 +247,8 @@ mod tests {
 
     #[test]
     fn loewy_length_of_the_zero_module_is_zero() {
-        let algebra = linear_an(3);
-        let z = Module::zero(&algebra, f5());
+        let algebra = linear_an(3, f5());
+        let z = Module::zero(&algebra);
         assert_eq!(loewy_length(&z), 0);
         assert_eq!(socle_series(&z).len(), 1);
     }

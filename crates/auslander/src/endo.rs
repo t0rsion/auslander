@@ -71,7 +71,7 @@ impl EndoAlgebra {
     /// the structure-constant table.
     pub fn new(m: &Module) -> EndoAlgebra {
         let field = m.field();
-        let basis = hom(m, m).expect("a module shares its own algebra and field");
+        let basis = hom(m, m).expect("a module shares its own algebra");
         let flat_cols: usize = m.dim_vector().iter().map(|&d| d * d).sum();
         let mut flat = DenseMat::zero(basis.len(), flat_cols);
         for (r, f) in basis.iter().enumerate() {
@@ -957,40 +957,40 @@ mod tests {
 
     #[test]
     fn end_of_a_simple_is_one_dimensional() {
-        let a = linear_an(3);
-        let e = EndoAlgebra::new(&Module::simple(&a, f5(), 0));
+        let a = linear_an(3, f5());
+        let e = EndoAlgebra::new(&Module::simple(&a, 0));
         assert_eq!(e.dim(), 1);
         assert_eq!(e.multiply(e.one(), e.one()), e.one().to_vec());
     }
 
     #[test]
     fn field_is_the_field_of_the_module() {
-        let a = linear_an(3);
-        let e = EndoAlgebra::new(&Module::simple(&a, f5(), 0));
+        let a = linear_an(3, f5());
+        let e = EndoAlgebra::new(&Module::simple(&a, 0));
         assert_eq!(e.field(), f5());
     }
 
     #[test]
     fn end_of_the_zero_module_is_zero_dimensional() {
-        let a = linear_an(3);
-        let e = EndoAlgebra::new(&Module::zero(&a, f5()));
+        let a = linear_an(3, f5());
+        let e = EndoAlgebra::new(&Module::zero(&a));
         assert_eq!(e.dim(), 0);
         assert!(e.one().is_empty());
     }
 
     #[test]
     fn end_of_the_dual_numbers_regular_module_has_dimension_2() {
-        let a = dual_numbers();
-        let e = EndoAlgebra::new(&Module::projective(&a, f5(), 0));
+        let a = dual_numbers(f5());
+        let e = EndoAlgebra::new(&Module::projective(&a, 0));
         assert_eq!(e.dim(), 2);
     }
 
     #[test]
     fn structure_constants_reproduce_composition() {
-        let a = linear_an(2);
         let field = f5();
-        let p0 = Module::projective(&a, field, 0);
-        let p1 = Module::projective(&a, field, 1);
+        let a = linear_an(2, field);
+        let p0 = Module::projective(&a, 0);
+        let p1 = Module::projective(&a, 1);
         let (sum, _, _) = direct_sum(&[&p0, &p1]);
         let e = EndoAlgebra::new(&sum);
         assert_eq!(e.dim(), 3);
@@ -1008,9 +1008,9 @@ mod tests {
 
     #[test]
     fn one_is_neutral_and_multiplication_is_associative_on_basis_triples() {
-        let a = dual_numbers();
         let field = f5();
-        let p = Module::projective(&a, field, 0);
+        let a = dual_numbers(field);
+        let p = Module::projective(&a, 0);
         let (sum, _, _) = direct_sum(&[&p, &p]);
         let e = EndoAlgebra::new(&sum);
         let units: Vec<Vec<Fp>> = (0..e.dim()).map(|k| unit(e.dim(), k, &field)).collect();
@@ -1098,8 +1098,8 @@ mod tests {
     #[test]
     fn radical_of_end_of_a_simple_is_zero() {
         for field in fields() {
-            let a = linear_an(3);
-            let e = EndoAlgebra::new(&Module::simple(&a, field, 1));
+            let a = linear_an(3, field);
+            let e = EndoAlgebra::new(&Module::simple(&a, 1));
             assert_eq!(e.radical_dim(), 0, "p = {}", field.modulus());
         }
     }
@@ -1110,13 +1110,13 @@ mod tests {
     fn radical_of_end_of_indecomposable_projectives_matches_path_counts() {
         for field in fields() {
             for algebra in [
-                linear_an(3),
-                kronecker(2),
-                cyclic_nakayama(&[3, 3, 3]).unwrap(),
-                radical_square_zero_cycle(3),
+                linear_an(3, field),
+                kronecker(2, field),
+                cyclic_nakayama(&[3, 3, 3], field).unwrap(),
+                radical_square_zero_cycle(3, field),
             ] {
                 for v in 0..algebra.quiver().num_vertices() {
-                    let e = EndoAlgebra::new(&Module::projective(&algebra, field, v));
+                    let e = EndoAlgebra::new(&Module::projective(&algebra, v));
                     assert_eq!(e.dim(), 1, "End P_{v} over F_{}", field.modulus());
                     assert_eq!(e.radical_dim(), 0, "rad End P_{v}");
                 }
@@ -1129,8 +1129,8 @@ mod tests {
     fn radical_of_end_of_truncated_polynomial_regular_modules_has_codimension_1() {
         for field in fields() {
             for n in 2..=4 {
-                let a = truncated_poly(n).unwrap();
-                let e = EndoAlgebra::new(&Module::projective(&a, field, 0));
+                let a = truncated_poly(n, field).unwrap();
+                let e = EndoAlgebra::new(&Module::projective(&a, 0));
                 assert_eq!(e.dim(), n, "p = {}", field.modulus());
                 assert_eq!(e.radical_dim(), n - 1, "p = {}", field.modulus());
             }
@@ -1141,12 +1141,12 @@ mod tests {
     #[test]
     fn radical_of_end_of_a_truncated_polynomial_quotient_module_is_known() {
         for field in fields() {
-            let a = truncated_poly(3).unwrap();
+            let a = truncated_poly(3, field).unwrap();
             let x = DenseMat::from_rows(&[
                 vec![field.zero(), field.one()],
                 vec![field.zero(), field.zero()],
             ]);
-            let m = Module::new(a, field, vec![2], vec![x]).unwrap();
+            let m = Module::new(a, vec![2], vec![x]).unwrap();
             let e = EndoAlgebra::new(&m);
             assert_eq!(e.dim(), 2);
             assert_eq!(e.radical_dim(), 1);
@@ -1156,9 +1156,9 @@ mod tests {
     #[test]
     fn radical_of_end_of_a_sum_of_distinct_simples_is_zero() {
         for field in fields() {
-            let a = linear_an(3);
-            let s0 = Module::simple(&a, field, 0);
-            let s1 = Module::simple(&a, field, 1);
+            let a = linear_an(3, field);
+            let s0 = Module::simple(&a, 0);
+            let s1 = Module::simple(&a, 1);
             let (sum, _, _) = direct_sum(&[&s0, &s1]);
             let e = EndoAlgebra::new(&sum);
             assert_eq!(e.dim(), 2);
@@ -1171,8 +1171,8 @@ mod tests {
     #[test]
     fn radical_of_a_2x2_matrix_algebra_is_zero() {
         for field in fields() {
-            let a = linear_an(3);
-            let s = Module::simple(&a, field, 0);
+            let a = linear_an(3, field);
+            let s = Module::simple(&a, 0);
             let (sum, _, _) = direct_sum(&[&s, &s]);
             let e = EndoAlgebra::new(&sum);
             assert_eq!(e.dim(), 4);
@@ -1184,8 +1184,8 @@ mod tests {
     #[test]
     fn radical_of_end_of_a_doubled_dual_numbers_module_has_dimension_4() {
         for field in fields() {
-            let a = dual_numbers();
-            let p = Module::projective(&a, field, 0);
+            let a = dual_numbers(field);
+            let p = Module::projective(&a, 0);
             let (sum, _, _) = direct_sum(&[&p, &p]);
             let e = EndoAlgebra::new(&sum);
             assert_eq!(e.dim(), 8);
@@ -1196,9 +1196,9 @@ mod tests {
     #[test]
     fn radical_elements_are_nilpotent_and_the_radical_is_an_ideal() {
         for field in fields() {
-            let a = an_with_relations(3, &[(0, 2)]).unwrap();
-            let p0 = Module::projective(&a, field, 0);
-            let s0 = Module::simple(&a, field, 0);
+            let a = an_with_relations(3, &[(0, 2)], field).unwrap();
+            let p0 = Module::projective(&a, 0);
+            let s0 = Module::simple(&a, 0);
             let (sum, _, _) = direct_sum(&[&p0, &s0]);
             let e = EndoAlgebra::new(&sum);
             assert!(e.radical_dim() > 0);
@@ -1222,12 +1222,12 @@ mod tests {
     #[test]
     fn end_of_a_simple_and_of_uniserial_projectives_is_local() {
         for field in fields() {
-            let a3 = linear_an(3);
-            assert!(EndoAlgebra::new(&Module::simple(&a3, field, 0)).is_local());
-            assert!(EndoAlgebra::new(&Module::projective(&a3, field, 0)).is_local());
+            let a3 = linear_an(3, field);
+            assert!(EndoAlgebra::new(&Module::simple(&a3, 0)).is_local());
+            assert!(EndoAlgebra::new(&Module::projective(&a3, 0)).is_local());
             for n in 2..=4 {
-                let a = truncated_poly(n).unwrap();
-                let e = EndoAlgebra::new(&Module::projective(&a, field, 0));
+                let a = truncated_poly(n, field).unwrap();
+                let e = EndoAlgebra::new(&Module::projective(&a, 0));
                 assert!(e.is_local(), "k[x]/(x^{n}) over F_{}", field.modulus());
                 assert!(e.quotient_is_commutative());
                 assert_eq!(e.semisimple_factor_count(), 1);
@@ -1238,9 +1238,9 @@ mod tests {
     #[test]
     fn end_of_a_sum_of_distinct_simples_has_two_commutative_factors() {
         for field in fields() {
-            let a = linear_an(3);
-            let s0 = Module::simple(&a, field, 0);
-            let s1 = Module::simple(&a, field, 1);
+            let a = linear_an(3, field);
+            let s0 = Module::simple(&a, 0);
+            let s1 = Module::simple(&a, 1);
             let (sum, _, _) = direct_sum(&[&s0, &s1]);
             let e = EndoAlgebra::new(&sum);
             assert!(e.quotient_is_commutative());
@@ -1254,8 +1254,8 @@ mod tests {
     #[test]
     fn a_2x2_matrix_algebra_is_semisimple_but_neither_commutative_nor_local() {
         for field in fields() {
-            let a = linear_an(3);
-            let s = Module::simple(&a, field, 0);
+            let a = linear_an(3, field);
+            let s = Module::simple(&a, 0);
             let (sum, _, _) = direct_sum(&[&s, &s]);
             let e = EndoAlgebra::new(&sum);
             assert_eq!(e.radical_dim(), 0);
@@ -1268,9 +1268,9 @@ mod tests {
     #[test]
     fn end_of_p0_plus_s0_has_a_radical_and_two_factors() {
         for field in fields() {
-            let a = linear_an(3);
-            let p0 = Module::projective(&a, field, 0);
-            let s0 = Module::simple(&a, field, 0);
+            let a = linear_an(3, field);
+            let p0 = Module::projective(&a, 0);
+            let s0 = Module::simple(&a, 0);
             let (sum, _, _) = direct_sum(&[&p0, &s0]);
             let e = EndoAlgebra::new(&sum);
             assert_eq!(e.dim(), 3);
@@ -1283,8 +1283,8 @@ mod tests {
 
     #[test]
     fn the_zero_endomorphism_algebra_is_not_local() {
-        let a = linear_an(3);
-        let e = EndoAlgebra::new(&Module::zero(&a, f5()));
+        let a = linear_an(3, f5());
+        let e = EndoAlgebra::new(&Module::zero(&a));
         assert!(!e.is_local());
         assert_eq!(e.semisimple_factor_count(), 0);
     }
@@ -1292,9 +1292,9 @@ mod tests {
     #[test]
     fn split_idempotent_is_exact_nontrivial_and_deterministic() {
         for field in fields() {
-            let a = linear_an(3);
-            let p0 = Module::projective(&a, field, 0);
-            let s0 = Module::simple(&a, field, 0);
+            let a = linear_an(3, field);
+            let p0 = Module::projective(&a, 0);
+            let s0 = Module::simple(&a, 0);
             let (sum, _, _) = direct_sum(&[&p0, &s0]);
             let e = EndoAlgebra::new(&sum);
             let first = e.split_idempotent(&mut SplitMix64(7)).unwrap();
@@ -1312,8 +1312,8 @@ mod tests {
         // single Wedderburn factor, so split_idempotent declines and this is
         // the only route to a split.
         for field in [f5(), PrimeField::new(32003).unwrap()] {
-            let a = dual_numbers();
-            let p = Module::projective(&a, field, 0);
+            let a = dual_numbers(field);
+            let p = Module::projective(&a, 0);
             let (sum, _, _) = direct_sum(&[&p, &p]);
             let e = EndoAlgebra::new(&sum);
             assert_eq!(e.semisimple_factor_count(), 1);
@@ -1343,8 +1343,8 @@ mod tests {
     #[test]
     fn singular_element_is_none_for_a_local_algebra() {
         for field in fields() {
-            let a = dual_numbers();
-            let p = Module::projective(&a, field, 0);
+            let a = dual_numbers(field);
+            let p = Module::projective(&a, 0);
             let e = EndoAlgebra::new(&p);
             assert!(e.is_local());
             assert!(e.singular_element(&mut SplitMix64(11), 64).is_none());
@@ -1354,14 +1354,14 @@ mod tests {
     #[test]
     fn split_idempotent_is_none_for_local_and_single_factor_algebras() {
         let field = f5();
-        let a = linear_an(3);
-        let p0 = Module::projective(&a, field, 0);
+        let a = linear_an(3, field);
+        let p0 = Module::projective(&a, 0);
         assert!(
             EndoAlgebra::new(&p0)
                 .split_idempotent(&mut SplitMix64(7))
                 .is_none()
         );
-        let s = Module::simple(&a, field, 0);
+        let s = Module::simple(&a, 0);
         let (sum, _, _) = direct_sum(&[&s, &s]);
         // M_2(F_p) has one factor: the central route cannot split it.
         assert!(
@@ -1376,9 +1376,9 @@ mod tests {
     #[test]
     fn split_idempotent_works_over_a_large_prime_via_cantor_zassenhaus() {
         let field = PrimeField::new(1_000_003).unwrap();
-        let a = linear_an(2);
-        let s0 = Module::simple(&a, field, 0);
-        let s1 = Module::simple(&a, field, 1);
+        let a = linear_an(2, field);
+        let s0 = Module::simple(&a, 0);
+        let s1 = Module::simple(&a, 1);
         let (sum, _, _) = direct_sum(&[&s0, &s1]);
         let e = EndoAlgebra::new(&sum);
         assert_eq!(e.semisimple_factor_count(), 2);
@@ -1408,10 +1408,10 @@ mod tests {
 
     #[test]
     fn coords_and_morphism_round_trip() {
-        let a = linear_an(2);
         let field = f5();
-        let p0 = Module::projective(&a, field, 0);
-        let p1 = Module::projective(&a, field, 1);
+        let a = linear_an(2, field);
+        let p0 = Module::projective(&a, 0);
+        let p1 = Module::projective(&a, 1);
         let (sum, _, _) = direct_sum(&[&p0, &p1]);
         let e = EndoAlgebra::new(&sum);
         let coords: Vec<Fp> = (0..e.dim() as i64).map(|i| field.elem(i + 1)).collect();
@@ -1423,7 +1423,7 @@ mod tests {
     /// matrix of x² + x + 1, irreducible over F_2.
     fn kronecker_f4_module() -> Module {
         let field = PrimeField::new(2).unwrap();
-        let a = kronecker(2);
+        let a = kronecker(2, field);
         let id = DenseMat::from_rows(&[
             vec![field.one(), field.zero()],
             vec![field.zero(), field.one()],
@@ -1432,7 +1432,7 @@ mod tests {
             vec![field.zero(), field.one()],
             vec![field.one(), field.one()],
         ]);
-        Module::new(a, field, vec![2, 2], vec![id, c]).unwrap()
+        Module::new(a, vec![2, 2], vec![id, c]).unwrap()
     }
 
     // End(M) ≅ F_4 = F_2[C]: a non-split residue field, so the single

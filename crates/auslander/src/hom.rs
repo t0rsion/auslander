@@ -25,9 +25,9 @@ use crate::quiver::ArrowId;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HomError {
     /// Source and target live over different algebras (distinct [`Arc`]s).
+    /// The field comes from the algebra, so a shared algebra implies a
+    /// shared field.
     DifferentAlgebras,
-    /// Source and target live over different fields.
-    DifferentFields,
     /// `maps` needs one matrix per vertex.
     MapCountMismatch { expected: usize, got: usize },
     /// `maps[vertex]` must be `dim M_vertex × dim N_vertex`.
@@ -51,7 +51,6 @@ impl fmt::Display for HomError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DifferentAlgebras => f.write_str("modules live over different algebras"),
-            Self::DifferentFields => f.write_str("modules live over different fields"),
             Self::MapCountMismatch { expected, got } => {
                 write!(f, "morphism has {got} maps, quiver has {expected} vertices")
             }
@@ -80,8 +79,8 @@ impl fmt::Display for HomError {
 
 impl std::error::Error for HomError {}
 
-/// An A-linear map between right modules over the same algebra and field,
-/// carrying its endpoints.
+/// An A-linear map between right modules over the same algebra, carrying
+/// its endpoints.
 #[derive(Clone, Debug)]
 pub struct Morphism {
     source: Module,
@@ -107,15 +106,12 @@ fn check_parallel(m: &Module, n: &Module) -> Result<(), HomError> {
     if !Arc::ptr_eq(m.algebra(), n.algebra()) {
         return Err(HomError::DifferentAlgebras);
     }
-    if m.field() != n.field() {
-        return Err(HomError::DifferentFields);
-    }
     Ok(())
 }
 
 impl Morphism {
-    /// Builds a morphism `m → n` after checking algebra and field agreement, map
-    /// shapes, entry canonicity for the modules' field, and every commuting square.
+    /// Builds a morphism `m → n` after checking algebra agreement, map shapes,
+    /// entry canonicity for the modules' field, and every commuting square.
     pub fn new(
         source: &Module,
         target: &Module,
@@ -254,7 +250,7 @@ pub fn identity(m: &Module) -> Morphism {
 }
 
 /// The zero morphism `m → n`; errors when the modules do not share one algebra
-/// (the same [`Arc`]) and field.
+/// (the same [`Arc`]).
 pub fn zero_morphism(m: &Module, n: &Module) -> Result<Morphism, HomError> {
     check_parallel(m, n)?;
     let maps = m
@@ -338,8 +334,8 @@ pub fn hom(m: &Module, n: &Module) -> Result<Vec<Morphism>, HomError> {
     Ok(basis)
 }
 
-/// `dim_k Hom_A(m, n)`; errors when the modules do not share one algebra and
-/// field, as [`hom`].
+/// `dim_k Hom_A(m, n)`; errors when the modules do not share one algebra, as
+/// [`hom`].
 pub fn hom_dim(m: &Module, n: &Module) -> Result<usize, HomError> {
     hom(m, n).map(|basis| basis.len())
 }
@@ -405,7 +401,7 @@ pub(crate) fn submodule_with_inclusion(
             express_in_row_basis(&bases[v], &image, &field)
         })
         .collect();
-    let sub = Module::new(parent.algebra().clone(), field, dims, maps)
+    let sub = Module::new(parent.algebra().clone(), dims, maps)
         .expect("a submodule of a module is a module");
     let inclusion = Morphism::new(&sub, parent, bases).expect("submodule inclusion commutes");
     (sub, inclusion)
@@ -434,7 +430,7 @@ pub(crate) fn quotient_with_projection(parent: &Module, bases: &[DenseMat]) -> (
             solve_columns(&projections[u], &rhs, &field)
         })
         .collect();
-    let quotient = Module::new(parent.algebra().clone(), field, dims, maps)
+    let quotient = Module::new(parent.algebra().clone(), dims, maps)
         .expect("a quotient of a module is a module");
     let projection =
         Morphism::new(parent, &quotient, projections).expect("quotient projection commutes");
@@ -493,22 +489,22 @@ mod tests {
     fn hom_from_projective_has_the_dimension_of_the_module_at_the_vertex() {
         let field = f5();
         for algebra in [
-            linear_an(3),
-            an_with_relations(3, &[(0, 2)]).unwrap(),
-            dual_numbers(),
+            linear_an(3, field),
+            an_with_relations(3, &[(0, 2)], field).unwrap(),
+            dual_numbers(field),
         ] {
             let n = algebra.quiver().num_vertices();
             let mut modules: Vec<Module> = Vec::new();
             for v in 0..n {
-                modules.push(Module::simple(&algebra, field, v));
-                modules.push(Module::projective(&algebra, field, v));
-                modules.push(Module::injective(&algebra, field, v));
+                modules.push(Module::simple(&algebra, v));
+                modules.push(Module::projective(&algebra, v));
+                modules.push(Module::injective(&algebra, v));
             }
             let parts: Vec<&Module> = modules.iter().take(3).collect();
             let (sum, _, _) = direct_sum(&parts);
             modules.push(sum);
             for v in 0..n {
-                let pv = Module::projective(&algebra, field, v);
+                let pv = Module::projective(&algebra, v);
                 for m in &modules {
                     assert_eq!(
                         hom(&pv, m).unwrap().len(),
@@ -523,12 +519,12 @@ mod tests {
 
     #[test]
     fn hom_between_simples_is_delta() {
-        let algebra = linear_an(3);
         let field = f5();
+        let algebra = linear_an(3, field);
         for i in 0..3 {
             for j in 0..3 {
-                let si = Module::simple(&algebra, field, i);
-                let sj = Module::simple(&algebra, field, j);
+                let si = Module::simple(&algebra, i);
+                let sj = Module::simple(&algebra, j);
                 assert_eq!(
                     hom_dim(&si, &sj).unwrap(),
                     usize::from(i == j),
@@ -545,10 +541,10 @@ mod tests {
     // convention. Hence End(P_0 ⊕ P_1) = End(P_0) ⊕ End(P_1) ⊕ Hom(P_1, P_0) = k³.
     #[test]
     fn endomorphisms_of_p0_plus_p1_over_a2_have_dimension_3() {
-        let algebra = linear_an(2);
         let field = f5();
-        let p0 = Module::projective(&algebra, field, 0);
-        let p1 = Module::projective(&algebra, field, 1);
+        let algebra = linear_an(2, field);
+        let p0 = Module::projective(&algebra, 0);
+        let p1 = Module::projective(&algebra, 1);
         assert_eq!(hom_dim(&p0, &p1).unwrap(), 0);
         assert_eq!(hom_dim(&p1, &p0).unwrap(), 1);
         let (sum, _, _) = direct_sum(&[&p0, &p1]);
@@ -558,30 +554,33 @@ mod tests {
     #[test]
     fn hom_rejects_modules_over_different_algebras() {
         let field = f5();
-        let a = linear_an(3);
-        let b = linear_an(3);
-        let m = Module::simple(&a, field, 0);
-        let n = Module::simple(&b, field, 0);
+        let a = linear_an(3, field);
+        let b = linear_an(3, field);
+        let m = Module::simple(&a, 0);
+        let n = Module::simple(&b, 0);
         assert_eq!(hom(&m, &n).unwrap_err(), HomError::DifferentAlgebras);
     }
 
     #[test]
     fn hom_rejects_modules_over_different_fields() {
-        let a = linear_an(3);
-        let m = Module::simple(&a, f5(), 0);
-        let n = Module::simple(&a, PrimeField::new(7).unwrap(), 0);
-        assert_eq!(hom(&m, &n).unwrap_err(), HomError::DifferentFields);
+        // The field lives on the algebra, so modules over different fields
+        // always live over different algebra values.
+        let a = linear_an(3, f5());
+        let b = linear_an(3, PrimeField::new(7).unwrap());
+        let m = Module::simple(&a, 0);
+        let n = Module::simple(&b, 0);
+        assert_eq!(hom(&m, &n).unwrap_err(), HomError::DifferentAlgebras);
     }
 
     #[test]
     fn then_rejects_mismatched_endpoints() {
-        let algebra = linear_an(3);
         let field = f5();
-        let p0 = Module::projective(&algebra, field, 0);
-        let s0 = Module::simple(&algebra, field, 0);
+        let algebra = linear_an(3, field);
+        let p0 = Module::projective(&algebra, 0);
+        let s0 = Module::simple(&algebra, 0);
         let f = hom(&p0, &s0).unwrap().remove(0);
         // A separately constructed copy of S_0 is nominally a different module.
-        let s0_copy = Module::simple(&algebra, field, 0);
+        let s0_copy = Module::simple(&algebra, 0);
         assert_eq!(
             f.then(&identity(&s0_copy)).unwrap_err(),
             HomError::EndpointMismatch
@@ -591,10 +590,10 @@ mod tests {
 
     #[test]
     fn morphism_equality_requires_pointer_identical_endpoints() {
-        let algebra = linear_an(3);
         let field = f5();
-        let p0 = Module::projective(&algebra, field, 0);
-        let p0_copy = Module::projective(&algebra, field, 0);
+        let algebra = linear_an(3, field);
+        let p0 = Module::projective(&algebra, 0);
+        let p0_copy = Module::projective(&algebra, 0);
         assert!(!p0.ptr_eq(&p0_copy));
         assert!(p0.ptr_eq(&p0.clone()));
         assert_ne!(identity(&p0), identity(&p0_copy));
@@ -603,9 +602,8 @@ mod tests {
 
     #[test]
     fn morphism_new_rejects_a_non_canonical_entry() {
-        let algebra = linear_an(2);
-        let f2 = PrimeField::new(2).unwrap();
-        let p0 = Module::projective(&algebra, f2, 0);
+        let algebra = linear_an(2, PrimeField::new(2).unwrap());
+        let p0 = Module::projective(&algebra, 0);
         // The entry 3 comes from F_5; it is not a canonical F_2 representative.
         let bad = DenseMat::from_rows(&[vec![f5().elem(3)]]);
         let maps = vec![bad, DenseMat::identity(1)];
@@ -621,10 +619,10 @@ mod tests {
 
     #[test]
     fn morphism_new_rejects_a_noncommuting_square() {
-        let algebra = linear_an(2);
         let field = f5();
-        let p0 = Module::projective(&algebra, field, 0);
-        let p1 = Module::projective(&algebra, field, 1);
+        let algebra = linear_an(2, field);
+        let p0 = Module::projective(&algebra, 0);
+        let p1 = Module::projective(&algebra, 1);
         // f_1 = [1] alone would need f_0 · N(a) = M(a) · f_1 = [1] with f_0 empty-width.
         let maps = vec![DenseMat::zero(1, 0), DenseMat::identity(1)];
         assert_eq!(
@@ -635,10 +633,10 @@ mod tests {
 
     #[test]
     fn identity_is_neutral_for_composition() {
-        let algebra = linear_an(3);
         let field = f5();
-        let p0 = Module::projective(&algebra, field, 0);
-        let s0 = Module::simple(&algebra, field, 0);
+        let algebra = linear_an(3, field);
+        let p0 = Module::projective(&algebra, 0);
+        let s0 = Module::simple(&algebra, 0);
         let f = hom(&p0, &s0).unwrap().remove(0);
         assert_eq!(identity(&p0).then(&f).unwrap(), f);
         assert_eq!(f.then(&identity(&s0)).unwrap(), f);
@@ -650,10 +648,10 @@ mod tests {
     fn the_nonzero_map_p0_to_i2_over_a3_is_an_isomorphism() {
         // Over linearly oriented A_3 both P_0 and I_2 are the unique uniserial with
         // dimension vector (1, 1, 1), so the one-dimensional Hom is spanned by an iso.
-        let algebra = linear_an(3);
         let field = f5();
-        let p0 = Module::projective(&algebra, field, 0);
-        let i2 = Module::injective(&algebra, field, 2);
+        let algebra = linear_an(3, field);
+        let p0 = Module::projective(&algebra, 0);
+        let i2 = Module::injective(&algebra, 2);
         let basis = hom(&p0, &i2).unwrap();
         assert_eq!(basis.len(), 1);
         assert!(basis[0].is_isomorphism());
@@ -663,10 +661,10 @@ mod tests {
 
     #[test]
     fn apply_maps_row_vectors_through_the_vertex_matrices() {
-        let algebra = linear_an(2);
         let field = f5();
-        let p0 = Module::projective(&algebra, field, 0);
-        let p1 = Module::projective(&algebra, field, 1);
+        let algebra = linear_an(2, field);
+        let p0 = Module::projective(&algebra, 0);
+        let p1 = Module::projective(&algebra, 1);
         let f = hom(&p1, &p0).unwrap().remove(0);
         let element = vec![vec![], vec![field.elem(2)]];
         let image = f.apply(&element);
@@ -680,14 +678,14 @@ mod tests {
     fn kernel_image_cokernel_satisfy_rank_nullity_and_compose_correctly() {
         let field = f5();
         let cases: Vec<(Module, Module)> = {
-            let a3 = linear_an(3);
-            let dn = dual_numbers();
-            let p0 = Module::projective(&a3, field, 0);
-            let p1 = Module::projective(&a3, field, 1);
-            let s0 = Module::simple(&a3, field, 0);
-            let i2 = Module::injective(&a3, field, 2);
+            let a3 = linear_an(3, field);
+            let dn = dual_numbers(field);
+            let p0 = Module::projective(&a3, 0);
+            let p1 = Module::projective(&a3, 1);
+            let s0 = Module::simple(&a3, 0);
+            let i2 = Module::injective(&a3, 2);
             let (sum, _, _) = direct_sum(&[&p0, &p1]);
-            let dp = Module::projective(&dn, field, 0);
+            let dp = Module::projective(&dn, 0);
             vec![
                 (p0.clone(), s0),
                 (p0.clone(), i2),
