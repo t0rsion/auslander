@@ -43,9 +43,10 @@ jobs:
       - name: Package and test inside the extracted package
         run: |
           cargo +1.92.0 package -p auslander
-          mkdir -p "$RUNNER_TEMP/pkg"
-          tar xzf target/package/auslander-*.crate -C "$RUNNER_TEMP/pkg"
-          cd "$RUNNER_TEMP"/pkg/auslander-*
+          PKG_DIR=$(cygpath -u "$RUNNER_TEMP" 2>/dev/null || printf '%s' "$RUNNER_TEMP")/pkg
+          mkdir -p "$PKG_DIR"
+          tar xzf target/package/auslander-*.crate -C "$PKG_DIR"
+          cd "$PKG_DIR"/auslander-*
           cargo +1.88.0 test
 
   wheels:
