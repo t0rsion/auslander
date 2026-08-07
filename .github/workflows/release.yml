@@ -41,6 +41,8 @@ jobs:
       - name: Test the workspace at the tag
         run: cargo +1.92.0 test --workspace --locked
       - name: Package and test inside the extracted package
+        env:
+          CARGO_PROFILE_DEV_OPT_LEVEL: 2
         run: |
           cargo +1.92.0 package -p auslander
           PKG_DIR=$(cygpath -u "$RUNNER_TEMP" 2>/dev/null || printf '%s' "$RUNNER_TEMP")/pkg

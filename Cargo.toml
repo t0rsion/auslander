@@ -9,3 +9,6 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
+
+[profile.dev]
+opt-level = 2

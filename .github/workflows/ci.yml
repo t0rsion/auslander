@@ -51,6 +51,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88.0
       - run: cargo +1.92.0 package -p auslander
       - name: Test inside the extracted package
+        env:
+          CARGO_PROFILE_DEV_OPT_LEVEL: 2
         run: |
           mkdir -p "$RUNNER_TEMP/pkg"
           tar xzf target/package/auslander-*.crate -C "$RUNNER_TEMP/pkg"

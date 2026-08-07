@@ -39,8 +39,10 @@ module are computed over the opposite algebra on its dual, which is the same
 computation as the morphisms into a module: `opposite` keeps the vertex ids and
 `dual` keeps the dimension vector, so the values compare directly.
 
-The always-on modes take about 12 minutes unoptimized and under a minute with
-`--release`. `inclusion-ambiguity` dominates: its almost-split sequences run on
+The always-on modes take about a minute. The workspace sets `opt-level = 2` for
+the dev profile, because at `opt-level = 0` this suite takes over ten minutes
+locally and stalls the Windows CI runner. Debug assertions and overflow checks
+stay on. `inclusion-ambiguity` dominates: its almost-split sequences run on
 modules of dimension 18 and 24 over a 6-dimensional algebra, and every value is
 computed twice, once over the algebra and once over its opposite for the
 left-convention test.
