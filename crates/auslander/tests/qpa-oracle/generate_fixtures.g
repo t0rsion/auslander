@@ -1,5 +1,6 @@
-# Builds every auslander fixture algebra in QPA and writes fixtures_qpa.json
-# with schema auslander-qpa-oracle-v6. Each fixture carries its own prime field
+# Builds every auslander fixture algebra in QPA and writes
+# qpa_generated.json
+# with schema auslander-qpa-oracle-v7. Each fixture carries its own prime field
 # and its full presentation: the quiver, and relations as integer combinations
 # of paths given by arrow indices. The results per fixture: algebra dimension,
 # dimension vectors of the indecomposable projectives (the Cartan rows) and
@@ -22,10 +23,25 @@
 # dimensions between all designated modules, the tau-rigid and rigid flags, and
 # the tau period bounded at 6 (typed).
 #
+# Schema v7 is the complete v6 record, unchanged, plus one support tau-tilting
+# block per fixture. QPA 1.36 has no support tau-tilting predicate, pair type,
+# mutation or enumerator, so every value in that block is built from Hom, tau,
+# minimal approximations and TiltingModule. The block leads with a typed closure
+# marker from an AR-quiver walk. The pair count, the histogram, the pairs, the
+# approximation sample, the one-tilting entries and the exchange graph are
+# emitted only when that walk closed: a truncated walk still yields a plausible
+# pair count, and an ungated total would be a silent undercount.
+#
 # Writes into the current working directory; run under GAP with QPA loadable
 # (discovery order in README.md):
 #
-#   gap -q -T generate_fixtures.g
+#   gap -q -T -m 1g generate_fixtures.g
+#
+# gap -q -T with closed stdin exits 0 after an uncaught error, so the exit code
+# proves nothing about the run. The output is written in one final statement, so
+# a crashed run leaves no file, and the last line of stdout is the sentinel
+# qpa-oracle-generator-ok. A harness checks that line and the file, never the
+# exit code.
 #
 # QPA modules are right modules and paths compose left to right (p * q means
 # first p, then q), matching auslander's conventions, so the values are written
@@ -46,7 +62,9 @@ PROJDIM_BOUND := 6;
 INJDIM_BOUND := 6;
 TAU_PERIOD_BOUND := 6;
 ORDER_ID := "deglex-arrowid-v1";
-OUT := "fixtures_qpa.json";
+APPROX_SAMPLE := 12;
+SENTINEL := "qpa-oracle-generator-ok";
+OUT := "qpa_generated.json";
 
 # dim Ext^k(M, N) via Ext^k(M, N) = Ext^1(Omega^(k-1) M, N); NthSyzygy computes
 # minimal syzygies, so no projective summands disturb the isomorphism.
@@ -298,6 +316,267 @@ TauPeriodJson := function(M, bound)
   return Concatenation("{\"period\": ", String(i), "}");
 end;
 
+# The independent enumeration route of schema v7. Seed with the indecomposable
+# projectives and injectives, then close under the irreducible morphisms in both
+# directions, which walks the arrows of the AR quiver. A finite closure
+# certifies the list: a finite AR component over a connected algebra forces
+# representation-finiteness, so the component is everything. Returns fail when
+# the list passes cap.
+#
+# Never close under AlmostSplitSequence. A projective-injective has no almost
+# split sequence in either direction, and a walk that used it returned 1
+# indecomposable instead of 3 on k[x]/(x^3).
+#
+# IsomorphicModules is the only sound identity test here. On kronecker-2 over
+# F_p the dimension vector [1, 1] belongs to p + 1 non-isomorphic modules, and
+# even on the representation-finite cyclic-nakayama-3-3-3 the three
+# indecomposable projectives are non-isomorphic with the same dimension vector.
+# The guards HasIrrIn and HasIrrOut are the ones the v6 fields already use.
+KnitIndecomposables := function(A, cap)
+  local L, queue, M, nb, X, new;
+  L := ShallowCopy(IndecProjectiveModules(A));
+  Append(L, IndecInjectiveModules(A));
+  new := [];
+  for M in L do
+    if ForAll(new, N -> not IsomorphicModules(N, M)) then
+      Add(new, M);
+    fi;
+  od;
+  L := new;
+  queue := ShallowCopy(L);
+  while Length(queue) > 0 do
+    M := Remove(queue, 1);
+    nb := [];
+    if HasIrrIn(M) then
+      Append(nb, List(IrreducibleMorphismsEndingIn(M), Source));
+    fi;
+    if HasIrrOut(M) then
+      Append(nb, List(IrreducibleMorphismsStartingIn(M), Range));
+    fi;
+    for X in nb do
+      if Dimension(X) > 0 and ForAll(L, N -> not IsomorphicModules(N, X)) then
+        Add(L, X);
+        Add(queue, X);
+        if Length(L) > cap then
+          return fail;
+        fi;
+      fi;
+    od;
+  od;
+  return L;
+end;
+
+# The cap is a budget, not a claim, and the not-closed marker records it. Every
+# fixture whose walk closes closes at 17 indecomposables or fewer (inhomogeneous
+# is the largest), so 40 never binds. Three families never close, and the cost
+# of failing grows steeply: at cap 12 the walk fails after 2.0 s on kronecker-2,
+# 40.4 s on self-overlap and 4.8 s on inclusion-ambiguity, while at cap 16
+# self-overlap alone costs 380 s.
+WalkCap := function(spec)
+  if spec.family in ["kronecker-2", "self-overlap", "inclusion-ambiguity"] then
+    return 12;
+  fi;
+  return 40;
+end;
+
+# The zero module is the module part of the pair (0, A). DecomposeModule and
+# NumberOfNonIsoDirSummands both error on it, so summand counts come from the
+# chosen index set and never from decomposing a module.
+SumOrZero := function(A, L)
+  if Length(L) = 0 then
+    return ZeroModule(A);
+  fi;
+  return DirectSumOfQPAModules(L);
+end;
+
+# tbl[i][j] = dim Hom(L_i, tau L_j). tau is additive, so a direct sum of the
+# L_i over an index set is tau-rigid exactly when every entry over that set
+# vanishes.
+PairwiseTauTable := function(L)
+  local taus, i, j, t;
+  taus := List(L, DTr);
+  t := [];
+  for i in [1 .. Length(L)] do
+    Add(t, List([1 .. Length(L)], j -> Length(HomOverAlgebra(L[i], taus[j]))));
+  od;
+  return t;
+end;
+
+# Every basic support tau-tilting pair (M, P), by definition: M a tau-rigid sum
+# of |M| = m of the indecomposables, P a sum of n - m indecomposable
+# projectives, Hom(P, M) = 0. The projective part is chosen vertex by vertex
+# from the vanishing of Hom(P_i, M), which QPA computes; the assertion pins that
+# vanishing set against the zero support of M, so the redundancy is checked and
+# not assumed. Summand dimension vectors keep their repetitions: a repeated
+# entry is a second non-isomorphic summand, not a multiplicity.
+EnumeratePairs := function(A, indecs)
+  local n, projs, tbl, out, m, s, M, zero, dv, dimvecs, T;
+  n := Length(SimpleModules(A));
+  projs := IndecProjectiveModules(A);
+  tbl := PairwiseTauTable(indecs);
+  out := [];
+  for m in [0 .. n] do
+    for s in Combinations([1 .. Length(indecs)], m) do
+      if ForAll(s, i -> ForAll(s, j -> tbl[i][j] = 0)) then
+        M := SumOrZero(A, indecs{s});
+        zero := Filtered([1 .. n], i -> Length(HomOverAlgebra(projs[i], M)) = 0);
+        dv := DimensionVector(M);
+        if zero <> Filtered([1 .. n], i -> dv[i] = 0) then
+          Error("Hom(P_i, M) vanishing disagrees with the zero support of M");
+        fi;
+        dimvecs := List(indecs{s}, DimensionVector);
+        Sort(dimvecs);
+        for T in Combinations(zero, n - m) do
+          Add(out, rec(idx := s, m := m, dimvecs := dimvecs, proj := T - 1));
+        od;
+      fi;
+    od;
+  od;
+  return out;
+end;
+
+# The cross-check route. AllIndecModulesOfLengthAtMost errors when a length
+# class below the bound is empty, so the call is caught and its outcome typed.
+SameIsoSets := function(L1, L2)
+  if Length(L1) <> Length(L2) then
+    return false;
+  fi;
+  return ForAll(L1, M -> ForAny(L2, N -> IsomorphicModules(M, N)))
+     and ForAll(L2, M -> ForAny(L1, N -> IsomorphicModules(M, N)));
+end;
+
+# LowestKnownDegree and HighestKnownDegree return minus infinity and infinity on
+# a FiniteComplex, and the range then fails. LowerBound and UpperBound are the
+# working accessors, and IsZeroComplex guards the empty case.
+ComplexTerms := function(C)
+  local lo, hi, i;
+  if IsZeroComplex(C) then
+    return [];
+  fi;
+  lo := LowerBound(C);
+  hi := UpperBound(C);
+  return List([lo .. hi], i -> DimensionVector(ObjectOfComplex(C, i)));
+end;
+
+# Approximation invariants at (pair, module summand) slots, never a mutated
+# pair: QPA realizes the exchange only when the approximation is injective with
+# a nonzero cokernel, which on d4-star holds for 50 of 150 slots, and the other
+# branch gives the wrong partner half the time.
+#
+# The sample is deterministic. Slots are sorted by summand count, then by the
+# pair's dimension vectors, its summand dimension vector and its projective
+# support, then by discovery order, and want slots are taken at even stride
+# through that order.
+ApproximationSample := function(A, indecs, pairs, want)
+  local slots, keys, j, r, N, K, i, sl, X, rest, f, out;
+  slots := [];
+  for j in [1 .. Length(pairs)] do
+    for i in pairs[j].idx do
+      Add(slots, [j, i]);
+    od;
+  od;
+  N := Length(slots);
+  if N = 0 then
+    return rec(total := 0, entries := []);
+  fi;
+  keys := List([1 .. N], j -> [pairs[slots[j][1]].m, pairs[slots[j][1]].dimvecs,
+      DimensionVector(indecs[slots[j][2]]), pairs[slots[j][1]].proj, j]);
+  Sort(keys);
+  K := Minimum(want, N);
+  out := [];
+  for i in [1 .. K] do
+    sl := slots[keys[1 + Int((i - 1) * N / K)][5]];
+    r := pairs[sl[1]];
+    X := indecs[sl[2]];
+    rest := Filtered(r.idx, t -> t <> sl[2]);
+    f := MinimalLeftApproximation(X, SumOrZero(A, indecs{rest}));
+    Add(out, rec(dimvecs := r.dimvecs, proj := r.proj,
+                 summand := DimensionVector(X),
+                 source := DimensionVector(Source(f)),
+                 target := DimensionVector(Range(f)),
+                 rank := Dimension(Source(f)) - Dimension(Kernel(f)),
+                 kernel := DimensionVector(Kernel(f)),
+                 cokernel := DimensionVector(CoKernel(f))));
+  od;
+  return rec(total := N, entries := out);
+end;
+
+# Classical tilting over the enumerated pairs with n summands. TiltingModule
+# returns false, or the projective dimension and one coresolution per
+# indecomposable projective. IsTiltingModule is an attribute with no computing
+# method and a false answer never sets it, so it is never called here.
+OneTiltingEntries := function(A, indecs, pairs, n)
+  local out, r, M, t;
+  out := [];
+  for r in Filtered(pairs, x -> x.m = n) do
+    M := SumOrZero(A, indecs{r.idx});
+    t := TiltingModule(M, 1);
+    if t = false then
+      Add(out, rec(dimvecs := r.dimvecs, tilting := false));
+    else
+      Add(out, rec(dimvecs := r.dimvecs, tilting := true, pd := t[1],
+                   coresolutions := List(t[2], ComplexTerms)));
+    fi;
+  od;
+  return out;
+end;
+
+# A self-consistency check, not external truth: the graph is computed from the
+# enumerated set by intersecting labels, so it repeats what the enumeration
+# already said. Two pairs are adjacent when they share n - 1 of their n labels,
+# a label being a module summand index or a projective vertex.
+ExchangeGraph := function(pairs, n)
+  local lab, N, adj, seen, queue, i, j;
+  N := Length(pairs);
+  lab := List(pairs, r -> Concatenation(List(r.idx, i -> ["m", i]),
+                                        List(r.proj, v -> ["p", v])));
+  adj := List([1 .. N], i -> Filtered([1 .. N],
+      j -> j <> i and Length(Intersection(lab[i], lab[j])) = n - 1));
+  seen := [1];
+  queue := [1];
+  while Length(queue) > 0 do
+    i := Remove(queue, 1);
+    for j in adj[i] do
+      if not j in seen then
+        Add(seen, j);
+        Add(queue, j);
+      fi;
+    od;
+  od;
+  return rec(degrees := List([0 .. n + 1], d -> Number(adj, x -> Length(x) = d)),
+             edges := Sum(List(adj, Length)) / 2,
+             connected := Length(seen) = N);
+end;
+
+# The whole v7 block for one fixture. taurigid is the v6 list over the
+# designated modules, passed in so both fields report the same computation.
+SttRecord := function(spec, A, taurigid)
+  local r, L, n, brute, maxlen;
+  r := rec(cap := WalkCap(spec), tau_rigid := taurigid);
+  L := KnitIndecomposables(A, r.cap);
+  if L = fail then
+    r.closed := false;
+    return r;
+  fi;
+  r.closed := true;
+  r.count := Length(L);
+  n := Length(SimpleModules(A));
+  maxlen := Maximum(List(L, Dimension));
+  brute := CALL_WITH_CATCH(AllIndecModulesOfLengthAtMost, [A, maxlen]);
+  r.brute_length := maxlen;
+  r.brute_ok := brute[1];
+  if brute[1] then
+    r.brute_agrees := SameIsoSets(L, brute[2]);
+  fi;
+  r.pairs := EnumeratePairs(A, L);
+  r.total := Length(r.pairs);
+  r.histogram := List([0 .. n], m -> Number(r.pairs, x -> x.m = m));
+  r.approximations := ApproximationSample(A, L, r.pairs, APPROX_SAMPLE);
+  r.one_tilting := OneTiltingEntries(A, L, r.pairs, n);
+  r.graph := ExchangeGraph(r.pairs, n);
+  return r;
+end;
+
 # spec: family, case name, prime, presentation id, ideal id, vertex count,
 # arrows as [source, target, name] (1-based), relations as lists of
 # [coefficient, arrow index path] terms (1-based).
@@ -353,6 +632,7 @@ FixtureRecord := function(spec)
       d -> TauPeriodJson(d.module, TauPeriodBound(spec)));
   return rec(spec := spec,
              designated := designated,
+             stt := SttRecord(spec, A, taurigid),
              ar_sequences := ar,
              irreducible_maps := irr,
              ext_algebra := extalg,
@@ -460,6 +740,63 @@ JsonYoneda := function(y)
       ", \"yoneda_map_rank\": ", String(y.yoneda_map_rank), "}");
 end;
 
+JsonSttPair := function(r)
+  return Concatenation("{\"module_dimvecs\": ", JsonIntMatrix(r.dimvecs),
+      ", \"projective_support\": ", JsonIntList(r.proj), "}");
+end;
+
+JsonApproximation := function(a)
+  return Concatenation("{\"module_dimvecs\": ", JsonIntMatrix(a.dimvecs),
+      ", \"projective_support\": ", JsonIntList(a.proj),
+      ", \"summand_dimvec\": ", JsonIntList(a.summand),
+      ", \"source_dimvec\": ", JsonIntList(a.source),
+      ", \"target_dimvec\": ", JsonIntList(a.target),
+      ", \"rank\": ", String(a.rank),
+      ", \"kernel_dimvec\": ", JsonIntList(a.kernel),
+      ", \"cokernel_dimvec\": ", JsonIntList(a.cokernel), "}");
+end;
+
+JsonOneTilting := function(t)
+  local s;
+  s := Concatenation("{\"module_dimvecs\": ", JsonIntMatrix(t.dimvecs),
+      ", \"tilting\": ", JsonBool(t.tilting));
+  if not t.tilting then
+    return Concatenation(s, "}");
+  fi;
+  return Concatenation(s, ", \"projective_dimension\": ", String(t.pd),
+      ", \"coresolutions\": ", JsonFragmentList(
+          List(t.coresolutions, JsonIntMatrix)), "}");
+end;
+
+# QPA's list order is discovery order, so every emitted list is sorted by an
+# explicit key first. The key is a value, never an isomorphism class: two
+# entries with the same key print the same bytes, so their order is free.
+SortedFragments := function(items, keyfun, jsonfun)
+  local l;
+  l := List(items, x -> [keyfun(x), jsonfun(x)]);
+  Sort(l);
+  return List(l, x -> x[2]);
+end;
+
+JsonBruteAgreement := function(stt)
+  if not stt.closed then
+    return "{\"available\": false, \"reason\": \"walk-not-closed\"}";
+  fi;
+  if not stt.brute_ok then
+    return Concatenation("{\"available\": false, \"reason\": \"gap-error\", ",
+        "\"max_length\": ", String(stt.brute_length), "}");
+  fi;
+  return Concatenation("{\"available\": true, \"max_length\": ",
+      String(stt.brute_length), ", \"agrees\": ",
+      JsonBool(stt.brute_agrees), "}");
+end;
+
+JsonExchangeGraph := function(g)
+  return Concatenation("{\"degree_histogram\": ", JsonIntList(g.degrees),
+      ", \"edges\": ", String(g.edges),
+      ", \"connected\": ", JsonBool(g.connected), "}");
+end;
+
 # One JSON fragment per line, so a diff of two generated files points at the
 # entry that changed.
 EmitFragmentLines := function(out, name, items)
@@ -474,6 +811,58 @@ EmitFragmentLines := function(out, name, items)
     AppendTo(out, "        ", items[j], rowcomma, "\n");
   od;
   AppendTo(out, "      ],\n");
+end;
+
+EmitSttList := function(out, name, items, comma)
+  local j, rowcomma;
+  if Length(items) = 0 then
+    AppendTo(out, "        \"", name, "\": []", comma, "\n");
+    return;
+  fi;
+  AppendTo(out, "        \"", name, "\": [\n");
+  for j in [1 .. Length(items)] do
+    if j < Length(items) then rowcomma := ","; else rowcomma := ""; fi;
+    AppendTo(out, "          ", items[j], rowcomma, "\n");
+  od;
+  AppendTo(out, "        ]", comma, "\n");
+end;
+
+# The closure marker gates the block: without a closed walk there is no total,
+# no histogram, no pair list, no approximation sample, no one-tilting list and
+# no graph, only the marker, the cross-check status, the designated tau-rigidity
+# flags and the typed refusal.
+EmitStt := function(out, stt)
+  AppendTo(out, "      \"support_tau_tilting\": {\n");
+  if stt.closed then
+    AppendTo(out, "        \"indecomposables\": {\"closed\": true, ",
+        "\"count\": ", String(stt.count), "},\n");
+  else
+    AppendTo(out, "        \"indecomposables\": {\"closed\": false, ",
+        "\"cap\": ", String(stt.cap), "},\n");
+  fi;
+  AppendTo(out, "        \"brute_agreement\": ", JsonBruteAgreement(stt), ",\n");
+  AppendTo(out, "        \"tau_rigid_designated\": ",
+      JsonBoolList(stt.tau_rigid), ",\n");
+  if not stt.closed then
+    AppendTo(out, "        \"not_computed\": ",
+        "{\"reason\": \"walk-not-closed\"}\n");
+    AppendTo(out, "      }\n");
+    return;
+  fi;
+  AppendTo(out, "        \"total\": ", String(stt.total), ",\n");
+  AppendTo(out, "        \"histogram\": ", JsonIntList(stt.histogram), ",\n");
+  EmitSttList(out, "pairs",
+      SortedFragments(stt.pairs, r -> [r.m, r.dimvecs, r.proj], JsonSttPair),
+      ",");
+  AppendTo(out, "        \"approximation_slots\": ",
+      String(stt.approximations.total), ",\n");
+  EmitSttList(out, "approximations",
+      List(stt.approximations.entries, JsonApproximation), ",");
+  EmitSttList(out, "one_tilting",
+      SortedFragments(stt.one_tilting, t -> t.dimvecs, JsonOneTilting), ",");
+  AppendTo(out, "        \"exchange_graph_self_consistency\": ",
+      JsonExchangeGraph(stt.graph), "\n");
+  AppendTo(out, "      }\n");
 end;
 
 EmitFixture := function(out, fx, last)
@@ -537,17 +926,23 @@ EmitFixture := function(out, fx, last)
   AppendTo(out, "      \"stable_hom\": ", JsonIntMatrix(fx.stable_hom), ",\n");
   AppendTo(out, "      \"tau_rigid\": ", JsonBoolList(fx.tau_rigid), ",\n");
   AppendTo(out, "      \"rigid\": ", JsonBoolList(fx.rigid), ",\n");
-  AppendTo(out, "      \"tau_period\": ", JsonFragmentList(fx.tau_period), "\n");
+  AppendTo(out, "      \"tau_period\": ", JsonFragmentList(fx.tau_period), ",\n");
+  EmitStt(out, fx.stt);
   if last then comma := ""; else comma := ","; fi;
   AppendTo(out, "    }", comma, "\n");
 end;
 
+# The file is written by the single FileString call at the end, after every
+# value is computed and every byte is formatted, so a run that dies leaves no
+# file at all. gap -q -T with closed stdin exits 0 after an uncaught error, so
+# the absent file and the missing sentinel are the only failure signals.
 EmitJson := function(fixtures)
-  local out, i;
-  out := OutputTextFile(OUT, false);
+  local buf, out, i;
+  buf := "";
+  out := OutputTextString(buf, true);
   SetPrintFormattingStatus(out, false);
   AppendTo(out, "{\n");
-  AppendTo(out, "  \"schema\": \"auslander-qpa-oracle-v6\",\n");
+  AppendTo(out, "  \"schema\": \"auslander-qpa-oracle-v7\",\n");
   AppendTo(out, "  \"convention\": \"right\",\n");
   AppendTo(out, "  \"max_ext_degree\": ", String(MAX_EXT), ",\n");
   AppendTo(out, "  \"projdim_bound\": ", String(PROJDIM_BOUND), ",\n");
@@ -564,6 +959,7 @@ EmitJson := function(fixtures)
   AppendTo(out, "  ]\n");
   AppendTo(out, "}\n");
   CloseStream(out);
+  FileString(OUT, buf);
 end;
 
 Specs := [];
@@ -673,4 +1069,5 @@ Add(Specs, Spec("characteristic-sensitive", "f3", 3,
 
 EmitJson(List(Specs, FixtureRecord));
 Print("wrote ", OUT, " with ", Length(Specs), " fixtures\n");
+Print(SENTINEL, "\n");
 QUIT;

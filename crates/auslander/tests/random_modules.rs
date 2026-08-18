@@ -18,52 +18,28 @@
 use std::sync::Arc;
 
 use auslander::algebra::{
-    Algebra, MonomialPresentation, an_with_relations, commutative_square, cyclic_nakayama,
-    dual_numbers, linear_an,
+    Algebra, an_with_relations, commutative_square, cyclic_nakayama, dual_numbers, linear_an,
+    monomial_algebra,
 };
-use auslander::completion::CompletionLimits;
 use auslander::ext::ext_table;
 use auslander::field::{Fp, PrimeField};
 use auslander::hom::{Morphism, hom, hom_dim, kernel};
 use auslander::linalg::DenseMat;
-use auslander::module::{Module, direct_sum};
+use auslander::module::Module;
+use auslander::monomial::MonomialIdeal;
 use auslander::quiver::{ArrowId, Quiver};
 use auslander::radical::radical;
 use auslander::resolution::{ResolutionEnd, projective_cover, resolve};
 
+mod common;
+
+use common::{XorShift64, case_seed, rand_elem, random_basis_change};
+
 const MAX_TOTAL_DIM: usize = 12;
-/// Cases per (algebra, field) pair. 5 algebras × 2 fields keeps every generator
-/// family well under 200 cases.
+/// Cases per (algebra, field) pair. With the 6 algebras and 2 fields below,
+/// each generator family runs 96 cases.
 const CASES: usize = 8;
 const SEED_BASE: u64 = 0x0005_eed0_fa05_1a4d;
-
-struct XorShift64(u64);
-
-impl XorShift64 {
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.0 = x;
-        x
-    }
-
-    fn below(&mut self, n: u64) -> u64 {
-        self.next_u64() % n
-    }
-}
-
-/// Distinct nonzero seed per (test, field, algebra, case), splittable from the
-/// printed value alone.
-fn case_seed(test: u64, p: u64, algebra_idx: usize, case: usize) -> u64 {
-    let raw = SEED_BASE
-        ^ test.wrapping_mul(0x9e37_79b9_7f4a_7c15)
-        ^ p.wrapping_mul(0xd1b5_4a32_d192_ed03)
-        ^ (algebra_idx as u64).wrapping_mul(0x94d0_49bb_1331_11eb)
-        ^ (case as u64).wrapping_mul(0x2545_f491_4f6c_dd1d);
-    if raw == 0 { SEED_BASE } else { raw }
-}
 
 fn fields() -> [PrimeField; 2] {
     [PrimeField::new(2).unwrap(), PrimeField::new(3).unwrap()]
@@ -71,9 +47,8 @@ fn fields() -> [PrimeField; 2] {
 
 fn gentle_tree(field: PrimeField) -> Arc<Algebra> {
     let quiver = Quiver::new(4, &[(0, 1), (1, 2), (1, 3)]).unwrap();
-    let presentation =
-        MonomialPresentation::new(quiver, vec![vec![ArrowId(0), ArrowId(1)]]).unwrap();
-    Algebra::from_monomial(field, &presentation, &CompletionLimits::default()).unwrap()
+    let ideal = MonomialIdeal::new(quiver, vec![vec![ArrowId(0), ArrowId(1)]]).unwrap();
+    monomial_algebra(&ideal, field).unwrap()
 }
 
 fn algebras(field: PrimeField) -> Vec<(&'static str, Arc<Algebra>)> {
@@ -88,10 +63,6 @@ fn algebras(field: PrimeField) -> Vec<(&'static str, Arc<Algebra>)> {
         ("dual_numbers", dual_numbers(field)),
         ("commutative_square", commutative_square(field)),
     ]
-}
-
-fn rand_elem(rng: &mut XorShift64, field: &PrimeField) -> Fp {
-    field.elem(rng.below(field.modulus()) as i64)
 }
 
 /// Rows stacked into a matrix with an explicit column count, so an empty row
@@ -112,109 +83,6 @@ fn vstack(a: &DenseMat, b: &DenseMat) -> DenseMat {
         .chain((0..b.rows()).map(|r| b.row(r).to_vec()))
         .collect();
     stacked(&rows, a.cols())
-}
-
-/// Generator (a), first half: a random direct sum of projectives, simples, and
-/// injectives with total dimension at most [`MAX_TOTAL_DIM`].
-fn random_sum_module(rng: &mut XorShift64, algebra: &Arc<Algebra>) -> Module {
-    let n = algebra.quiver().num_vertices();
-    let mut parts: Vec<Module> = Vec::new();
-    let mut total = 0usize;
-    for _ in 0..1 + rng.below(3) {
-        let v = rng.below(u64::from(n)) as u32;
-        let part = match rng.below(3) {
-            0 => Module::simple(algebra, v),
-            1 => Module::projective(algebra, v),
-            _ => Module::injective(algebra, v),
-        };
-        if total + part.total_dim() > MAX_TOTAL_DIM {
-            break;
-        }
-        total += part.total_dim();
-        parts.push(part);
-    }
-    if parts.is_empty() {
-        parts.push(Module::simple(algebra, 0));
-    }
-    let refs: Vec<&Module> = parts.iter().collect();
-    direct_sum(&refs).0
-}
-
-/// An invertible `d × d` matrix built from random elementary row operations on
-/// the identity.
-fn random_invertible(rng: &mut XorShift64, field: &PrimeField, d: usize) -> DenseMat {
-    let mut g = DenseMat::identity(d);
-    if d == 0 {
-        return g;
-    }
-    for _ in 0..2 * d + 2 {
-        let i = rng.below(d as u64) as usize;
-        match rng.below(3) {
-            0 if d >= 2 => {
-                let j = (i + 1 + rng.below(d as u64 - 1) as usize) % d;
-                for c in 0..d {
-                    let (a, b) = (g.get(i, c), g.get(j, c));
-                    g.set(i, c, b);
-                    g.set(j, c, a);
-                }
-            }
-            1 => {
-                let c = field.elem(1 + rng.below(field.modulus() - 1) as i64);
-                for k in 0..d {
-                    g.set(i, k, field.mul(g.get(i, k), c));
-                }
-            }
-            _ if d >= 2 => {
-                let j = (i + 1 + rng.below(d as u64 - 1) as usize) % d;
-                let c = rand_elem(rng, field);
-                for k in 0..d {
-                    g.set(i, k, field.add(g.get(i, k), field.mul(c, g.get(j, k))));
-                }
-            }
-            _ => {}
-        }
-    }
-    g
-}
-
-/// `G⁻¹`, column by column from `G x = e_j`.
-fn inverse(g: &DenseMat, field: &PrimeField) -> DenseMat {
-    let d = g.rows();
-    let mut inv = DenseMat::zero(d, d);
-    for j in 0..d {
-        let mut unit = vec![field.zero(); d];
-        unit[j] = field.one();
-        let col = g
-            .solve(&unit, field)
-            .expect("G is a product of elementary matrices");
-        for (i, &v) in col.iter().enumerate() {
-            inv.set(i, j, v);
-        }
-    }
-    inv
-}
-
-/// Generator (a), second half: `M'(a) = G_{s(a)} · M(a) · G_{t(a)}⁻¹` together
-/// with the matrices `G_v`, which form the isomorphism `M' → M`.
-fn random_basis_change(rng: &mut XorShift64, m: &Module) -> (Module, Vec<DenseMat>) {
-    let field = m.field();
-    let quiver = m.algebra().quiver();
-    let g: Vec<DenseMat> = m
-        .dim_vector()
-        .iter()
-        .map(|&d| random_invertible(rng, &field, d))
-        .collect();
-    let g_inv: Vec<DenseMat> = g.iter().map(|x| inverse(x, &field)).collect();
-    let maps: Vec<DenseMat> = (0..quiver.num_arrows())
-        .map(|i| {
-            let a = ArrowId(i as u32);
-            let (s, t) = (quiver.source(a) as usize, quiver.target(a) as usize);
-            g[s].mul(m.map(a), &field).mul(&g_inv[t], &field)
-        })
-        .collect();
-    let transformed = Module::new(m.algebra().clone(), m.dim_vector().to_vec(), maps)
-        .expect("a vertexwise basis change preserves the relations");
-    (transformed, g)
 }
 
 /// Generator (b), closure step: random vertex row-space seeds closed under all
@@ -386,7 +254,7 @@ fn for_each_case(
     for field in fields() {
         for (algebra_idx, (name, algebra)) in algebras(field).iter().enumerate() {
             for case in 0..CASES {
-                let seed = case_seed(test, field.modulus(), algebra_idx, case);
+                let seed = case_seed(SEED_BASE, test, field.modulus(), algebra_idx, case);
                 println!(
                     "{name} over F_{} case {case}: seed {seed:#018x}",
                     field.modulus()
@@ -401,7 +269,7 @@ fn for_each_case(
 #[test]
 fn basis_changed_sums_stay_valid_isomorphic_and_hom_ext_invariant() {
     for_each_case(1, |rng, algebra, _field, name| {
-        let m = random_sum_module(rng, algebra);
+        let m = common::random_sum_module(rng, algebra, MAX_TOTAL_DIM);
         let (t, g) = random_basis_change(rng, &m);
         assert_eq!(t.dim_vector(), m.dim_vector(), "{name}");
         let iso = Morphism::new(&t, &m, g).expect("the G_v matrices form a morphism M' -> M");
@@ -441,7 +309,7 @@ fn basis_changed_sums_stay_valid_isomorphic_and_hom_ext_invariant() {
 #[test]
 fn closed_submodules_and_quotients_are_modules_with_exact_dimensions() {
     for_each_case(2, |rng, algebra, _field, name| {
-        let m = random_sum_module(rng, algebra);
+        let m = common::random_sum_module(rng, algebra, MAX_TOTAL_DIM);
         let bases = random_closed_submodule_bases(rng, &m);
         let (sub, inclusion) = submodule_from_closure(&m, &bases);
         let (quotient, projection) = quotient_from_closure(&m, &bases);
@@ -460,7 +328,7 @@ fn closed_submodules_and_quotients_are_modules_with_exact_dimensions() {
 #[test]
 fn covers_of_random_modules_are_surjective_with_syzygy_in_the_radical() {
     for_each_case(3, |rng, algebra, field, name| {
-        let base = random_sum_module(rng, algebra);
+        let base = common::random_sum_module(rng, algebra, MAX_TOTAL_DIM);
         let (transformed, _) = random_basis_change(rng, &base);
         let bases = random_closed_submodule_bases(rng, &base);
         let (sub, _) = submodule_from_closure(&base, &bases);
@@ -491,7 +359,7 @@ fn covers_of_random_modules_are_surjective_with_syzygy_in_the_radical() {
 #[test]
 fn resolution_prefixes_of_random_modules_are_exact_complexes() {
     for_each_case(4, |rng, algebra, field, name| {
-        let base = random_sum_module(rng, algebra);
+        let base = common::random_sum_module(rng, algebra, MAX_TOTAL_DIM);
         let (transformed, _) = random_basis_change(rng, &base);
         let bases = random_closed_submodule_bases(rng, &base);
         let (sub, _) = submodule_from_closure(&base, &bases);
@@ -540,7 +408,7 @@ fn resolution_prefixes_of_random_modules_are_exact_complexes() {
 #[test]
 fn yoneda_ext_agrees_with_generic_hom_cochain_ext() {
     for_each_case(5, |rng, algebra, _field, name| {
-        let base = random_sum_module(rng, algebra);
+        let base = common::random_sum_module(rng, algebra, MAX_TOTAL_DIM);
         let (m, _) = random_basis_change(rng, &base);
         let nv = algebra.quiver().num_vertices();
         let v = rng.below(u64::from(nv)) as u32;
@@ -558,7 +426,7 @@ fn yoneda_ext_agrees_with_generic_hom_cochain_ext() {
 #[test]
 fn hom_into_an_injective_has_the_dimension_of_the_module_at_its_vertex() {
     for_each_case(6, |rng, algebra, _field, name| {
-        let base = random_sum_module(rng, algebra);
+        let base = common::random_sum_module(rng, algebra, MAX_TOTAL_DIM);
         let (transformed, _) = random_basis_change(rng, &base);
         let bases = random_closed_submodule_bases(rng, &base);
         let (sub, _) = submodule_from_closure(&base, &bases);

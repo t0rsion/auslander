@@ -21,6 +21,10 @@
 //!     f in basis rad(X, Z), g in basis rad(Z, Y) }
 //! ```
 //!
+//! The composite `f.then(g)` is first `f`, then `g`, the crate-wide
+//! left-to-right order. The sum runs over `C` in catalog order; it is a span,
+//! so the order does not change it.
+//!
 //! Lemma: when `C` is exhaustive, this is the true `rad^2(X, Y)`. Any element
 //! of `rad^2(X, Y)` factors as `X -> M -> Y` through some module `M` with both
 //! legs in the radical. Krull-Schmidt splits `M` into indecomposables, each
@@ -38,10 +42,15 @@
 //!
 //! `Irr(X, Y)` is a vector space over the residue field of `End(X)` and over
 //! the residue field of `End(Y)`, so both residue degrees divide the base
-//! dimension. [`ArArrow`] stores the two quotients. An arrow between two
-//! vertices of residue degree 1 carries no more information than its base
-//! dimension, and [`ArArrow::valuation`] reports that case as
-//! [`ArrowValuation::Plain`].
+//! dimension, and [`ArArrow`] stores the two quotients. When both residue
+//! degrees are 1 the three numbers agree, the base dimension says everything
+//! about the arrow, and [`ArArrow::valuation`] reports
+//! [`ArrowValuation::Plain`]. When a residue degree `d` exceeds 1, the base
+//! dimension counts `d` prime-field dimensions per dimension over that residue
+//! field, so no single integer is the multiplicity of the arrow. In that case
+//! `valuation` reports [`ArrowValuation::Valued`] with all three numbers. The
+//! crate offers no bare multiplicity accessor, so no caller can read one
+//! number where two are needed.
 
 use std::fmt;
 use std::sync::Arc;
@@ -184,7 +193,7 @@ fn radical_against_iso(
     // basis. A row (l | m) of its left null space says that the composite
     // combined by l equals the radical element combined by -m, so l runs
     // over the solutions of the radical condition.
-    let kernel = stacked.transpose().kernel_basis(&field);
+    let kernel = stacked.left_kernel_basis(&field);
     let spanning: Vec<Morphism> = (0..kernel.rows())
         .map(|k| space.morphism(&kernel.row(k)[..space.dim()]))
         .collect();
@@ -195,10 +204,10 @@ fn radical_against_iso(
 /// indecomposables, as a subspace of `Hom(X, Y)`.
 ///
 /// Non-isomorphic endpoints give the whole Hom space. Isomorphic endpoints
-/// give the maps `f` with `f.then(u)` in `rad End(X)`, where `u: Y -> X` is
-/// the first isomorphism found by the deterministic scan of the radical
-/// criterion. The subspace does not depend on that choice, as the module
-/// documentation explains.
+/// give the maps `f` with `f.then(u)` in `rad End(X)`, where `u: Y -> X` is the
+/// inverse of the first isomorphism `X -> Y` found by the deterministic scan of
+/// the radical criterion. The subspace does not depend on that choice, as the
+/// module documentation explains.
 ///
 /// # Errors
 /// [`ArQuiverError::Hom`] when the two modules do not share one algebra.
@@ -248,7 +257,9 @@ impl fmt::Display for CatalogProvenance {
 pub struct IndecomposableCatalog {
     algebra: Arc<Algebra>,
     provenance: CatalogProvenance,
-    entries: Vec<IndecomposableModule>,
+    // Shared, so an AR vertex can hold its entry without running the
+    // locality gate a second time.
+    entries: Vec<Arc<IndecomposableModule>>,
 }
 
 impl fmt::Debug for IndecomposableCatalog {
@@ -267,17 +278,17 @@ impl fmt::Debug for IndecomposableCatalog {
 /// enumerators list only modules their classification theorem proves
 /// indecomposable, and both attach a [`Certificate`], so a rejection is a
 /// crate defect.
-fn certified_entries(listed: Vec<(Module, Certificate)>) -> Vec<IndecomposableModule> {
+fn certified_entries(listed: Vec<(Module, Certificate)>) -> Vec<Arc<IndecomposableModule>> {
     listed
         .into_iter()
         .map(|(m, certificate)| {
-            IndecomposableModule::new(&m).unwrap_or_else(|error| {
+            Arc::new(IndecomposableModule::new(&m).unwrap_or_else(|error| {
                 panic!(
                     "the enumerator listed the module {:?} with certificate {certificate:?}, \
                      and the locality gate rejected it: {error}; crate defect",
                     m.dim_vector()
                 )
-            })
+            }))
         })
         .collect()
 }
@@ -326,7 +337,7 @@ impl IndecomposableCatalog {
 
     /// The entries in enumerator order. An entry's index is its identifier.
     #[inline]
-    pub fn entries(&self) -> &[IndecomposableModule] {
+    pub fn entries(&self) -> &[Arc<IndecomposableModule>] {
         &self.entries
     }
 
@@ -346,9 +357,10 @@ impl IndecomposableCatalog {
 }
 
 /// The span of the composites `f.then(g)` over the given pairs of subspaces,
-/// as a subspace of `space`.
+/// as a subspace of `Hom(source, target)`.
 fn span_of_composites<'a>(
-    space: &HomSpace,
+    source: &Module,
+    target: &Module,
     factorizations: impl Iterator<Item = (&'a HomSubspace, &'a HomSubspace)>,
 ) -> Result<HomSubspace, ArQuiverError> {
     let mut composites = Vec::new();
@@ -360,7 +372,7 @@ fn span_of_composites<'a>(
             }
         }
     }
-    Ok(space.subspace(&composites)?)
+    Ok(HomSubspace::spanned_by(source, target, &composites)?)
 }
 
 /// `rad^2(X, Y)`: the sum over the catalog entries `Z` of the composites of
@@ -378,12 +390,15 @@ pub fn radical_square_through_catalog(
     x: &IndecomposableModule,
     y: &IndecomposableModule,
 ) -> Result<HomSubspace, ArQuiverError> {
-    let space = HomSpace::new(x.module(), y.module())?;
     let mut legs = Vec::with_capacity(catalog.len());
     for z in catalog.entries() {
         legs.push((category_radical(x, z)?, category_radical(z, y)?));
     }
-    span_of_composites(&space, legs.iter().map(|(left, right)| (left, right)))
+    span_of_composites(
+        x.module(),
+        y.module(),
+        legs.iter().map(|(left, right)| (left, right)),
+    )
 }
 
 /// `Irr(X, Y) = rad(X, Y) / rad^2(X, Y)`, with the deterministic complement
@@ -422,7 +437,8 @@ fn quotient_or_defect(
 #[derive(Debug)]
 pub struct ArVertex {
     id: usize,
-    module: IndecomposableModule,
+    // The catalog entry itself, shared with the catalog.
+    module: Arc<IndecomposableModule>,
     residue_degree: usize,
     projective: bool,
     injective: bool,
@@ -465,12 +481,12 @@ impl ArVertex {
 /// The valuation of an [`ArArrow`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ArrowValuation {
-    /// Both endpoints have residue degree 1, so the base dimension of
-    /// `Irr(X, Y)` is the whole valuation.
+    /// Both endpoints have residue degree 1, so `dim_Fp Irr(X, Y)` is the whole
+    /// valuation.
     Plain(usize),
     /// At least one endpoint has residue degree above 1, so the dimension of
-    /// `Irr(X, Y)` over the two residue fields differs from its dimension
-    /// over the prime field.
+    /// `Irr(X, Y)` over that residue field is smaller than its dimension over
+    /// the prime field, and both numbers are needed.
     Valued {
         /// `dim_Fp Irr(X, Y)`.
         base_dim: usize,
@@ -532,7 +548,9 @@ impl ArArrow {
     }
 
     /// The valuation: [`ArrowValuation::Plain`] when both endpoints have
-    /// residue degree 1, and [`ArrowValuation::Valued`] otherwise.
+    /// residue degree 1, and [`ArrowValuation::Valued`] otherwise. The test is
+    /// on the stored quotients, which equal the base dimension exactly when the
+    /// matching residue degree is 1.
     pub fn valuation(&self) -> ArrowValuation {
         if self.base_dim == self.over_source_residue && self.base_dim == self.over_target_residue {
             ArrowValuation::Plain(self.base_dim)
@@ -580,12 +598,13 @@ impl ArQuiver {
     }
 }
 
-/// The dimension of `Irr(X, Y)` over a residue field of degree
-/// `residue_degree`.
+/// `base_dim / residue_degree`: the dimension of a space of prime-field
+/// dimension `base_dim` over a residue field of degree `residue_degree`.
+/// `module` names the module whose residue degree this is, for the error.
 ///
 /// # Errors
 /// [`ArQuiverError::ResidueDegreeDoesNotDivide`] when the division leaves a
-/// remainder, which is a crate defect.
+/// remainder or the degree is 0, which is a crate defect.
 fn over_residue(
     base_dim: usize,
     residue_degree: usize,
@@ -610,17 +629,12 @@ fn unit(dim: usize, k: usize, field: &PrimeField) -> Vec<Fp> {
 fn vertices_of(catalog: &IndecomposableCatalog) -> Result<Vec<ArVertex>, ArQuiverError> {
     let mut vertices = Vec::with_capacity(catalog.len());
     for (id, entry) in catalog.entries().iter().enumerate() {
-        // The catalog owns its entries, so the vertex certifies the same
-        // module again; both values wrap one shared module.
-        let module = IndecomposableModule::new(entry.module())
-            .expect("a catalog entry passed the same gate already");
-        let injective = module.is_injective().map_err(ArQuiverError::Injective)?;
         vertices.push(ArVertex {
             id,
-            residue_degree: module.residue_degree(),
-            projective: module.is_projective(),
-            injective,
-            module,
+            residue_degree: entry.residue_degree(),
+            projective: entry.is_projective(),
+            injective: entry.is_injective().map_err(ArQuiverError::Injective)?,
+            module: entry.clone(),
         });
     }
     Ok(vertices)
@@ -638,10 +652,10 @@ fn quiver_of(catalog: IndecomposableCatalog) -> Result<ArQuiver, ArQuiverError> 
     let mut arrows = Vec::new();
     for i in 0..n {
         for j in 0..n {
-            let space =
-                HomSpace::new(catalog.entries()[i].module(), catalog.entries()[j].module())?;
+            let (x, y) = (catalog.entries()[i].module(), catalog.entries()[j].module());
             let square = span_of_composites(
-                &space,
+                x,
+                y,
                 (0..n).map(|k| (&radicals[i * n + k], &radicals[k * n + j])),
             )?;
             let quotient = quotient_or_defect(&radicals[i * n + j], &square)?;
@@ -649,21 +663,13 @@ fn quiver_of(catalog: IndecomposableCatalog) -> Result<ArQuiver, ArQuiverError> 
             if base_dim == 0 {
                 continue;
             }
-            let field = space.source().field();
+            let field = x.field();
             arrows.push(ArArrow {
                 source: i,
                 target: j,
                 base_dim,
-                over_source_residue: over_residue(
-                    base_dim,
-                    vertices[i].residue_degree,
-                    space.source(),
-                )?,
-                over_target_residue: over_residue(
-                    base_dim,
-                    vertices[j].residue_degree,
-                    space.target(),
-                )?,
+                over_source_residue: over_residue(base_dim, vertices[i].residue_degree, x)?,
+                over_target_residue: over_residue(base_dim, vertices[j].residue_degree, y)?,
                 representatives: (0..base_dim)
                     .map(|k| quotient.representative(&unit(base_dim, k, &field)))
                     .collect(),
@@ -702,8 +708,8 @@ pub fn ar_quiver(algebra: &Arc<Algebra>) -> Result<ArQuiver, ArQuiverError> {
 mod tests {
     use super::*;
     use crate::algebra::{
-        MonomialPresentation, commutative_square, cyclic_nakayama, kronecker, linear_an,
-        monomial_completion_limits, radical_square_zero_cycle, truncated_poly,
+        commutative_square, cyclic_nakayama, kronecker, linear_an, radical_square_zero_cycle,
+        truncated_poly,
     };
     use crate::dynkin::{DynkinType, dynkin_quiver};
     use crate::hom::hom;
@@ -719,14 +725,8 @@ mod tests {
     }
 
     fn path_algebra(quiver: Quiver, field: PrimeField) -> Arc<Algebra> {
-        let presentation = MonomialPresentation::new(quiver, Vec::new())
-            .expect("an acyclic quiver has a finite path algebra");
-        Algebra::from_monomial(
-            field,
-            &presentation,
-            &monomial_completion_limits(&presentation),
-        )
-        .expect("the zero ideal over an acyclic quiver completes")
+        crate::algebra::path_algebra(quiver, field)
+            .expect("the zero ideal over an acyclic quiver completes")
     }
 
     fn d4(field: PrimeField) -> Arc<Algebra> {

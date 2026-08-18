@@ -1,6 +1,6 @@
 //! The sealed admissible order on path words.
 //!
-//! v0.3 has exactly one order, identified by [`ORDER_ID`]. Completion,
+//! The crate has exactly one order, identified by [`ORDER_ID`]. Completion,
 //! certificates, and verification all use it. No user-supplied comparators
 //! exist.
 //!

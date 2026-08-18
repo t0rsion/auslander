@@ -7,15 +7,16 @@
 //! must agree with each other and with the hash computed in this process.
 
 use std::env;
-use std::io::Read;
-use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::time::Duration;
 
 use auslander::algebra::Algebra;
 use auslander::completion::CompletionLimits;
 use auslander::field::PrimeField;
 use auslander::quiver::{ArrowId, Quiver};
 use auslander::relation::{Presentation, Relation};
+
+mod common;
 
 /// Builds the commutative square `kQ/(ab - cd)` over F_5 from a freshly
 /// constructed presentation on every call.
@@ -39,26 +40,14 @@ fn certificate_bytes() -> String {
     square_algebra().certificate().to_canonical_json()
 }
 
-/// FNV-1a, 64 bit. Written out here so the fingerprint does not depend on
-/// any hasher with unspecified cross-process behavior.
-fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for &byte in bytes {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
-}
-
 const CHILD_ENV: &str = "AUSLANDER_DETERMINISM_CHILD";
 const MARKER: &str = "certificate-fingerprint:";
+/// The child builds one dimension-9 algebra, which takes milliseconds here.
+/// The bound exists to turn a hang into a test failure.
+const CHILD_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn fingerprint(bytes: &str) -> String {
-    format!(
-        "{MARKER}{:016x}:len:{}",
-        fnv1a(bytes.as_bytes()),
-        bytes.len()
-    )
+    common::fingerprint(MARKER, bytes)
 }
 
 #[test]
@@ -82,36 +71,12 @@ fn determinism_child_prints_certificate_fingerprint() {
 /// Spawns the current test binary on the child test alone and returns the
 /// fingerprint line it printed.
 fn child_fingerprint() -> String {
-    let exe = env::current_exe().expect("path of the running test binary");
-    let mut child = Command::new(exe)
-        .args([
-            "--exact",
-            "determinism_child_prints_certificate_fingerprint",
-            "--nocapture",
-        ])
-        .env(CHILD_ENV, "1")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn the child test process");
-    let mut stdout = String::new();
-    child
-        .stdout
-        .take()
-        .expect("stdout was piped")
-        .read_to_string(&mut stdout)
-        .expect("read child output");
-    let status = child.wait().expect("wait for the child test process");
-    assert!(status.success(), "child test failed:\n{stdout}");
-    assert!(
-        stdout.contains("1 passed"),
-        "child ran zero tests; was determinism_child_prints_certificate_fingerprint renamed?\n{stdout}"
+    let stdout = common::child_test_stdout(
+        "determinism_child_prints_certificate_fingerprint",
+        CHILD_ENV,
+        CHILD_TIMEOUT,
     );
-    stdout
-        .lines()
-        .find(|line| line.starts_with(MARKER))
-        .unwrap_or_else(|| panic!("child printed no fingerprint line:\n{stdout}"))
-        .to_string()
+    common::marked_line(&stdout, MARKER)
 }
 
 #[test]

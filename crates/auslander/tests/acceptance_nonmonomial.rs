@@ -26,7 +26,7 @@ use std::sync::Arc;
 use auslander::algebra::{
     Algebra, AlgebraBuildError, commutative_square, linear_an, linear_nakayama,
 };
-use auslander::ar::{Tau, tau};
+use auslander::ar::tau;
 use auslander::certificate::FinitenessData;
 use auslander::completion::{CompletionLimits, TruncationReason};
 use auslander::decompose::{Certificate, KrullSchmidtOutcome, decompose, krull_schmidt};
@@ -41,63 +41,18 @@ use auslander::iso::{IsoOutcome, Obstruction, is_isomorphic};
 use auslander::linalg::DenseMat;
 use auslander::module::{Module, ModuleError, direct_sum};
 use auslander::opposite::{dual, nu_of_presentation_map, opposite};
-use auslander::quiver::{ArrowId, PathWord, Quiver};
+use auslander::quiver::{PathWord, Quiver};
 use auslander::radical::{loewy_length, radical, radical_series, socle_series};
 use auslander::relation::{Presentation, Relation, RelationError};
 use auslander::resolution::{Bounded, minimal_presentation_matrix, projective_dimension, resolve};
 use auslander::verify::{VerifyError, verify};
 
-fn f5() -> PrimeField {
-    PrimeField::new(5).unwrap()
-}
+mod common;
 
-fn f2() -> PrimeField {
-    PrimeField::new(2).unwrap()
-}
-
-fn ids(raw: &[u32]) -> Vec<ArrowId> {
-    raw.iter().copied().map(ArrowId).collect()
-}
+use common::{f5, ids, inhomogeneous, inhomogeneous_quiver, preprojective_a3};
 
 fn square() -> Arc<Algebra> {
     commutative_square(f5())
-}
-
-fn preprojective_a3() -> Arc<Algebra> {
-    let field = f2();
-    let quiver = Quiver::new(3, &[(0, 1), (1, 2), (1, 0), (2, 1)]).unwrap();
-    let relations = vec![
-        Relation::new(&quiver, field, vec![(field.one(), ids(&[0, 2]))]).unwrap(),
-        Relation::new(
-            &quiver,
-            field,
-            vec![(field.one(), ids(&[2, 0])), (field.elem(-1), ids(&[1, 3]))],
-        )
-        .unwrap(),
-        Relation::new(&quiver, field, vec![(field.one(), ids(&[3, 1]))]).unwrap(),
-    ];
-    let presentation = Presentation::new(quiver, field, relations).unwrap();
-    Algebra::new(presentation, &CompletionLimits::default()).unwrap()
-}
-
-fn inhomogeneous_quiver() -> Quiver {
-    Quiver::new(5, &[(0, 1), (1, 4), (0, 2), (2, 3), (3, 4)]).unwrap()
-}
-
-fn inhomogeneous() -> Arc<Algebra> {
-    let field = f5();
-    let quiver = inhomogeneous_quiver();
-    let relation = Relation::new(
-        &quiver,
-        field,
-        vec![
-            (field.one(), ids(&[0, 1])),
-            (field.elem(-1), ids(&[2, 3, 4])),
-        ],
-    )
-    .unwrap();
-    let presentation = Presentation::new(quiver, field, vec![relation]).unwrap();
-    Algebra::new(presentation, &CompletionLimits::default()).unwrap()
 }
 
 fn dim_vecs(modules: &[Module]) -> Vec<Vec<usize>> {
@@ -220,9 +175,9 @@ fn preprojective_radical_and_socle_series_of_the_projectives() {
 /// Row 2. Exact chains for C's `P_0 = {e_0, a, c, ab, cd}` with
 /// `NF(cde) = ab`, hand-derived. Radical: `J P_0 = {a, c, ab, cd}`,
 /// `J² P_0 = {ab, cd}` (from `a·b`, `c·d`), `J³ P_0 = {ab}` (from
-/// `cd·e`), `J⁴ P_0 = 0`. Socle: `ab·J = 0`; `cd·J² = 0` because no
-/// length-2 path leaves vertex 3, while `c·(de) = ab ≠ 0` keeps `c` out
-/// of `soc²`; `c·J³ = 0` because `J³ = span{ab}` starts at vertex 0.
+/// `cd·e`), `J⁴ P_0 = 0`. Socle: `ab·J = 0`; `a·J² = cd·J² = 0` because no
+/// length-2 path leaves vertex 1 or vertex 3, while `c·(de) = ab ≠ 0` keeps
+/// `c` out of `soc²`; `c·J³ = 0` because `J³ = span{ab}` starts at vertex 0.
 #[test]
 fn inhomogeneous_radical_and_socle_series_of_p0() {
     let c = inhomogeneous();
@@ -266,9 +221,10 @@ fn inhomogeneous_normal_word_of_length_2_spans_j_cubed() {
     assert_eq!(c.path_index(&cde), Ok(None));
     assert_eq!(c.nf_word(&cde), Ok(vec![(ab_index, f5().one())]));
     assert_eq!(c.paths_between(0, 4), &[ab_index]);
-    let j3 = c.radical_power_component(0, 4, 3);
-    assert_eq!(j3, vec![vec![f5().one()]], "ab spans e_0 J³ e_4");
-    assert!(c.radical_power_component(0, 4, 4).is_empty());
+    let j3 = c.radical_power_matrix(0, 4, 3);
+    assert_eq!(j3.rows(), 1, "ab spans e_0 J³ e_4");
+    assert_eq!(j3.row(0), &[f5().one()]);
+    assert_eq!(c.radical_power_matrix(0, 4, 4).rows(), 0);
     assert_eq!(c.nilpotency_degree(), 4);
 }
 
@@ -617,12 +573,10 @@ fn square_tau_of_simples_matches_the_hand_and_oracle_values() {
     let a = square();
     let expected: [&[usize]; 3] = [&[1, 1, 1, 0], &[0, 0, 1, 1], &[0, 1, 0, 1]];
     for (v, dims) in expected.iter().enumerate() {
-        match tau(&Module::simple(&a, v as u32)).unwrap() {
-            Tau::Module(t) => assert_eq!(t.dim_vector(), *dims, "τS_{v}"),
-            Tau::Zero => panic!("S_{v} is not projective"),
-        }
+        let t = tau(&Module::simple(&a, v as u32)).unwrap();
+        assert_eq!(t.dim_vector(), *dims, "τS_{v}");
     }
-    assert!(matches!(tau(&Module::simple(&a, 3)).unwrap(), Tau::Zero));
+    assert!(tau(&Module::simple(&a, 3)).unwrap().is_zero());
 }
 
 /// Row 9. Over the self-injective B no simple is projective; the dimension
@@ -632,10 +586,8 @@ fn preprojective_tau_of_simples_matches_the_oracle() {
     let b = preprojective_a3();
     let expected: [&[usize]; 3] = [&[0, 1, 1], &[1, 1, 1], &[1, 1, 0]];
     for (v, dims) in expected.iter().enumerate() {
-        match tau(&Module::simple(&b, v as u32)).unwrap() {
-            Tau::Module(t) => assert_eq!(t.dim_vector(), *dims, "τS_{v}"),
-            Tau::Zero => panic!("S_{v} is not projective over a self-injective algebra"),
-        }
+        let t = tau(&Module::simple(&b, v as u32)).unwrap();
+        assert_eq!(t.dim_vector(), *dims, "τS_{v}");
     }
 }
 
@@ -668,6 +620,10 @@ fn enumerators_keep_v02_counts_and_reject_the_square() {
 /// Row 11. Over `kA_2` the sequence `0 → S_1 → P_0 → S_0 → 0` does not
 /// split. `Ext¹(S_0, S_1) = 1`, and the middle term `P_0` is not isomorphic
 /// to `S_0 ⊕ S_1`. That second fact is the witness the public API certifies.
+///
+/// The obstruction is the radical series. `rad P_0 = S_1 = [0, 1]` and
+/// `rad² P_0 = 0`, so `P_0` has the one-entry series `[[0, 1]]`, while
+/// `S_0 ⊕ S_1` is semisimple and its series is empty.
 #[test]
 fn ka2_nonsplit_extension_witnessed_by_the_middle_term() {
     let a2 = linear_an(2, f5());
@@ -677,16 +633,23 @@ fn ka2_nonsplit_extension_witnessed_by_the_middle_term() {
     let p0 = Module::projective(&a2, 0);
     let (split_sum, _, _) = direct_sum(&[&s0, &s1]);
     assert_eq!(p0.dim_vector(), split_sum.dim_vector());
-    assert!(matches!(
-        is_isomorphic(&p0, &split_sum).unwrap(),
-        IsoOutcome::NotIsomorphic(_)
-    ));
+    match is_isomorphic(&p0, &split_sum).unwrap() {
+        IsoOutcome::NotIsomorphic(Obstruction::LoewySeries { source, target }) => {
+            assert_eq!(source, vec![vec![0, 1]]);
+            assert_eq!(target, Vec::<Vec<usize>>::new());
+        }
+        other => panic!("expected a Loewy-series obstruction, got {other:?}"),
+    }
 }
 
 /// Row 11 over A. `Ext¹(S_0, S_1) = 1`; the extension is realized by the
 /// module `M = [1, 1, 0, 0]` with `a` acting as the identity (the relation
 /// holds because `b` and `d` act on zero spaces). `M` is not isomorphic to
 /// `S_0 ⊕ S_1` because `rad M ≠ 0`.
+///
+/// The obstruction is the radical series. `rad M` is the image of `a`, so
+/// `rad M = [0, 1, 0, 0]` and `rad² M = 0`, giving the one-entry series
+/// `[[0, 1, 0, 0]]`, while the semisimple `S_0 ⊕ S_1` has an empty series.
 #[test]
 fn square_nonsplit_extension_of_s0_by_s1() {
     let a = square();
@@ -707,10 +670,13 @@ fn square_nonsplit_extension_of_s0_by_s1() {
     .unwrap();
     let (split_sum, _, _) = direct_sum(&[&s0, &s1]);
     assert_eq!(middle.dim_vector(), split_sum.dim_vector());
-    assert!(matches!(
-        is_isomorphic(&middle, &split_sum).unwrap(),
-        IsoOutcome::NotIsomorphic(_)
-    ));
+    match is_isomorphic(&middle, &split_sum).unwrap() {
+        IsoOutcome::NotIsomorphic(Obstruction::LoewySeries { source, target }) => {
+            assert_eq!(source, vec![vec![0, 1, 0, 0]]);
+            assert_eq!(target, Vec::<Vec<usize>>::new());
+        }
+        other => panic!("expected a Loewy-series obstruction, got {other:?}"),
+    }
 }
 
 /// Row 12. Dump the certificate, verify the bytes independently, rebuild
@@ -720,52 +686,51 @@ fn square_certificate_dump_verify_rebuild_round_trip() {
     let a = square();
     let bytes = a.certificate().to_canonical_json();
     let verified = verify(&bytes).unwrap();
-    let rebuilt = Algebra::from_verified(verified);
+    let rebuilt = Algebra::from_verified(verified).unwrap();
     assert_eq!(rebuilt.dim(), a.dim());
     assert_eq!(rebuilt.basis(), a.basis());
     assert_eq!(rebuilt.cartan_matrix(), a.cartan_matrix());
     assert_eq!(rebuilt.certificate().to_canonical_json(), bytes);
 }
 
-/// Row 13. A tight step budget on B's presentation surfaces
-/// `Truncated` with diagnostics instead of a silent partial answer.
+/// Row 13. A tight step budget, a tight basis budget, and a tight word-length
+/// budget on B's presentation each surface `Truncated` carrying the matching
+/// `TruncationReason`, never a silent partial answer. Every relation of B is a
+/// combination of paths of length 2, so `max_word_len: 1` rejects the input
+/// words themselves.
 #[test]
 fn preprojective_with_tight_limits_is_truncated_with_diagnostics() {
-    let field = f2();
-    let quiver = Quiver::new(3, &[(0, 1), (1, 2), (1, 0), (2, 1)]).unwrap();
-    let relations = vec![
-        Relation::new(&quiver, field, vec![(field.one(), ids(&[0, 2]))]).unwrap(),
-        Relation::new(
-            &quiver,
-            field,
-            vec![(field.one(), ids(&[2, 0])), (field.elem(-1), ids(&[1, 3]))],
-        )
-        .unwrap(),
-        Relation::new(&quiver, field, vec![(field.one(), ids(&[3, 1]))]).unwrap(),
-    ];
-    let presentation = Presentation::new(quiver, field, relations).unwrap();
-    let limits = CompletionLimits {
-        max_basis: 4096,
-        max_word_len: 64,
-        max_steps: 5,
-    };
-    match Algebra::new(presentation.clone(), &limits) {
-        Err(AlgebraBuildError::Truncated(diagnostics)) => {
-            assert_eq!(diagnostics.reason, TruncationReason::StepBudget);
-            assert!(diagnostics.steps_used <= 5);
+    let presentation = common::preprojective_a3_presentation();
+    for (limits, reason) in [
+        (
+            CompletionLimits {
+                max_steps: 5,
+                ..CompletionLimits::default()
+            },
+            TruncationReason::StepBudget,
+        ),
+        (
+            CompletionLimits {
+                max_basis: 1,
+                ..CompletionLimits::default()
+            },
+            TruncationReason::BasisBudget,
+        ),
+        (
+            CompletionLimits {
+                max_word_len: 1,
+                ..CompletionLimits::default()
+            },
+            TruncationReason::WordLenBudget,
+        ),
+    ] {
+        match Algebra::new(presentation.clone(), &limits) {
+            Err(AlgebraBuildError::Truncated(diagnostics)) => {
+                assert_eq!(diagnostics.reason, reason);
+                assert!(diagnostics.steps_used <= limits.max_steps);
+            }
+            other => panic!("expected Truncated with {reason:?}, got {other:?}"),
         }
-        other => panic!("expected Truncated, got {other:?}"),
-    }
-    let limits = CompletionLimits {
-        max_basis: 1,
-        max_word_len: 64,
-        max_steps: 1_000_000,
-    };
-    match Algebra::new(presentation, &limits) {
-        Err(AlgebraBuildError::Truncated(diagnostics)) => {
-            assert_eq!(diagnostics.reason, TruncationReason::BasisBudget);
-        }
-        other => panic!("expected Truncated, got {other:?}"),
     }
 }
 

@@ -2,15 +2,17 @@
 //! [`crate::resolution`].
 //!
 //! Each construction here is the image under the k-dual `D` of the matching
-//! projective construction over the opposite algebra. `D` preserves dimension
-//! vectors and transposes every arrow matrix (see [`crate::opposite::dual`]), so
-//! it is exact. It carries the projective cover of `D(M)` over `A^op` to the
-//! injective envelope of `M`, and a minimal projective resolution of `D(M)` to a
-//! minimal injective coresolution of `M`. Minimality transports with it: a
-//! superfluous epimorphism dualizes to an essential monomorphism, so `soc I^k`
-//! lies in the kernel of `d^k` at every step. Partial coresolutions carry the
-//! same typed status as projective resolutions, [`ResolutionEnd`] and
-//! [`Bounded`].
+//! projective construction over the opposite algebra. `D` is the vertexwise
+//! vector-space dual: the same dimension vector, every arrow matrix transposed
+//! (see [`crate::opposite::dual`]). Vector-space duality is exact, so `D` is an
+//! exact contravariant functor. It carries the projective cover of `D(M)` over
+//! `A^op` to the injective envelope of `M`, and a minimal projective resolution of
+//! `D(M)` to a minimal injective coresolution of `M`.
+//!
+//! Minimality transports with it: a superfluous epimorphism dualizes to an
+//! essential monomorphism, so `soc I^k` lies in the kernel of `d^k` at every step.
+//! Partial coresolutions carry the same typed status as projective resolutions,
+//! [`ResolutionEnd`] and [`Bounded`].
 
 use crate::algebra::AlgebraBuildError;
 use crate::hom::Morphism;
@@ -57,9 +59,11 @@ pub struct InjectiveCoresolution {
 /// (`terms.len() ≤ steps + 1`).
 ///
 /// The dual of [`resolve`] applied to `D(m)` over the opposite algebra, term by
-/// term and map by map. [`ResolutionEnd::Finite`] means the cosyzygy after the
-/// last term is zero, so `0 → M → I^0 → … → I^L → 0` is exact.
-/// `Cut { at: steps }` means the `(steps + 1)`-st cosyzygy is genuinely nonzero.
+/// term and map by map, so exactness and minimality are inherited from that
+/// resolution.
+/// [`ResolutionEnd::Finite`] means the cosyzygy after the last term is zero, so
+/// `0 → M → I^0 → … → I^L → 0` is exact. `Cut { at: steps }` means the
+/// `(steps + 1)`-st cosyzygy is genuinely nonzero, and nothing is claimed past it.
 /// Errors when building the opposite algebra fails (see [`opposite`]).
 pub fn coresolve(m: &Module, steps: usize) -> Result<InjectiveCoresolution, AlgebraBuildError> {
     let op = opposite(m.algebra())?;
@@ -94,9 +98,9 @@ pub fn coresolve(m: &Module, steps: usize) -> Result<InjectiveCoresolution, Alge
 /// Returns `Exact(n)` with `n ≤ bound` when the minimal coresolution reaches
 /// zero by step `bound`, and `AtLeast(bound + 1)` otherwise. The lower bound is
 /// genuine: the coresolution is minimal, so a nonzero `(bound + 1)`-st cosyzygy
-/// proves `id m > bound`. Convention: the zero module is injective, so
-/// `id 0 = Exact(0)`. Errors when building the opposite algebra fails (see
-/// [`opposite`]).
+/// proves `id m > bound`. `AtLeast(bound + 1)` is not a claim that `id m` is
+/// infinite. Convention: the zero module is injective, so `id 0 = Exact(0)`.
+/// Errors when building the opposite algebra fails (see [`opposite`]).
 pub fn injective_dimension(m: &Module, bound: usize) -> Result<Bounded<usize>, AlgebraBuildError> {
     let coresolution = coresolve(m, bound)?;
     Ok(match coresolution.end {

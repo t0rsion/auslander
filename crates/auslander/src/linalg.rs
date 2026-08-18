@@ -10,12 +10,22 @@
 //! [`PrimeField::elem`]. The field arithmetic debug-asserts this and does
 //! not re-reduce.
 //!
-//! Basis-returning operations (`kernel_basis`, `row_space_basis`,
-//! `image_basis`) return a matrix whose rows are the basis vectors, derived
-//! from the reduced row echelon form. Since the reduced form is unique, the
-//! dense and sparse paths return identical results.
+//! Basis-returning operations (`kernel_basis`, `left_kernel_basis`,
+//! `row_space_basis`, `image_basis`) return a matrix whose rows are the basis
+//! vectors, derived from the reduced row echelon form. The reduced form is
+//! unique, so these operations are deterministic and the dense and sparse
+//! paths return identical rows in identical order. Callers above this module
+//! depend on the exact rows and their order, so both are part of the contract.
+//!
+//! Every reduction has two forms. `rref`, `rank`, `kernel_basis`, and
+//! `row_space_basis` take the matrix by reference and reduce a copy of it.
+//! The matching `into_rref`, `into_rank`, `into_kernel_basis`, and
+//! `into_row_space_basis` take the matrix by value and reduce it in place, so
+//! a caller whose input is dead after the call pays for no copy. Both forms
+//! return the same thing. The consuming form is crate-private.
 
 use crate::field::{Fp, PrimeField};
+use crate::profile::{Site, hit};
 
 /// Row-major dense matrix over F_p.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,11 +38,17 @@ pub struct DenseMat {
 
 impl DenseMat {
     /// The `rows x cols` zero matrix.
+    ///
+    /// # Panics
+    /// Panics if `rows * cols` overflows `usize`.
     pub fn zero(rows: usize, cols: usize) -> DenseMat {
+        let len = rows
+            .checked_mul(cols)
+            .unwrap_or_else(|| panic!("zero: {rows} by {cols} entries overflow usize"));
         DenseMat {
             rows,
             cols,
-            data: vec![Fp::ZERO; rows * cols],
+            data: vec![Fp::ZERO; len],
         }
     }
 
@@ -45,7 +61,7 @@ impl DenseMat {
         m
     }
 
-    /// A matrix with the given rows.
+    /// A matrix with the given rows. An empty slice gives the 0 x 0 matrix.
     ///
     /// # Panics
     /// Panics if the rows have differing lengths.
@@ -118,11 +134,12 @@ impl DenseMat {
             .collect()
     }
 
-    /// self + rhs.
+    /// The sum `self + rhs`.
     ///
     /// # Panics
-    /// Panics on shape mismatch.
+    /// Panics unless the two matrices have the same shape.
     pub fn add(&self, rhs: &DenseMat, f: &PrimeField) -> DenseMat {
+        hit(Site::DenseAdd);
         assert!(
             self.rows == rhs.rows && self.cols == rhs.cols,
             "add: {}x{} vs {}x{}",
@@ -144,38 +161,55 @@ impl DenseMat {
         }
     }
 
-    /// self * rhs.
+    /// The product `self * rhs`.
     ///
     /// # Panics
     /// Panics unless `self.cols() == rhs.rows()`.
     pub fn mul(&self, rhs: &DenseMat, f: &PrimeField) -> DenseMat {
+        hit(Site::DenseMul);
         assert_eq!(
             self.cols, rhs.rows,
             "mul: {}x{} times {}x{}",
             self.rows, self.cols, rhs.rows, rhs.cols
         );
         let mut out = DenseMat::zero(self.rows, rhs.cols);
+        // Each product is below 2^62 and a row adds self.cols of them, so the
+        // accumulator stays inside u128 and is reduced once per output entry.
+        let mut acc = vec![0u128; rhs.cols];
         for i in 0..self.rows {
-            for k in 0..self.cols {
-                let a = self.data[i * self.cols + k];
+            acc.fill(0);
+            for (k, &a) in self.data[i * self.cols..(i + 1) * self.cols]
+                .iter()
+                .enumerate()
+            {
                 if a.is_zero() {
                     continue;
                 }
-                for j in 0..rhs.cols {
-                    let t = f.mul(a, rhs.data[k * rhs.cols + j]);
-                    out.data[i * rhs.cols + j] = f.add(out.data[i * rhs.cols + j], t);
+                let a = a.raw();
+                for (t, &b) in acc
+                    .iter_mut()
+                    .zip(&rhs.data[k * rhs.cols..(k + 1) * rhs.cols])
+                {
+                    *t += (a * b.raw()) as u128;
                 }
+            }
+            for (o, &t) in out.data[i * rhs.cols..(i + 1) * rhs.cols]
+                .iter_mut()
+                .zip(&acc)
+            {
+                *o = f.reduce_wide(t);
             }
         }
         out
     }
 
-    /// A x for a vector `x` of length `self.cols()`; the result has length
+    /// `A x` for a vector `x` of length `self.cols()`; the result has length
     /// `self.rows()`.
     ///
     /// # Panics
-    /// Panics on length mismatch.
+    /// Panics unless `x.len() == self.cols()`.
     pub fn mul_vec(&self, x: &[Fp], f: &PrimeField) -> Vec<Fp> {
+        hit(Site::DenseMulVec);
         assert_eq!(
             x.len(),
             self.cols,
@@ -185,17 +219,18 @@ impl DenseMat {
         (0..self.rows)
             .map(|r| {
                 let row = &self.data[r * self.cols..(r + 1) * self.cols];
-                let mut acc = Fp::ZERO;
+                let mut acc = 0u128;
                 for (&a, &v) in row.iter().zip(x) {
-                    acc = f.add(acc, f.mul(a, v));
+                    acc += (a.raw() * v.raw()) as u128;
                 }
-                acc
+                f.reduce_wide(acc)
             })
             .collect()
     }
 
     /// The transpose.
     pub fn transpose(&self) -> DenseMat {
+        hit(Site::DenseTranspose);
         let mut out = DenseMat::zero(self.cols, self.rows);
         for r in 0..self.rows {
             for c in 0..self.cols {
@@ -207,17 +242,38 @@ impl DenseMat {
 
     /// The reduced row echelon form and its pivot columns.
     ///
-    /// Pivot rows come first in pivot-column order; zero rows follow.
+    /// Pivot rows come first in pivot-column order; zero rows follow. The
+    /// matrix is copied first. Where the input is dead after the call,
+    /// `into_rref` reduces the input itself and copies nothing.
     pub fn rref(&self, f: &PrimeField) -> (DenseMat, Vec<usize>) {
-        let mut m = self.clone();
-        let pivots = m.rref_in_place(f);
-        (m, pivots)
+        self.clone().into_rref(f)
+    }
+
+    /// [`DenseMat::rref`] on an owned matrix, reduced in place.
+    pub(crate) fn into_rref(mut self, f: &PrimeField) -> (DenseMat, Vec<usize>) {
+        hit(Site::DenseRref);
+        let pivots = self.rref_in_place(f);
+        (self, pivots)
     }
 
     fn rref_in_place(&mut self, f: &PrimeField) -> Vec<usize> {
+        let pivots = self.echelon_in_place(self.cols, f);
+        self.back_substitute(&pivots, f);
+        pivots
+    }
+
+    /// Forward elimination, with the pivot search restricted to columns
+    /// `0..limit`, in place. Returns the pivot columns in increasing order.
+    ///
+    /// Row operations run across the full width, so the columns from `limit`
+    /// on are carried along: that is how an augmented solve moves its
+    /// right-hand sides. On return, row `i` below the pivot count leads at
+    /// `pivots[i]` with a 1, and the rows after that are zero in `0..limit`.
+    fn echelon_in_place(&mut self, limit: usize, f: &PrimeField) -> Vec<usize> {
+        hit(Site::DenseEchelon);
         let mut pivots = Vec::new();
         let mut pr = 0;
-        for col in 0..self.cols {
+        for col in 0..limit {
             if pr == self.rows {
                 break;
             }
@@ -227,26 +283,25 @@ impl DenseMat {
             };
             self.swap_rows(pr, idx);
             let inv = f.inv(self.data[pr * self.cols + col]);
-            for c in col..self.cols {
-                self.data[pr * self.cols + c] = f.mul(self.data[pr * self.cols + c], inv);
+            let (pivot, below) = self.data[pr * self.cols..].split_at_mut(self.cols);
+            for v in &mut pivot[col..] {
+                *v = f.mul(*v, inv);
             }
-            for r in 0..self.rows {
-                if r == pr {
-                    continue;
-                }
-                let factor = self.data[r * self.cols + col];
-                if factor.is_zero() {
-                    continue;
-                }
-                for c in col..self.cols {
-                    let t = f.mul(factor, self.data[pr * self.cols + c]);
-                    self.data[r * self.cols + c] = f.sub(self.data[r * self.cols + c], t);
-                }
-            }
+            eliminate(below, pivot, col, self.cols, f);
             pivots.push(col);
             pr += 1;
         }
         pivots
+    }
+
+    /// Clears each pivot column above its pivot row, turning a row echelon
+    /// form into the reduced form. `pivots` must be what
+    /// [`DenseMat::echelon_in_place`] returned for this matrix.
+    fn back_substitute(&mut self, pivots: &[usize], f: &PrimeField) {
+        for i in (0..pivots.len()).rev() {
+            let (above, rest) = self.data.split_at_mut(i * self.cols);
+            eliminate(above, &rest[..self.cols], pivots[i], self.cols, f);
+        }
     }
 
     fn swap_rows(&mut self, a: usize, b: usize) {
@@ -258,82 +313,194 @@ impl DenseMat {
         }
     }
 
-    /// dim of the row space (equivalently, of the column space).
+    /// The dimension of the row space, which equals that of the column space.
+    ///
+    /// The matrix is copied first. Where the input is dead after the call,
+    /// `into_rank` eliminates in the input itself.
     pub fn rank(&self, f: &PrimeField) -> usize {
-        self.clone().rref_in_place(f).len()
+        self.clone().into_rank(f)
+    }
+
+    /// [`DenseMat::rank`] on an owned matrix, eliminating in place.
+    pub(crate) fn into_rank(mut self, f: &PrimeField) -> usize {
+        hit(Site::DenseRank);
+        self.echelon_in_place(self.cols, f).len()
     }
 
     /// A basis of the right null space {x : A x = 0}, one vector per row of the
     /// result; the result has `self.cols()` columns and `cols - rank` rows.
+    ///
+    /// Row `i` belongs to the `i`-th free column of the reduced row echelon
+    /// form, free columns taken in increasing order, and carries a 1 there.
+    /// [`SparseMat::kernel_basis`] emits the same rows in the same order, and
+    /// [`crate::hom::hom`] takes its Hom basis order from that one. Change the
+    /// rule here and the two paths disagree.
+    ///
+    /// The matrix is copied first. Where the input is dead after the call,
+    /// `into_kernel_basis` reduces the input itself.
     pub fn kernel_basis(&self, f: &PrimeField) -> DenseMat {
-        let (m, pivots) = self.rref(f);
-        let mut is_pivot = vec![false; self.cols];
+        self.clone().into_kernel_basis(f)
+    }
+
+    /// [`DenseMat::kernel_basis`] on an owned matrix, reduced in place.
+    pub(crate) fn into_kernel_basis(self, f: &PrimeField) -> DenseMat {
+        hit(Site::DenseKernelBasis);
+        let cols = self.cols;
+        let (m, pivots) = self.into_rref(f);
+        let mut is_pivot = vec![false; cols];
         for &c in &pivots {
             is_pivot[c] = true;
         }
-        let free: Vec<usize> = (0..self.cols).filter(|&c| !is_pivot[c]).collect();
-        let mut out = DenseMat::zero(free.len(), self.cols);
-        for (i, &fc) in free.iter().enumerate() {
-            out.set(i, fc, Fp::ONE);
-            for (j, &pc) in pivots.iter().enumerate() {
-                out.set(i, pc, f.neg(m.get(j, fc)));
+        let free: Vec<usize> = (0..cols).filter(|&c| !is_pivot[c]).collect();
+        let mut out = DenseMat::zero(free.len(), cols);
+        // Pivot row outermost, so the reduced form is read one whole row at a
+        // time instead of one column at a time down a row-major buffer.
+        for (j, &pc) in pivots.iter().enumerate() {
+            let row = &m.data[j * m.cols..(j + 1) * m.cols];
+            for (i, &fc) in free.iter().enumerate() {
+                out.data[i * cols + pc] = f.neg(row[fc]);
             }
+        }
+        for (i, &fc) in free.iter().enumerate() {
+            out.data[i * cols + fc] = Fp::ONE;
         }
         out
     }
 
+    /// A basis of the left null space {x : x A = 0}, one vector per row of the
+    /// result (each of length `self.rows()`): the kernel basis of the
+    /// transpose, row for row.
+    pub fn left_kernel_basis(&self, f: &PrimeField) -> DenseMat {
+        self.transpose().into_kernel_basis(f)
+    }
+
     /// A basis of the row space: the nonzero rows of the reduced row echelon
     /// form, one vector per row of the result.
+    ///
+    /// The matrix is copied first. Where the input is dead after the call,
+    /// `into_row_space_basis` reduces the input itself.
     pub fn row_space_basis(&self, f: &PrimeField) -> DenseMat {
-        let (m, pivots) = self.rref(f);
-        let k = pivots.len();
-        DenseMat {
-            rows: k,
-            cols: m.cols,
-            data: m.data[..k * m.cols].to_vec(),
-        }
+        self.clone().into_row_space_basis(f)
+    }
+
+    /// [`DenseMat::row_space_basis`] on an owned matrix, reduced in place.
+    pub(crate) fn into_row_space_basis(self, f: &PrimeField) -> DenseMat {
+        hit(Site::DenseRowSpaceBasis);
+        let (mut m, pivots) = self.into_rref(f);
+        m.data.truncate(pivots.len() * m.cols);
+        m.rows = pivots.len();
+        m
     }
 
     /// A basis of the column space, one vector per row of the result (each of
     /// length `self.rows()`): the row-space basis of the transpose.
     pub fn image_basis(&self, f: &PrimeField) -> DenseMat {
-        self.transpose().row_space_basis(f)
+        self.transpose().into_row_space_basis(f)
     }
 
-    /// A solution of A x = b with free variables set to zero, or `None` when
-    /// the system is inconsistent; `b` has length `self.rows()`.
+    /// A solution of `A x = b` with free variables set to zero, or `None` when
+    /// the system is inconsistent; `b` has length `self.rows()`. Fixing the
+    /// free variables at zero makes the returned solution unique, so repeated
+    /// calls on equal inputs agree.
+    ///
+    /// This is [`DenseMat::solve_many`] with one right-hand side.
     ///
     /// # Panics
-    /// Panics on length mismatch.
+    /// Panics unless `b.len() == self.rows()`.
     pub fn solve(&self, b: &[Fp], f: &PrimeField) -> Option<Vec<Fp>> {
+        hit(Site::DenseSolve);
         assert_eq!(
             b.len(),
             self.rows,
             "solve: rhs length vs {} rows",
             self.rows
         );
-        let width = self.cols + 1;
-        let mut aug = DenseMat::zero(self.rows, width);
-        for (r, &bv) in b.iter().enumerate() {
-            aug.data[r * width..r * width + self.cols]
-                .copy_from_slice(&self.data[r * self.cols..(r + 1) * self.cols]);
-            aug.data[r * width + self.cols] = bv;
+        let rhs = DenseMat {
+            rows: self.rows,
+            cols: 1,
+            data: b.to_vec(),
+        };
+        self.solve_many(&rhs, f).map(|x| x.data)
+    }
+
+    /// A solution of `A X = B` with free variables set to zero, or `None` when
+    /// any column of `b` lies outside the image; `b` has `self.rows()` rows and
+    /// the result has `self.cols()` rows and `b.cols()` columns.
+    ///
+    /// Column `j` of the result equals [`DenseMat::solve`] applied to column
+    /// `j` of `b`, entry for entry. One elimination serves every column, where
+    /// the loop over `solve` runs one per column: for a square `A` of size `n`
+    /// and `n` right-hand sides that is `O(n^3)` against `O(n^4)`.
+    ///
+    /// # Panics
+    /// Panics unless `b.rows() == self.rows()`, or if the augmented matrix
+    /// does not fit in `usize` entries.
+    pub fn solve_many(&self, b: &DenseMat, f: &PrimeField) -> Option<DenseMat> {
+        hit(Site::DenseSolveMany);
+        assert_eq!(
+            b.rows, self.rows,
+            "solve_many: rhs has {} rows vs {}",
+            b.rows, self.rows
+        );
+        let k = b.cols;
+        let width = self.cols.checked_add(k);
+        let len = width.and_then(|w| self.rows.checked_mul(w));
+        let (Some(width), Some(len)) = (width, len) else {
+            panic!(
+                "solve_many: {} rows by {} + {k} columns overflow usize",
+                self.rows, self.cols
+            )
+        };
+        let mut data = Vec::with_capacity(len);
+        for r in 0..self.rows {
+            data.extend_from_slice(&self.data[r * self.cols..(r + 1) * self.cols]);
+            data.extend_from_slice(&b.data[r * k..(r + 1) * k]);
         }
-        let pivots = aug.rref_in_place(f);
-        if pivots.last() == Some(&self.cols) {
-            return None;
+        let mut aug = DenseMat {
+            rows: self.rows,
+            cols: width,
+            data,
+        };
+        // The pivot search stops at self.cols, so no right-hand side column can
+        // take a pivot and corrupt the others. A column is then inconsistent
+        // exactly when a row left zero by the elimination is nonzero in it.
+        let pivots = aug.echelon_in_place(self.cols, f);
+        aug.back_substitute(&pivots, f);
+        for r in pivots.len()..self.rows {
+            if aug.data[r * width + self.cols..(r + 1) * width]
+                .iter()
+                .any(|v| !v.is_zero())
+            {
+                return None;
+            }
         }
-        let mut x = vec![Fp::ZERO; self.cols];
+        let mut x = DenseMat::zero(self.cols, k);
         for (i, &pc) in pivots.iter().enumerate() {
-            x[pc] = aug.get(i, self.cols);
+            x.data[pc * k..(pc + 1) * k]
+                .copy_from_slice(&aug.data[i * width + self.cols..(i + 1) * width]);
         }
         Some(x)
+    }
+
+    /// The inverse, or `None` when the matrix is singular.
+    ///
+    /// # Panics
+    /// Panics unless the matrix is square.
+    pub fn inverse(&self, f: &PrimeField) -> Option<DenseMat> {
+        hit(Site::DenseInverse);
+        assert_eq!(
+            self.rows, self.cols,
+            "inverse: {}x{} is not square",
+            self.rows, self.cols
+        );
+        self.solve_many(&DenseMat::identity(self.rows), f)
     }
 
     /// The position of the first entry whose stored representative is not
     /// canonical for `f` (that is, not below `f.modulus()`), or `None` when
     /// every entry is canonical. Entries are scanned row by row.
     pub(crate) fn first_noncanonical(&self, f: &PrimeField) -> Option<(usize, usize)> {
+        hit(Site::DenseFirstNoncanonical);
         self.data
             .iter()
             .position(|v| v.raw() >= f.modulus())
@@ -358,6 +525,100 @@ impl DenseMat {
             cols: self.cols,
             data,
         }
+    }
+}
+
+/// Subtracts the multiple of `pivot` that clears column `col` from every row
+/// of `rows`. Both slices hold whole rows of `cols` entries, and `pivot` is 1
+/// at `col` and 0 before it.
+///
+/// Splitting the pivot row out of the buffer is what lets this run as a
+/// two-slice zip: one bounds check per row, where indexing through `&mut self`
+/// costs three per entry and an index multiply-add.
+fn eliminate(rows: &mut [Fp], pivot: &[Fp], col: usize, cols: usize, f: &PrimeField) {
+    for row in rows.chunks_exact_mut(cols) {
+        let factor = row[col];
+        if factor.is_zero() {
+            continue;
+        }
+        for (a, &b) in row[col..].iter_mut().zip(&pivot[col..]) {
+            *a = f.sub(*a, f.mul(factor, b));
+        }
+    }
+}
+
+/// An incremental rank accumulator over F_p.
+///
+/// Rows arrive one at a time and each is reduced against the rows kept so
+/// far. A row raises the rank exactly when it does not reduce to zero against
+/// the current basis, and that is what [`RowReducer::push`] returns. Building
+/// a set of independent rows this way costs one reduction per row, where
+/// re-running [`DenseMat::rank`] on the growing set costs a full elimination
+/// per row: `O(n^3)` against `O(n^4)` for `n` rows of `n` entries.
+///
+/// The kept rows are held in row echelon form ordered by pivot column, each
+/// normalized to a leading 1. They are an internal basis, not a returned one;
+/// no caller depends on them.
+pub struct RowReducer {
+    cols: usize,
+    /// One kept row per pivot, ordered by pivot column.
+    rows: Vec<Vec<Fp>>,
+    /// The pivot column of each kept row, increasing.
+    pivots: Vec<usize>,
+}
+
+impl RowReducer {
+    /// An empty accumulator for rows of `cols` entries.
+    pub fn new(cols: usize) -> RowReducer {
+        RowReducer {
+            cols,
+            rows: Vec::new(),
+            pivots: Vec::new(),
+        }
+    }
+
+    /// Reduces `row` against the rows kept so far, keeps it when a nonzero
+    /// entry remains, and returns whether the rank went up.
+    ///
+    /// # Panics
+    /// Panics unless `row.len()` is the column count given to
+    /// [`RowReducer::new`].
+    pub fn push(&mut self, row: &[Fp], f: &PrimeField) -> bool {
+        hit(Site::RowReducerPush);
+        assert_eq!(
+            row.len(),
+            self.cols,
+            "push: row length vs {} columns",
+            self.cols
+        );
+        let mut r = row.to_vec();
+        // Kept rows are zero before their own pivot, so reducing in pivot
+        // order never puts back an entry an earlier step cleared.
+        for (kept, &pc) in self.rows.iter().zip(&self.pivots) {
+            let factor = r[pc];
+            if factor.is_zero() {
+                continue;
+            }
+            for (a, &b) in r[pc..].iter_mut().zip(&kept[pc..]) {
+                *a = f.sub(*a, f.mul(factor, b));
+            }
+        }
+        let Some(pc) = r.iter().position(|v| !v.is_zero()) else {
+            return false;
+        };
+        let inv = f.inv(r[pc]);
+        for v in &mut r[pc..] {
+            *v = f.mul(*v, inv);
+        }
+        let at = self.pivots.partition_point(|&c| c < pc);
+        self.rows.insert(at, r);
+        self.pivots.insert(at, pc);
+        true
+    }
+
+    /// The rank of everything pushed so far.
+    pub fn rank(&self) -> usize {
+        self.pivots.len()
     }
 }
 
@@ -464,12 +725,33 @@ impl SparseRow {
         }
     }
 
-    /// self += c * other, merging sorted entries.
+    /// Adds `c * other` to `self`, merging the two sorted entry lists.
+    ///
+    /// Allocates one buffer per call. In a loop, use
+    /// [`SparseRow::add_scaled_into`] with a buffer you own.
     pub fn add_scaled(&mut self, other: &SparseRow, c: Fp, f: &PrimeField) {
+        self.add_scaled_into(other, c, f, &mut Vec::new());
+    }
+
+    /// Adds `c * other` to `self`, merging through `scratch`.
+    ///
+    /// `scratch` is cleared on entry and holds the old entries of `self` on
+    /// return, so a loop that passes the same buffer reuses its capacity and
+    /// allocates once instead of once per call. The result matches
+    /// [`SparseRow::add_scaled`] entry for entry.
+    pub fn add_scaled_into(
+        &mut self,
+        other: &SparseRow,
+        c: Fp,
+        f: &PrimeField,
+        scratch: &mut Vec<(usize, Fp)>,
+    ) {
         if c.is_zero() || other.is_zero() {
             return;
         }
-        let mut result = Vec::with_capacity(self.entries.len() + other.entries.len());
+        let result = scratch;
+        result.clear();
+        result.reserve(self.entries.len() + other.entries.len());
         let mut i = 0;
         let mut j = 0;
         while i < self.entries.len() && j < other.entries.len() {
@@ -504,7 +786,7 @@ impl SparseRow {
                 result.push((col_b, scaled));
             }
         }
-        self.entries = result;
+        std::mem::swap(&mut self.entries, result);
     }
 
     /// The dot product with `other`.
@@ -603,23 +885,25 @@ impl SparseMat {
         }
     }
 
-    /// self * rhs.
+    /// The product `self * rhs`.
     ///
     /// # Panics
     /// Panics unless `self.cols() == rhs.rows()`.
     pub fn mul(&self, rhs: &SparseMat, f: &PrimeField) -> SparseMat {
+        hit(Site::SparseMul);
         assert_eq!(
             self.cols, rhs.rows,
             "mul: {}x{} times {}x{}",
             self.rows, self.cols, rhs.rows, rhs.cols
         );
+        let mut scratch = Vec::new();
         let data = self
             .data
             .iter()
             .map(|lhs_row| {
                 let mut row = SparseRow::new();
                 for &(c, v) in &lhs_row.entries {
-                    row.add_scaled(&rhs.data[c], v, f);
+                    row.add_scaled_into(&rhs.data[c], v, f, &mut scratch);
                 }
                 row
             })
@@ -631,8 +915,8 @@ impl SparseMat {
         }
     }
 
-    /// A x for a sparse vector `x` indexed by column; the result is indexed by
-    /// row.
+    /// `A x` for a sparse vector `x` indexed by column; the result is indexed
+    /// by row.
     ///
     /// # Panics
     /// Panics if `x` has an index `>= self.cols()`.
@@ -657,7 +941,9 @@ impl SparseMat {
     // with the fewest entries becomes the pivot. The pivot row is normalized
     // first, so each elimination factor is the negated leading coefficient.
     fn echelon_in_place(&mut self, f: &PrimeField) -> Vec<usize> {
+        hit(Site::SparseEchelon);
         let mut pivots = Vec::new();
+        let mut scratch = Vec::new();
         let mut pr = 0;
         for col in 0..self.cols {
             if pr == self.rows {
@@ -683,7 +969,7 @@ impl SparseMat {
                 if let Some((c, coeff)) = row.leading()
                     && c == col
                 {
-                    row.add_scaled(pivot, f.neg(coeff), f);
+                    row.add_scaled_into(pivot, f.neg(coeff), f, &mut scratch);
                 }
             }
             pivots.push(col);
@@ -694,60 +980,112 @@ impl SparseMat {
 
     /// The reduced row echelon form and its pivot columns.
     ///
-    /// Pivot rows come first in pivot-column order; zero rows follow.
+    /// Pivot rows come first in pivot-column order; zero rows follow. The
+    /// matrix is copied first. Where the input is dead after the call,
+    /// `into_rref` reduces the input itself and copies nothing.
     pub fn rref(&self, f: &PrimeField) -> (SparseMat, Vec<usize>) {
-        let mut m = self.clone();
-        let pivots = m.echelon_in_place(f);
+        self.clone().into_rref(f)
+    }
+
+    /// [`SparseMat::rref`] on an owned matrix, reduced in place.
+    pub(crate) fn into_rref(mut self, f: &PrimeField) -> (SparseMat, Vec<usize>) {
+        hit(Site::SparseRref);
+        let pivots = self.echelon_in_place(f);
+        let mut scratch = Vec::new();
         for i in (0..pivots.len()).rev() {
             let col = pivots[i];
-            let (above, rest) = m.data.split_at_mut(i);
+            let (above, rest) = self.data.split_at_mut(i);
             let pivot = &rest[0];
             for row in above {
                 let v = row.get(col);
                 if !v.is_zero() {
-                    row.add_scaled(pivot, f.neg(v), f);
+                    row.add_scaled_into(pivot, f.neg(v), f, &mut scratch);
                 }
             }
         }
-        (m, pivots)
+        (self, pivots)
     }
 
-    /// dim of the row space (equivalently, of the column space).
+    /// The dimension of the row space, which equals that of the column space.
+    ///
+    /// The matrix is copied first. Where the input is dead after the call,
+    /// `into_rank` eliminates in the input itself.
     pub fn rank(&self, f: &PrimeField) -> usize {
-        self.clone().echelon_in_place(f).len()
+        self.clone().into_rank(f)
+    }
+
+    /// [`SparseMat::rank`] on an owned matrix, eliminating in place.
+    pub(crate) fn into_rank(mut self, f: &PrimeField) -> usize {
+        self.echelon_in_place(f).len()
     }
 
     /// A basis of the right null space {x : A x = 0}, one vector per row of the
     /// result; the result has `self.cols()` columns and `cols - rank` rows.
+    ///
+    /// Rows come in the same order as [`DenseMat::kernel_basis`]: one row per
+    /// free column of the reduced row echelon form, free columns increasing.
+    /// [`crate::hom::hom`] builds its Hom basis from this order.
+    ///
+    /// The matrix is copied first. Where the input is dead after the call,
+    /// `into_kernel_basis` reduces the input itself.
     pub fn kernel_basis(&self, f: &PrimeField) -> SparseMat {
-        let (m, pivots) = self.rref(f);
-        let mut is_pivot = vec![false; self.cols];
-        for &c in &pivots {
-            is_pivot[c] = true;
+        self.clone().into_kernel_basis(f)
+    }
+
+    /// [`SparseMat::kernel_basis`] on an owned matrix, reduced in place.
+    pub(crate) fn into_kernel_basis(self, f: &PrimeField) -> SparseMat {
+        hit(Site::SparseKernelBasis);
+        let cols = self.cols;
+        let (m, pivots) = self.into_rref(f);
+        // Column to its index among the free columns, or none for a pivot.
+        let mut slot = vec![None; cols];
+        let mut free = Vec::new();
+        for (c, s) in slot.iter_mut().enumerate() {
+            if pivots.binary_search(&c).is_err() {
+                *s = Some(free.len());
+                free.push(c);
+            }
         }
-        let mut data = Vec::new();
-        for free in (0..self.cols).filter(|&c| !is_pivot[c]) {
-            let mut v = SparseRow::new();
-            v.set(free, Fp::ONE);
-            for (i, &pc) in pivots.iter().enumerate() {
-                let val = m.data[i].get(free);
-                if !val.is_zero() {
-                    v.set(pc, f.neg(val));
+        let mut data = vec![SparseRow::new(); free.len()];
+        // Each reduced row is walked once, and the pivot columns increase with
+        // the row index, so every output row comes out sorted.
+        for (i, &pc) in pivots.iter().enumerate() {
+            for &(c, v) in &m.data[i].entries {
+                if let Some(k) = slot[c] {
+                    data[k].entries.push((pc, f.neg(v)));
                 }
             }
-            data.push(v);
+        }
+        for (k, &fc) in free.iter().enumerate() {
+            let at = data[k].entries.partition_point(|&(c, _)| c < fc);
+            data[k].entries.insert(at, (fc, Fp::ONE));
         }
         SparseMat {
             rows: data.len(),
-            cols: self.cols,
+            cols,
             data,
         }
     }
 
+    /// A basis of the left null space {x : x A = 0}, one vector per row of the
+    /// result (each of length `self.rows()`): the kernel basis of the
+    /// transpose, row for row.
+    pub fn left_kernel_basis(&self, f: &PrimeField) -> SparseMat {
+        self.transpose().into_kernel_basis(f)
+    }
+
     /// A basis of the row space: the nonzero rows of the reduced row echelon
     /// form, one vector per row of the result.
+    ///
+    /// The matrix is copied first. Where the input is dead after the call,
+    /// `into_row_space_basis` reduces the input itself.
     pub fn row_space_basis(&self, f: &PrimeField) -> SparseMat {
-        let (mut m, pivots) = self.rref(f);
+        self.clone().into_row_space_basis(f)
+    }
+
+    /// [`SparseMat::row_space_basis`] on an owned matrix, reduced in place.
+    pub(crate) fn into_row_space_basis(self, f: &PrimeField) -> SparseMat {
+        let (mut m, pivots) = self.into_rref(f);
         m.data.truncate(pivots.len());
         m.rows = pivots.len();
         m
@@ -756,15 +1094,17 @@ impl SparseMat {
     /// A basis of the column space, one vector per row of the result (each of
     /// length `self.rows()`): the row-space basis of the transpose.
     pub fn image_basis(&self, f: &PrimeField) -> SparseMat {
-        self.transpose().row_space_basis(f)
+        self.transpose().into_row_space_basis(f)
     }
 
-    /// A solution of A x = b with free variables set to zero, or `None` when
-    /// the system is inconsistent; `b` is indexed by row.
+    /// A solution of `A x = b` with free variables set to zero, or `None` when
+    /// the system is inconsistent; `b` is indexed by row. Matches
+    /// [`DenseMat::solve`] entry for entry.
     ///
     /// # Panics
     /// Panics if `b` has an index `>= self.rows()`.
     pub fn solve(&self, b: &SparseRow, f: &PrimeField) -> Option<SparseRow> {
+        hit(Site::SparseSolve);
         assert!(
             b.entries.last().is_none_or(|&(r, _)| r < self.rows),
             "solve: rhs index vs {} rows",
@@ -784,7 +1124,7 @@ impl SparseMat {
             cols: self.cols + 1,
             data: aug_rows,
         };
-        let (m, pivots) = aug.rref(f);
+        let (m, pivots) = aug.into_rref(f);
         if pivots.last() == Some(&self.cols) {
             return None;
         }
@@ -1100,6 +1440,131 @@ mod tests {
                 assert_eq!(a.kernel_basis(&fp), s.kernel_basis(&fp).to_dense());
                 assert_eq!(a.row_space_basis(&fp), s.row_space_basis(&fp).to_dense());
                 assert_eq!(a.image_basis(&fp), s.image_basis(&fp).to_dense());
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "overflow usize")]
+    fn dense_zero_rejects_a_shape_that_overflows() {
+        let _ = DenseMat::zero(usize::MAX, 2);
+    }
+
+    #[test]
+    fn left_kernel_basis_is_the_kernel_of_the_transpose() {
+        let mut rng = XorShift64(0x3c6ef372fe94f82b);
+        for p in [2, 101] {
+            let fp = f(p);
+            for _ in 0..20 {
+                let rows = 1 + rng.below(6) as usize;
+                let cols = 1 + rng.below(6) as usize;
+                let a = random_dense(&mut rng, &fp, rows, cols);
+                let left = a.transpose().kernel_basis(&fp);
+                assert_eq!(a.left_kernel_basis(&fp), left);
+                assert_eq!(a.to_sparse().left_kernel_basis(&fp).to_dense(), left);
+                assert_eq!(left.mul(&a, &fp), DenseMat::zero(left.rows(), cols));
+            }
+        }
+    }
+
+    #[test]
+    fn add_scaled_into_matches_add_scaled() {
+        let mut rng = XorShift64(0x78e2c3d9a1b4f605);
+        let fp = f(101);
+        let mut scratch = Vec::new();
+        for _ in 0..200 {
+            let n = rng.below(8) as usize;
+            let a: Vec<Fp> = (0..n).map(|_| fp.elem(rng.below(3) as i64)).collect();
+            let b: Vec<Fp> = (0..n).map(|_| fp.elem(rng.below(3) as i64)).collect();
+            let c = fp.elem(rng.below(101) as i64);
+            let other = sparse_vec(&b);
+            let mut x = sparse_vec(&a);
+            let mut y = x.clone();
+            x.add_scaled(&other, c, &fp);
+            y.add_scaled_into(&other, c, &fp, &mut scratch);
+            assert_eq!(x, y);
+        }
+    }
+
+    #[test]
+    fn row_reducer_rank_matches_the_rank_of_the_rows_pushed() {
+        let mut rng = XorShift64(0x106689d45497fdb5);
+        for p in [2, 3, 101] {
+            let fp = f(p);
+            for _ in 0..30 {
+                let rows = 1 + rng.below(8) as usize;
+                let cols = 1 + rng.below(8) as usize;
+                let a = random_dense(&mut rng, &fp, rows, cols);
+                let mut reducer = RowReducer::new(cols);
+                let mut seen: Vec<Vec<Fp>> = Vec::new();
+                for r in 0..rows {
+                    let before = reducer.rank();
+                    let grew = reducer.push(a.row(r), &fp);
+                    seen.push(a.row(r).to_vec());
+                    let rank = DenseMat::from_rows(&seen).rank(&fp);
+                    assert_eq!(reducer.rank(), rank);
+                    assert_eq!(grew, rank == before + 1);
+                    // A row already in the span never raises the rank again.
+                    assert!(!reducer.push(a.row(r), &fp));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn solve_many_agrees_with_the_column_by_column_solve() {
+        let mut rng = XorShift64(0x5851f42d4c957f2d);
+        for p in [2, 3, 7, 101, (1 << 31) - 1] {
+            let fp = f(p);
+            for _ in 0..40 {
+                let rows = 1 + rng.below(6) as usize;
+                let cols = 1 + rng.below(6) as usize;
+                let k = rng.below(4) as usize;
+                let a = random_dense(&mut rng, &fp, rows, cols);
+                // One right-hand side taken at random, one built inside the
+                // image, so both the consistent and the inconsistent branch run.
+                let arbitrary = random_dense(&mut rng, &fp, rows, k);
+                let inside = a.mul(&random_dense(&mut rng, &fp, cols, k), &fp);
+                for b in [arbitrary, inside] {
+                    let columns: Vec<Option<Vec<Fp>>> = (0..k)
+                        .map(|j| {
+                            let col: Vec<Fp> = (0..rows).map(|r| b.get(r, j)).collect();
+                            a.solve(&col, &fp)
+                        })
+                        .collect();
+                    match a.solve_many(&b, &fp) {
+                        None => assert!(columns.iter().any(Option::is_none), "F_{p}"),
+                        Some(x) => {
+                            assert_eq!((x.rows(), x.cols()), (cols, k));
+                            for (j, expected) in columns.iter().enumerate() {
+                                let expected = expected.as_ref().expect("solve_many succeeded");
+                                for (r, &v) in expected.iter().enumerate() {
+                                    assert_eq!(x.get(r, j), v, "entry ({r}, {j}) in F_{p}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inverse_round_trips_and_reports_singular_matrices() {
+        let mut rng = XorShift64(0x14057b7ef767814f);
+        for p in [2, 5, 101] {
+            let fp = f(p);
+            for _ in 0..40 {
+                let n = 1 + rng.below(5) as usize;
+                let a = random_dense(&mut rng, &fp, n, n);
+                match a.inverse(&fp) {
+                    Some(inv) => {
+                        assert_eq!(a.rank(&fp), n);
+                        assert_eq!(a.mul(&inv, &fp), DenseMat::identity(n));
+                        assert_eq!(inv.mul(&a, &fp), DenseMat::identity(n));
+                    }
+                    None => assert!(a.rank(&fp) < n),
+                }
             }
         }
     }

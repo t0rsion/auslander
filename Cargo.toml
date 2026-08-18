@@ -12,3 +12,9 @@ pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
 
 [profile.dev]
 opt-level = 2
+
+# Release code with symbols, for `perf record` over `benches/perf.rs`. Release
+# itself stays stripped: a sampling profile must not change what ships.
+[profile.perf]
+inherits = "release"
+debug = true

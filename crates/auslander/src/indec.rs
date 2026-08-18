@@ -1,12 +1,13 @@
 //! Modules certified indecomposable by a local endomorphism algebra.
 //!
 //! [`IndecomposableModule::new`] builds the [`EndoAlgebra`] of the module and
-//! accepts exactly when the algebra is local. Locality is exact, so a value
-//! of this type proves indecomposability. Rejections are typed: the zero
-//! module, a verified split with its summand count, or an honest
-//! [`IndecError::Undetermined`] after every splitting route failed.
+//! accepts exactly when that algebra is local. The locality test is exact, so
+//! a value of this type proves the module indecomposable. Rejections carry
+//! their reason: the zero module, a verified split with its summand count, or
+//! [`IndecError::Undetermined`] once every splitting route has failed.
 
 use std::fmt;
+use std::sync::Arc;
 
 use crate::algebra::AlgebraBuildError;
 use crate::decompose::{Certificate, decompose};
@@ -20,12 +21,13 @@ use crate::resolution::{Bounded, projective_dimension};
 pub enum IndecError {
     /// The zero module is not indecomposable.
     Zero,
-    /// The module splits into this many certified summands of a verified
-    /// [`crate::decompose::Split`].
+    /// A verified [`crate::decompose::Split`] broke the module into this many
+    /// certified summands.
     Decomposable { summands: usize },
-    /// The endomorphism algebra is not local, and no splitting route
-    /// succeeded within this Fitting retry budget. The module may or may not
-    /// be indecomposable.
+    /// The endomorphism algebra is not local and no splitting route
+    /// succeeded. `attempts` is the Fitting retry budget carried over from
+    /// [`Certificate::Undetermined`]; it does not count the retries inside
+    /// the other two routes. The module may or may not be indecomposable.
     Undetermined { attempts: u32 },
 }
 
@@ -38,7 +40,7 @@ impl fmt::Display for IndecError {
             }
             Self::Undetermined { attempts } => write!(
                 f,
-                "the endomorphism algebra is not local and {attempts} split attempts failed"
+                "the endomorphism algebra is not local and {attempts} Fitting split attempts failed"
             ),
         }
     }
@@ -48,12 +50,18 @@ impl std::error::Error for IndecError {}
 
 /// A module together with the locality proof of its endomorphism algebra.
 ///
-/// Fields are private; construction goes through [`IndecomposableModule::new`],
-/// so a value of this type exists only when [`EndoAlgebra::is_local`] holds
-/// for the stored algebra, which proves the module indecomposable.
+/// Fields are private and construction goes through
+/// [`IndecomposableModule::new`], so a value of this type exists only when
+/// [`EndoAlgebra::is_local`] holds for the stored algebra. That proves the
+/// module indecomposable.
+///
+/// Cloning is two reference count bumps: the module is already shared and the
+/// endomorphism algebra sits behind an [`Arc`]. A decomposition can therefore
+/// hand out its certified summands without rebuilding `End`.
+#[derive(Clone)]
 pub struct IndecomposableModule {
     module: Module,
-    endo: EndoAlgebra,
+    endo: Arc<EndoAlgebra>,
 }
 
 impl fmt::Debug for IndecomposableModule {
@@ -76,17 +84,26 @@ impl IndecomposableModule {
     /// exhausted split search is [`IndecError::Undetermined`] with the
     /// Fitting retry budget from [`Certificate::Undetermined`].
     pub fn new(m: &Module) -> Result<IndecomposableModule, IndecError> {
-        if m.is_zero() {
+        IndecomposableModule::from_endo(EndoAlgebra::new(m))
+    }
+
+    /// The same gate on an algebra the caller already has:
+    /// [`crate::decompose::Decomposition::endos`] and
+    /// [`crate::decompose::IsoClass::endo`] hand out one per summand, and
+    /// passing it here skips a second radical computation. The module is the
+    /// one `endo` was built from, so the outcomes match
+    /// [`IndecomposableModule::new`] exactly.
+    pub fn from_endo(endo: EndoAlgebra) -> Result<IndecomposableModule, IndecError> {
+        if endo.module().is_zero() {
             return Err(IndecError::Zero);
         }
-        let endo = EndoAlgebra::new(m);
         if endo.is_local() {
             return Ok(IndecomposableModule {
-                module: m.clone(),
-                endo,
+                module: endo.module().clone(),
+                endo: Arc::new(endo),
             });
         }
-        let decomposition = decompose(m);
+        let decomposition = decompose(endo.module());
         let summands = decomposition.summands().len();
         if summands >= 2 {
             return Err(IndecError::Decomposable { summands });
@@ -115,11 +132,12 @@ impl IndecomposableModule {
     }
 
     /// The degree `d` of the residue field of the local endomorphism
-    /// algebra: `endo.dim() - endo.radical_dim()`. The quotient by the
-    /// radical is a finite division ring, so a field `F_{p^d}` by
-    /// Wedderburn.
+    /// algebra: [`EndoAlgebra::quotient_dim`]. The quotient by the radical is
+    /// a finite division ring, so Wedderburn's theorem makes it the field
+    /// `F_{p^d}`. The name is exact only because this type's invariant is
+    /// locality.
     pub fn residue_degree(&self) -> usize {
-        self.endo.dim() - self.endo.radical_dim()
+        self.endo.quotient_dim()
     }
 
     /// Whether the module is projective: its minimal resolution ends at the
@@ -143,7 +161,6 @@ mod tests {
     use crate::field::PrimeField;
     use crate::linalg::DenseMat;
     use crate::module::direct_sum;
-    use std::sync::Arc;
 
     fn fields() -> [PrimeField; 2] {
         [PrimeField::new(2).unwrap(), PrimeField::new(5).unwrap()]
@@ -181,6 +198,40 @@ mod tests {
                     let ind = IndecomposableModule::new(&p).unwrap();
                     assert!(ind.is_projective(), "P_{v} over F_{}", field.modulus());
                     assert_eq!(ind.residue_degree(), 1);
+                }
+            }
+        }
+    }
+
+    // The gate must read the same on a carried algebra as on a fresh one, for
+    // both outcomes.
+    #[test]
+    fn certifying_from_a_carried_algebra_matches_certifying_from_the_module() {
+        use crate::decompose::decompose;
+        for field in fields() {
+            for algebra in fixtures(field) {
+                let p = Module::projective(&algebra, 0);
+                let s = Module::simple(&algebra, algebra.quiver().num_vertices() - 1);
+                let (pair, _, _) = direct_sum(&[&p, &s]);
+                for m in [p.clone(), s.clone(), pair.clone()] {
+                    let carried = IndecomposableModule::from_endo(EndoAlgebra::new(&m));
+                    match (IndecomposableModule::new(&m), carried) {
+                        (Ok(fresh), Ok(carried)) => {
+                            assert!(carried.module().ptr_eq(fresh.module()));
+                            assert_eq!(carried.residue_degree(), fresh.residue_degree());
+                        }
+                        (Err(fresh), Err(carried)) => assert_eq!(fresh, carried),
+                        (fresh, carried) => panic!("{fresh:?} vs {carried:?}"),
+                    }
+                }
+                let d = decompose(&pair);
+                for (k, summand) in d.summands().iter().enumerate() {
+                    let carried = IndecomposableModule::from_endo(d.endos()[k].clone()).unwrap();
+                    assert!(carried.module().ptr_eq(summand));
+                    assert_eq!(
+                        carried.residue_degree(),
+                        IndecomposableModule::new(summand).unwrap().residue_degree()
+                    );
                 }
             }
         }

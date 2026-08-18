@@ -35,15 +35,10 @@
 
 use auslander::algebra::commutative_square;
 use auslander::algebra::{linear_an, truncated_poly};
-use auslander::almost_split::{
-    AlmostSplitOutcome, AlmostSplitSequence, AlmostSplitWitness, ArDualityWitness, CatalogWitness,
-    almost_split, almost_split_via_catalog,
-};
 use auslander::arquiver::IndecomposableCatalog;
 use auslander::dynkin::DynkinError;
 use auslander::enumerate::EnumerateError;
-use auslander::ext::{ExtClass, ExtClassError, ExtSpace};
-use auslander::field::PrimeField;
+use auslander::ext::{ExtClassError, ExtSpace};
 use auslander::hom::{HomError, Morphism, hom, zero_morphism};
 use auslander::indec::IndecomposableModule;
 use auslander::linalg::DenseMat;
@@ -51,20 +46,11 @@ use auslander::module::{Module, direct_sum};
 use auslander::radical::radical;
 use auslander::sequence::{SequenceError, ShortExactSequence, SplitStatus};
 
-fn f5() -> PrimeField {
-    PrimeField::new(5).unwrap()
-}
+mod common;
 
-fn f2() -> PrimeField {
-    PrimeField::new(2).unwrap()
-}
-
-fn basis_class(space: &ExtSpace, k: usize) -> ExtClass {
-    let field = space.source().field();
-    let mut coords = vec![field.zero(); space.dim()];
-    coords[k] = field.one();
-    space.class_from_coordinates(&coords).unwrap()
-}
+use common::{
+    basis_class, catalog_sequence, catalog_witness, duality_sequence, duality_witness, f2, f5,
+};
 
 /// Every entry of `f` multiplied by `c`.
 fn scale_morphism(f: &Morphism, c: auslander::field::Fp) -> Morphism {
@@ -85,37 +71,6 @@ fn scale_morphism(f: &Morphism, c: auslander::field::Fp) -> Morphism {
     Morphism::new(f.source(), f.target(), maps).unwrap()
 }
 
-fn duality_sequence(m: &IndecomposableModule) -> AlmostSplitSequence {
-    match almost_split(m).unwrap() {
-        AlmostSplitOutcome::Sequence(sequence) => sequence,
-        AlmostSplitOutcome::Projective => panic!("expected a sequence, got Projective"),
-    }
-}
-
-fn catalog_sequence(
-    m: &IndecomposableModule,
-    catalog: &IndecomposableCatalog,
-) -> AlmostSplitSequence {
-    match almost_split_via_catalog(m, catalog).unwrap() {
-        AlmostSplitOutcome::Sequence(sequence) => sequence,
-        AlmostSplitOutcome::Projective => panic!("expected a sequence, got Projective"),
-    }
-}
-
-fn duality_witness(sequence: &AlmostSplitSequence) -> &ArDualityWitness {
-    match sequence.witness() {
-        AlmostSplitWitness::ArDuality(witness) => witness,
-        AlmostSplitWitness::ExhaustiveCatalog(_) => panic!("expected the AR duality witness"),
-    }
-}
-
-fn catalog_witness(sequence: &AlmostSplitSequence) -> &CatalogWitness {
-    match sequence.witness() {
-        AlmostSplitWitness::ExhaustiveCatalog(witness) => witness,
-        AlmostSplitWitness::ArDuality(_) => panic!("expected the catalog witness"),
-    }
-}
-
 // Section 15: a non-exact sequence at one vertex, assembled from a wrong
 // projection or inclusion. Over linear A_3 with S = S_0 and P = P_1 the
 // sum S + P has dimension vector (1, 1, 1).
@@ -125,34 +80,35 @@ fn the_sequence_constructor_rejects_each_non_exact_assembly() {
     let s = Module::simple(&algebra, 0);
     let p = Module::projective(&algebra, 1);
     let (sum, inclusions, projections) = direct_sum(&[&s, &p]);
-    // the projection onto the sub summand: the composite is the identity
-    // of S, nonzero at vertex 0
+    // The projection onto the sub summand: the composite is the identity
+    // of S, nonzero at vertex 0.
     assert_eq!(
         ShortExactSequence::new(inclusions[0].clone(), projections[0].clone()).unwrap_err(),
         SequenceError::CompositeNonzero { vertex: 0 }
     );
-    // a middle term with one extra S summand: sub plus quotient misses the
-    // middle dimension at vertex 0
+    // A middle term with one extra S summand: sub plus quotient misses the
+    // middle dimension at vertex 0.
     let (_, triple_inclusions, triple_projections) = direct_sum(&[&s, &p, &s]);
     assert_eq!(
         ShortExactSequence::new(triple_inclusions[0].clone(), triple_projections[1].clone())
             .unwrap_err(),
         SequenceError::DimensionMismatch { vertex: 0 }
     );
-    // the zero map is no inclusion of a nonzero sub: rank 0 < 1 at vertex 0
+    // The zero map is no inclusion of a nonzero sub: rank 0 < 1 at vertex 0.
     assert_eq!(
         ShortExactSequence::new(zero_morphism(&s, &sum).unwrap(), projections[1].clone())
             .unwrap_err(),
         SequenceError::NotMono { vertex: 0 }
     );
-    // the zero map is no projection onto a nonzero quotient: P_1 first has
-    // dimension at vertex 1
+    // The zero map is no projection onto a nonzero quotient: P_1 first has
+    // dimension at vertex 1.
     assert_eq!(
         ShortExactSequence::new(inclusions[0].clone(), zero_morphism(&sum, &p).unwrap())
             .unwrap_err(),
         SequenceError::NotEpi { vertex: 1 }
     );
-    // a projection out of a separately built middle: not pointer-equal
+    // A projection out of a separately built middle is not pointer-equal to
+    // the inclusion's target.
     let (_, _, other_projections) = direct_sum(&[&s, &p]);
     assert_eq!(
         ShortExactSequence::new(inclusions[0].clone(), other_projections[1].clone()).unwrap_err(),
@@ -238,7 +194,7 @@ fn class_from_coordinates_rejects_wrong_lengths_and_non_canonical_entries() {
             got: 2
         }
     );
-    // 3 is a canonical F_5 element and no canonical F_2 element
+    // 3 is a canonical F_5 element and not a canonical F_2 element.
     assert_eq!(
         space.class_from_coordinates(&[f5().elem(3)]).unwrap_err(),
         ExtClassError::NonCanonicalCoordinate { index: 0 }
@@ -330,7 +286,7 @@ fn a_dual_vector_does_not_certify_a_solvable_retraction_system() {
     assert_eq!(witness.dual().len(), 3);
     assert!(!witness.verify(&split));
     // from_ext1 is deterministic, so the witness still certifies a
-    // recomputed copy of its own sequence
+    // recomputed copy of its own sequence.
     let recomputed = ShortExactSequence::from_ext1(&basis_class(&space, 0)).unwrap();
     assert!(witness.verify(&recomputed));
 }
@@ -378,8 +334,8 @@ fn a_catalog_witness_rejects_a_foreign_catalog_class_or_sequence() {
         sequence.sequence(),
         sequence.chosen_ar_class()
     ));
-    // a catalog over a separately built copy of the same algebra: the
-    // same mathematics, a different Arc, rejected by pointer discipline
+    // A catalog over a separately built copy of the same algebra: the same
+    // mathematics, a different Arc, rejected by pointer discipline.
     let rebuilt = truncated_poly(3, field).unwrap();
     let foreign = IndecomposableCatalog::nakayama(&rebuilt).unwrap();
     assert!(!witness.verify(
@@ -388,15 +344,15 @@ fn a_catalog_witness_rejects_a_foreign_catalog_class_or_sequence() {
         sequence.sequence(),
         sequence.chosen_ar_class()
     ));
-    // doubling the class gives zero over F_2, and the zero class is never
-    // almost split
+    // Doubling the class gives zero over F_2, and the zero class is never
+    // almost split.
     let doubled = sequence
         .chosen_ar_class()
         .add(sequence.chosen_ar_class())
         .unwrap();
     assert!(doubled.is_zero());
     assert!(!witness.verify(&s, &catalog, sequence.sequence(), &doubled));
-    // the sequence of another catalog vertex has foreign endpoints
+    // The sequence of another catalog vertex has foreign endpoints.
     let r = &catalog.entries()[1];
     assert_eq!(r.module().dim_vector(), &[2]);
     let r_sequence = catalog_sequence(r, &catalog);
@@ -417,14 +373,14 @@ fn a_catalog_witness_rejects_a_foreign_catalog_class_or_sequence() {
 #[test]
 fn catalog_provenance_cannot_be_forged_and_wrong_shapes_are_rejected() {
     // k[x]/(x^3) carries the relation x^3, so Gabriel's theorem does not
-    // apply
+    // apply.
     let x3 = truncated_poly(3, f5()).unwrap();
     assert_eq!(
         IndecomposableCatalog::dynkin(&x3).unwrap_err(),
         DynkinError::NonzeroIdeal { relations: 1 }
     );
-    // the commutative square has two arrows out of vertex 0, so it is not
-    // Nakayama
+    // The commutative square has two arrows out of vertex 0, so it is not
+    // Nakayama.
     let square = commutative_square(f5());
     assert_eq!(
         IndecomposableCatalog::nakayama(&square).unwrap_err(),

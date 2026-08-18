@@ -18,19 +18,14 @@
 //! it with both carried reasons.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use auslander::algebra::{
-    Algebra, MonomialPresentation, commutative_square, linear_an, monomial_completion_limits,
-    radical_square_zero_cycle, truncated_poly,
+    Algebra, commutative_square, linear_an, path_algebra, radical_square_zero_cycle, truncated_poly,
 };
-use auslander::almost_split::{
-    AlmostSplitOutcome, AlmostSplitSequence, AlmostSplitWitness, ArDualityWitness, CatalogWitness,
-    almost_split, almost_split_via_catalog, stable_end, stable_hom,
-};
-use auslander::ar::{Tau, tau};
-use auslander::arquiver::{ArQuiverError, ArrowValuation, IndecomposableCatalog, ar_quiver};
-use auslander::completion::CompletionLimits;
+use auslander::almost_split::{AlmostSplitOutcome, almost_split, stable_end, stable_hom};
+use auslander::ar::tau;
+use auslander::arquiver::{ArQuiver, ArQuiverError, ArrowValuation, ar_quiver};
 use auslander::decompose::{KrullSchmidtOutcome, krull_schmidt};
 use auslander::dynkin::{DynkinError, DynkinType, dynkin_quiver};
 use auslander::enumerate::EnumerateError;
@@ -41,65 +36,19 @@ use auslander::homspace::HomSpace;
 use auslander::indec::IndecomposableModule;
 use auslander::linalg::DenseMat;
 use auslander::module::Module;
-use auslander::quiver::{ArrowId, Quiver};
+use auslander::quiver::ArrowId;
 use auslander::radical::radical;
-use auslander::relation::{Presentation, Relation};
 use auslander::sequence::{ShortExactSequence, SplitStatus};
 
 /// Products run on every basis tuple whose degrees sum to at most this.
 const MAX_DEGREE: usize = 3;
 
-fn f5() -> PrimeField {
-    PrimeField::new(5).unwrap()
-}
+mod common;
 
-fn f2() -> PrimeField {
-    PrimeField::new(2).unwrap()
-}
-
-fn ids(raw: &[u32]) -> Vec<ArrowId> {
-    raw.iter().copied().map(ArrowId).collect()
-}
-
-/// The preprojective algebra of A_3 over F_2, the constructor of
-/// tests/acceptance_nonmonomial.rs: double quiver a: 0 -> 1 (id 0),
-/// b: 1 -> 2 (1), abar: 1 -> 0 (2), bbar: 2 -> 1 (3) with relations
-/// a.abar, abar.a - b.bbar, bbar.b. Dimension 10, self-injective.
-fn preprojective_a3() -> Arc<Algebra> {
-    let field = f2();
-    let quiver = Quiver::new(3, &[(0, 1), (1, 2), (1, 0), (2, 1)]).unwrap();
-    let relations = vec![
-        Relation::new(&quiver, field, vec![(field.one(), ids(&[0, 2]))]).unwrap(),
-        Relation::new(
-            &quiver,
-            field,
-            vec![(field.one(), ids(&[2, 0])), (field.elem(-1), ids(&[1, 3]))],
-        )
-        .unwrap(),
-        Relation::new(&quiver, field, vec![(field.one(), ids(&[3, 1]))]).unwrap(),
-    ];
-    let presentation = Presentation::new(quiver, field, relations).unwrap();
-    Algebra::new(presentation, &CompletionLimits::default()).unwrap()
-}
-
-/// The inhomogeneous algebra kQ/(ab - cde) over F_5, the constructor of
-/// tests/acceptance_nonmonomial.rs: arrows a: 0 -> 1 (id 0), b: 1 -> 4 (1),
-/// c: 0 -> 2 (2), d: 2 -> 3 (3), e: 3 -> 4 (4). Dimension 13.
-fn inhomogeneous() -> Arc<Algebra> {
-    let field = f5();
-    let quiver = Quiver::new(5, &[(0, 1), (1, 4), (0, 2), (2, 3), (3, 4)]).unwrap();
-    let relation = Relation::new(
-        &quiver,
-        field,
-        vec![
-            (field.one(), ids(&[0, 1])),
-            (field.elem(-1), ids(&[2, 3, 4])),
-        ],
-    )
-    .unwrap();
-    let presentation = Presentation::new(quiver, field, vec![relation]).unwrap();
-    Algebra::new(presentation, &CompletionLimits::default()).unwrap()
-}
+use common::{
+    basis_class, catalog_sequence, catalog_witness, duality_sequence, duality_witness, f2, f5,
+    inhomogeneous, preprojective_a3,
+};
 
 fn tier1_fixtures() -> Vec<(&'static str, Arc<Algebra>)> {
     vec![
@@ -116,14 +65,7 @@ fn tier1_fixtures() -> Vec<(&'static str, Arc<Algebra>)> {
 /// branch vertex 0: arrows 0 -> 1, 0 -> 2, 0 -> 3.
 fn d4_zero_ideal(field: PrimeField) -> Arc<Algebra> {
     let quiver = dynkin_quiver(DynkinType::D(4)).expect("D_4 has a quiver");
-    let presentation =
-        MonomialPresentation::new(quiver, Vec::new()).expect("an acyclic quiver needs no ideal");
-    Algebra::from_monomial(
-        field,
-        &presentation,
-        &monomial_completion_limits(&presentation),
-    )
-    .expect("the zero ideal over an acyclic quiver completes")
+    path_algebra(quiver, field).expect("the zero ideal over an acyclic quiver completes")
 }
 
 fn tier2_domains() -> Vec<(&'static str, Arc<Algebra>)> {
@@ -183,6 +125,38 @@ impl SimpleExt {
     }
 }
 
+/// The tier-1 fixtures with their Ext data, built once for the whole binary.
+/// Five tests read the same list, and `SimpleExt::new` on the 5-vertex
+/// `inhomogeneous-f5` builds 25 `ExtSpace` values per degree.
+fn tier1_ext() -> &'static [(&'static str, Arc<Algebra>, SimpleExt)] {
+    static CACHE: OnceLock<Vec<(&'static str, Arc<Algebra>, SimpleExt)>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        tier1_fixtures()
+            .into_iter()
+            .map(|(name, algebra)| {
+                let ext = SimpleExt::new(&algebra);
+                (name, algebra, ext)
+            })
+            .collect()
+    })
+}
+
+/// The tier-2 domains with their AR quivers, built once for the whole binary.
+/// Three tests read the same list, and the quiver carries the catalog the
+/// catalog route needs.
+fn tier2_ar() -> &'static [(&'static str, Arc<Algebra>, ArQuiver)] {
+    static CACHE: OnceLock<Vec<(&'static str, Arc<Algebra>, ArQuiver)>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        tier2_domains()
+            .into_iter()
+            .map(|(name, algebra)| {
+                let quiver = ar_quiver(&algebra).unwrap();
+                (name, algebra, quiver)
+            })
+            .collect()
+    })
+}
+
 /// The entrywise sum of two parallel morphisms. A sum of A-linear maps is
 /// A-linear, so the checked constructor accepts it.
 fn add_morphisms(f: &Morphism, g: &Morphism) -> Morphism {
@@ -192,44 +166,6 @@ fn add_morphisms(f: &Morphism, g: &Morphism) -> Morphism {
         .map(|v| f.map_at(v).add(g.map_at(v), &field))
         .collect();
     Morphism::new(f.source(), f.target(), maps).unwrap()
-}
-
-fn basis_class(space: &ExtSpace, k: usize) -> ExtClass {
-    let field = space.source().field();
-    let mut coords = vec![field.zero(); space.dim()];
-    coords[k] = field.one();
-    space.class_from_coordinates(&coords).unwrap()
-}
-
-fn duality_sequence(m: &IndecomposableModule) -> AlmostSplitSequence {
-    match almost_split(m).unwrap() {
-        AlmostSplitOutcome::Sequence(sequence) => sequence,
-        AlmostSplitOutcome::Projective => panic!("expected a sequence, got Projective"),
-    }
-}
-
-fn catalog_sequence(
-    m: &IndecomposableModule,
-    catalog: &IndecomposableCatalog,
-) -> AlmostSplitSequence {
-    match almost_split_via_catalog(m, catalog).unwrap() {
-        AlmostSplitOutcome::Sequence(sequence) => sequence,
-        AlmostSplitOutcome::Projective => panic!("expected a sequence, got Projective"),
-    }
-}
-
-fn duality_witness(sequence: &AlmostSplitSequence) -> &ArDualityWitness {
-    match sequence.witness() {
-        AlmostSplitWitness::ArDuality(witness) => witness,
-        AlmostSplitWitness::ExhaustiveCatalog(_) => panic!("expected the AR duality witness"),
-    }
-}
-
-fn catalog_witness(sequence: &AlmostSplitSequence) -> &CatalogWitness {
-    match sequence.witness() {
-        AlmostSplitWitness::ExhaustiveCatalog(witness) => witness,
-        AlmostSplitWitness::ArDuality(_) => panic!("expected the catalog witness"),
-    }
 }
 
 /// Krull-Schmidt classes of a middle term as sorted
@@ -346,8 +282,7 @@ fn ext_space_dims_match_ext_dim_between_all_simples_and_hom_dim_at_degree_0() {
 
 #[test]
 fn identity_classes_are_two_sided_units_on_every_nonzero_bounded_space() {
-    for (name, algebra) in tier1_fixtures() {
-        let ext = SimpleExt::new(&algebra);
+    for (name, _, ext) in tier1_ext() {
         let n = ext.simples.len();
         for i in 0..n {
             for j in 0..n {
@@ -375,8 +310,7 @@ fn identity_classes_are_two_sided_units_on_every_nonzero_bounded_space() {
 
 #[test]
 fn yoneda_products_are_bilinear_on_every_bounded_basis_pair() {
-    for (name, algebra) in tier1_fixtures() {
-        let ext = SimpleExt::new(&algebra);
+    for (name, _, ext) in tier1_ext() {
         let field = ext.simples[0].field();
         let two = field.elem(2);
         let n = ext.simples.len();
@@ -473,8 +407,7 @@ fn yoneda_products_are_bilinear_on_every_bounded_basis_pair() {
 
 #[test]
 fn yoneda_products_are_associative_on_every_bounded_basis_triple() {
-    for (name, algebra) in tier1_fixtures() {
-        let ext = SimpleExt::new(&algebra);
+    for (name, _, ext) in tier1_ext() {
         let n = ext.simples.len();
         let mut checked = 0usize;
         for i in 0..n {
@@ -578,8 +511,7 @@ fn a_shifted_cocycle_recovers_its_class_and_the_class_product_is_unchanged() {
 // `the_cocycle_recovered_from_the_extension_splices_to_the_product`.
 #[test]
 fn ext1_class_recovery_round_trips_and_the_recovered_classes_compose_alike() {
-    for (name, algebra) in tier1_fixtures() {
-        let ext = SimpleExt::new(&algebra);
+    for (name, _, ext) in tier1_ext() {
         let n = ext.simples.len();
         let mut checked = 0usize;
         for i in 0..n {
@@ -625,8 +557,7 @@ fn ext1_class_recovery_round_trips_and_the_recovered_classes_compose_alike() {
 
 #[test]
 fn from_ext1_round_trips_every_basis_class_and_split_status_matches_is_zero() {
-    for (name, algebra) in tier1_fixtures() {
-        let ext = SimpleExt::new(&algebra);
+    for (name, algebra, ext) in tier1_ext() {
         let nv = algebra.quiver().num_vertices();
         let n = ext.simples.len();
         for i in 0..n {
@@ -692,10 +623,7 @@ fn almost_split_runs_on_every_simple_with_a_verifying_duality_witness() {
             match almost_split(&ind).unwrap() {
                 AlmostSplitOutcome::Projective => {
                     assert!(ind.is_projective(), "{name}: S_{v} projective outcome");
-                    assert!(
-                        matches!(tau(&s).unwrap(), Tau::Zero),
-                        "{name}: tau S_{v} is zero"
-                    );
+                    assert!(tau(&s).unwrap().is_zero(), "{name}: tau S_{v} is zero");
                 }
                 AlmostSplitOutcome::Sequence(sequence) => {
                     assert!(!ind.is_projective(), "{name}: S_{v} sequence outcome");
@@ -715,9 +643,11 @@ fn almost_split_runs_on_every_simple_with_a_verifying_duality_witness() {
                     );
                     // The standalone translate route must agree with the
                     // sub term, matrix for matrix: tau is deterministic.
-                    let Tau::Module(translate) = tau(&s).unwrap() else {
-                        panic!("{name}: tau S_{v} is zero for a non-projective simple");
-                    };
+                    let translate = tau(&s).unwrap();
+                    assert!(
+                        !translate.is_zero(),
+                        "{name}: tau S_{v} is zero for a non-projective simple"
+                    );
                     assert_eq!(
                         translate.dim_vector(),
                         ses.sub().dim_vector(),
@@ -841,8 +771,7 @@ fn stable_hom_dimensions_are_consistent_everywhere() {
 // arrows into M.
 #[test]
 fn middle_term_multiplicities_match_the_arrows_into_each_vertex() {
-    for (name, algebra) in tier2_domains() {
-        let quiver = ar_quiver(&algebra).unwrap();
+    for (name, _, quiver) in tier2_ar() {
         let dims: Vec<Vec<usize>> = quiver
             .vertices()
             .iter()
@@ -886,8 +815,7 @@ fn middle_term_multiplicities_match_the_arrows_into_each_vertex() {
 
 #[test]
 fn the_catalog_route_agrees_with_the_duality_route_on_every_vertex() {
-    for (name, algebra) in tier2_domains() {
-        let quiver = ar_quiver(&algebra).unwrap();
+    for (name, _, quiver) in tier2_ar() {
         let catalog = quiver.catalog();
         for vertex in quiver.vertices() {
             if vertex.projective() {
@@ -938,12 +866,12 @@ fn the_catalog_route_agrees_with_the_duality_route_on_every_vertex() {
     }
 }
 
-// Every indecomposable on the v0.4 catalog domains is a brick or a
-// uniserial module with residue degree 1, so every valuation is plain.
+// Every indecomposable on the v0.4 catalog domains has
+// End(M)/rad End(M) = k, so every residue degree is 1 and every arrow
+// valuation is plain.
 #[test]
 fn every_arrow_valuation_on_the_catalog_domains_is_plain() {
-    for (name, algebra) in tier2_domains() {
-        let quiver = ar_quiver(&algebra).unwrap();
+    for (name, _, quiver) in tier2_ar() {
         for vertex in quiver.vertices() {
             assert_eq!(
                 vertex.residue_degree(),

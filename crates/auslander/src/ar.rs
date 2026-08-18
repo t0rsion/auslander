@@ -2,19 +2,22 @@
 //! cross-check.
 //!
 //! Both routes start from the minimal presentation `P_1 -d1-> P_0 → M → 0` in
-//! element-matrix form. Route 1 applies the Nakayama functor and takes a
-//! kernel: `τM = ker(ν(d1): νP_1 → νP_0)`, from the exact sequence
+//! element-matrix form. Route 1 applies the Nakayama functor and takes a kernel:
+//! `τM = ker(ν(d1): νP_1 → νP_0)`, from the exact sequence
 //! `0 → τM → νP_1 → νP_0 → νM → 0` (see
-//! [`crate::opposite::nu_of_presentation_map`]). Route 2 applies
-//! `Hom_A(−, A)` to `d1` (the element-matrix transpose over the opposite
-//! algebra), takes the cokernel to get `Tr M`, and dualizes back:
-//! `τM = D(Tr M)`. The routes share the checked minimal presentation and the
-//! [`crate::opposite::ElementMatrix`] path-coefficient encoding. Their back
-//! ends are independent (injectives plus kernel versus opposite-side
-//! projectives plus cokernel plus dual), so agreement cross-checks everything
-//! downstream of the shared encoding. [`tau`] always runs both routes and
-//! refuses to answer when [`crate::iso::is_isomorphic`] does not certify the
-//! results isomorphic.
+//! [`crate::opposite::nu_of_presentation_map`]). Route 2 applies `Hom_A(−, A)` to
+//! `d1`, which is the element-matrix transpose over the opposite algebra, takes
+//! the cokernel to get `Tr M`, and dualizes back: `τM = D(Tr M)`.
+//!
+//! Running both routes is a cross-check, and the cross-check has a limit. The
+//! routes share two things: the checked minimal presentation, and the
+//! [`crate::opposite::ElementMatrix`] path-coefficient encoding. Everything after
+//! that is independent: injectives plus kernel on one side, opposite-side
+//! projectives plus cokernel plus dual on the other. Agreement therefore tests
+//! every step below the shared encoding, and it tests nothing inside it.
+//!
+//! [`tau`] always runs both routes and answers only when
+//! [`crate::iso::is_isomorphic`] certifies the two results isomorphic.
 
 use std::fmt;
 
@@ -25,23 +28,14 @@ use crate::module::Module;
 use crate::opposite::{ElementMatrix, OppositeMap, dual, nu_of_presentation_map, opposite};
 use crate::resolution::minimal_presentation_matrix;
 
-/// The AR translate of a module.
-#[derive(Clone, Debug)]
-pub enum Tau {
-    /// The module is projective (zero `P_1` in its minimal presentation).
-    Zero,
-    /// `τM` for non-projective `M`, as computed by the Nakayama-kernel route
-    /// and certified isomorphic to the transpose-dual result.
-    Module(Module),
-}
-
 /// A [`tau`] cross-check that did not end in agreement.
 ///
-/// The two variants are different claims and must not be conflated.
-/// [`TauError::RoutesDisagree`] carries a proof that the routes produced
-/// non-isomorphic modules, which is a library bug.
-/// [`TauError::AgreementUnknown`] means the isomorphism test could not decide.
-/// It says nothing about whether the routes agree.
+/// The two failure variants are different claims. Do not conflate them.
+/// [`TauError::RoutesDisagree`] carries a proof that the two routes produced
+/// non-isomorphic modules; that is a bug in this library, and one of the two
+/// results is wrong. [`TauError::AgreementUnknown`] means the isomorphism test
+/// reached no verdict. It says nothing about whether the routes agree, so it is
+/// evidence about the test, not about `τM`.
 #[derive(Clone, Debug)]
 pub enum TauError {
     /// Building the opposite algebra failed, so the transpose-dual route
@@ -91,7 +85,7 @@ impl fmt::Display for TauError {
                 reason,
             } => write!(
                 f,
-                "τ routes not certified equal: Nakayama kernel has dimension vector {:?}, \
+                "τ routes not certified isomorphic: Nakayama kernel has dimension vector {:?}, \
                  transpose dual {:?} ({reason})",
                 nakayama_kernel.dim_vector(),
                 transpose_dual.dim_vector()
@@ -120,10 +114,11 @@ fn nakayama_kernel_route(d1: &ElementMatrix) -> Module {
 }
 
 /// Route 2: `τM = D(Tr M)` with `Tr M = coker(Hom_A(d1, A))`, the transposed
-/// element matrix realized between opposite-side projectives. Zero exactly
-/// when `m` is projective. The result lives over the same algebra [`std::sync::Arc`]
-/// as `m`. Errors with [`TauError::Opposite`] when building the opposite
-/// algebra fails.
+/// element matrix realized between opposite-side projectives.
+///
+/// Zero exactly when `m` is projective. The result lives over the same algebra
+/// [`std::sync::Arc`] as `m`. Errors with [`TauError::Opposite`] when building the
+/// opposite algebra fails.
 pub fn tau_via_transpose_dual(m: &Module) -> Result<Module, TauError> {
     let op = opposite(m.algebra()).map_err(TauError::Opposite)?;
     Ok(transpose_dual_route(&minimal_presentation_matrix(m), &op))
@@ -137,15 +132,18 @@ fn transpose_dual_route(d1: &ElementMatrix, op: &OppositeMap) -> Module {
     dual(&tr, op).expect("Tr M lives over the opposite side of the pair")
 }
 
-/// The AR translate: [`Tau::Zero`] exactly when `m` is projective (zero `P_1`
-/// in the minimal presentation), otherwise [`Tau::Module`] with the
-/// Nakayama-kernel result. The presentation is computed once and both routes
-/// always run on it. A result is returned only when [`is_isomorphic`]
-/// certifies the two results isomorphic. A certified disagreement is
-/// [`TauError::RoutesDisagree`]. An undecided cross-check is
-/// [`TauError::AgreementUnknown`], which is a limit of the isomorphism test
+/// The AR translate `τM`, as the Nakayama-kernel result over `m`'s algebra.
+///
+/// The result is the zero module exactly when `m` is projective, because a
+/// projective has an empty `P_1` in its minimal presentation and both routes
+/// then land on the zero module. Test that case with [`Module::is_zero`].
+///
+/// The presentation is computed once and both routes always run on it. An answer
+/// comes back only when [`is_isomorphic`] certifies the two results isomorphic. A
+/// certified disagreement is [`TauError::RoutesDisagree`]. An undecided
+/// cross-check is [`TauError::AgreementUnknown`], a limit of the isomorphism test
 /// rather than evidence about the routes.
-pub fn tau(m: &Module) -> Result<Tau, TauError> {
+pub fn tau(m: &Module) -> Result<Module, TauError> {
     let d1 = minimal_presentation_matrix(m);
     let nakayama_kernel = nakayama_kernel_route(&d1);
     let op = opposite(m.algebra()).map_err(TauError::Opposite)?;
@@ -169,11 +167,7 @@ pub fn tau(m: &Module) -> Result<Tau, TauError> {
             });
         }
     }
-    if d1.sources().is_empty() {
-        Ok(Tau::Zero)
-    } else {
-        Ok(Tau::Module(nakayama_kernel))
-    }
+    Ok(nakayama_kernel)
 }
 
 #[cfg(test)]
@@ -243,15 +237,12 @@ mod tests {
             ] {
                 for v in 0..algebra.quiver().num_vertices() {
                     let p = Module::projective(&algebra, v);
-                    assert!(matches!(tau(&p).unwrap(), Tau::Zero), "τ P_{v}");
+                    assert!(tau(&p).unwrap().is_zero(), "τ P_{v}");
                     let s = Module::simple(&algebra, v);
                     if s.dim_vector() == p.dim_vector() {
                         continue;
                     }
-                    match tau(&s).unwrap() {
-                        Tau::Module(t) => assert!(!t.is_zero(), "τ S_{v}"),
-                        Tau::Zero => panic!("τ S_{v} claimed projective"),
-                    }
+                    assert!(!tau(&s).unwrap().is_zero(), "τ S_{v}");
                 }
             }
         }
@@ -261,7 +252,7 @@ mod tests {
     fn tau_of_the_zero_module_is_zero() {
         let a = linear_an(3, PrimeField::new(5).unwrap());
         let z = Module::zero(&a);
-        assert!(matches!(tau(&z).unwrap(), Tau::Zero));
+        assert!(tau(&z).unwrap().is_zero());
     }
 
     #[test]

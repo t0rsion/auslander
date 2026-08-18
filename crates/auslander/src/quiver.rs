@@ -1,9 +1,9 @@
 //! Quivers and path words.
 //!
-//! Convention, fixed crate-wide: **paths compose left to right**. The word `a·b` means
-//! "first `a`, then `b`" and requires `target(a) == source(b)`. A representation assigns
-//! to each arrow a `d_source × d_target` matrix acting on row vectors, so
-//! `M(a·b) = M(a)·M(b)`.
+//! Convention, fixed crate-wide: paths compose left to right. The word `a·b`
+//! means "first `a`, then `b`" and requires `target(a) == source(b)`. A
+//! representation assigns to each arrow a `d_source × d_target` matrix acting
+//! on row vectors, so `M(a·b) = M(a)·M(b)`.
 
 use std::fmt;
 
@@ -37,8 +37,8 @@ pub enum QuiverError {
     EmptyWord,
     /// `target(word[position]) != source(word[position + 1])`.
     NotComposable { position: usize },
-    /// The word's stored endpoints differ from the endpoints its arrows have in
-    /// the quiver it is validated against; the word was built over another quiver.
+    /// The word's stored endpoints differ from the endpoints its arrows have
+    /// in the quiver it is checked against.
     EndpointsDisagree {
         stored: (u32, u32),
         computed: (u32, u32),
@@ -128,11 +128,13 @@ impl Quiver {
         })
     }
 
+    /// Number of vertices; the vertices are `0..num_vertices`.
     #[inline]
     pub fn num_vertices(&self) -> u32 {
         self.num_vertices
     }
 
+    /// Number of arrows; the arrow ids are `0..num_arrows`.
     #[inline]
     pub fn num_arrows(&self) -> usize {
         self.arrows.len()
@@ -144,13 +146,13 @@ impl Quiver {
         &self.arrows
     }
 
-    /// Panics if `a` is not an arrow of this quiver.
+    /// Source vertex of `a`. Panics if `a` is not an arrow of this quiver.
     #[inline]
     pub fn source(&self, a: ArrowId) -> u32 {
         self.arrows[a.index()].0
     }
 
-    /// Panics if `a` is not an arrow of this quiver.
+    /// Target vertex of `a`. Panics if `a` is not an arrow of this quiver.
     #[inline]
     pub fn target(&self, a: ArrowId) -> u32 {
         self.arrows[a.index()].1
@@ -236,8 +238,8 @@ impl PathWord {
     /// endpoints match the arrows' endpoints there. A trivial path must name
     /// a vertex of `quiver`.
     ///
-    /// A word is valid in the quiver it was built over. Validation matters for
-    /// words that may have crossed to a different quiver.
+    /// A word built over `quiver` always passes. Call this on a word that may
+    /// come from a different quiver.
     pub fn validate_in(&self, quiver: &Quiver) -> Result<(), QuiverError> {
         if self.arrows.is_empty() {
             if self.source >= quiver.num_vertices() {

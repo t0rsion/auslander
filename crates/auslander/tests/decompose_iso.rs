@@ -17,9 +17,12 @@ use auslander::algebra::{
     radical_square_zero_cycle, truncated_poly,
 };
 use auslander::ar::tau;
-use auslander::decompose::{Certificate, KrullSchmidtOutcome, decompose, krull_schmidt};
+use auslander::decompose::{
+    Certificate, KrullSchmidtOutcome, Split, SplitError, decompose, krull_schmidt,
+};
 use auslander::endo::EndoAlgebra;
 use auslander::field::PrimeField;
+use auslander::hom::Morphism;
 use auslander::iso::{IsoOutcome, is_isomorphic};
 use auslander::linalg::DenseMat;
 use auslander::module::{Module, direct_sum};
@@ -147,9 +150,10 @@ fn decompose_splits_repeated_summands_over_a_large_field() {
 /// root there. Then `End(W)` is the field `F_{32003³}` and
 /// `End(W ⊕ W) = M_2(F_{32003³})`: one Wedderburn factor, zero radical, and
 /// noncommutative, so no central idempotent exists to split it. Searching for
-/// a base-field eigenvalue does not find a splitting element either, since a
-/// drawn element of `M_2(F_{p³})` has one with probability `O(p^{-2})`. Only
-/// coprime factorization of the minimal polynomial reaches this case.
+/// a base-field eigenvalue does not find a splitting element either: a drawn
+/// element of `M_2(F_{p³})` has an eigenvalue in `F_p` with probability
+/// `O(p^{-2})`. Only coprime factorization of the minimal polynomial reaches
+/// this case.
 #[test]
 fn decompose_splits_a_repeated_summand_with_an_extension_endomorphism_field() {
     let field = PrimeField::new(32003).unwrap();
@@ -166,7 +170,12 @@ fn decompose_splits_a_repeated_summand_with_an_extension_endomorphism_field() {
     let w = Module::new(algebra, vec![3, 3], vec![identity, companion]).unwrap();
 
     let endo_w = EndoAlgebra::new(&w);
+    // Local and 3-dimensional also holds for `k[t]/(t³)`, which is not a field.
+    // A zero radical separates the two: a local algebra with zero radical is a
+    // division algebra, so `End(W)` is the field `F_{p³}` and not a truncated
+    // polynomial ring.
     assert!(endo_w.is_local(), "End(W) should be the field F_{{p³}}");
+    assert_eq!(endo_w.radical_dim(), 0);
     assert_eq!(endo_w.dim(), 3);
 
     let (m, _, _) = direct_sum(&[&w, &w]);
@@ -195,7 +204,11 @@ fn decompose_splits_a_repeated_summand_with_an_extension_endomorphism_field() {
         }
         other => panic!("expected one class of multiplicity two, got {other:?}"),
     }
-    assert_isomorphic(&m, &m, "W ⊕ W against itself");
+    // A separately built copy, not `m` itself: `is_isomorphic` returns the
+    // identity on a [`Module::ptr_eq`] pair before it decomposes anything.
+    let (copy, _, _) = direct_sum(&[&w, &w]);
+    assert!(!Module::ptr_eq(&m, &copy));
+    assert_isomorphic(&m, &copy, "W ⊕ W against a separately built copy");
     // Before decompose split this case, tau failed on the same module: the
     // cross-check could not certify the routes equal and reported a disagreement.
     assert!(tau(&m).is_ok(), "tau must not report a false disagreement");
@@ -316,4 +329,41 @@ fn krull_schmidt_is_permutation_invariant_on_shuffled_fixture_sums() {
             assert_eq!(left, expected, "F_{}", field.modulus());
         }
     }
+}
+
+/// `Split::new` rejects a projection family whose cross terms do not vanish.
+///
+/// Over `kA_2` take `M = S_0 ⊕ S_0`, dimension vector `[2, 0]`, with the
+/// standard `ι_0, ι_1, π_0, π_1`. Replace `π_1` by `π_0 + π_1`, the column
+/// `[1, 1]` at vertex 0. Then `ι_1·(π_0 + π_1) = 0 + id` is still the identity,
+/// so the diagonal check passes, while `ι_0·(π_0 + π_1) = id + 0` is nonzero
+/// and the cross term at `(0, 1)` fails.
+#[test]
+fn split_new_rejects_a_projection_with_a_nonzero_cross_term() {
+    let field = PrimeField::new(5).unwrap();
+    let algebra = linear_an(2, field);
+    let s0 = Module::simple(&algebra, 0);
+    let (m, inclusions, projections) = direct_sum(&[&s0, &s0]);
+    assert_eq!(m.dim_vector(), &[2, 0]);
+    let one = field.one();
+    let wrong = Morphism::new(
+        &m,
+        &s0,
+        vec![
+            DenseMat::from_rows(&[vec![one], vec![one]]),
+            DenseMat::zero(0, 0),
+        ],
+    )
+    .unwrap();
+    let summands = vec![s0.clone(), s0.clone()];
+    let split = Split::new(
+        &m,
+        summands,
+        inclusions,
+        vec![projections[0].clone(), wrong],
+    );
+    assert_eq!(
+        split.err(),
+        Some(SplitError::CrossTermNonzero { from: 0, to: 1 })
+    );
 }

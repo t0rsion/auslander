@@ -1,18 +1,24 @@
 //! `Hom_A(M, N)` as an explicit vector space: fixed basis, flat coordinates,
 //! subspaces, and deterministic quotients.
 //!
-//! The basis of a [`HomSpace`] is exactly [`hom`] in its deterministic order.
-//! Each basis morphism flattens to one row: the per-vertex matrices row-major,
-//! concatenated in vertex order. A [`HomSubspace`] stores the reduced row
-//! echelon form of its spanning set in these flat coordinates, so two
-//! subspaces of compatible spaces are equal exactly when their matrices are
-//! equal.
+//! A [`HomSpace`] stores the `hom_rows` rows, in the order `hom_rows`
+//! fixes: kernel variables vertex-major, then row-major inside a vertex, and
+//! one basis vector per free column in increasing column order. That layout is
+//! the flattening itself, the per-vertex matrices row-major concatenated in
+//! vertex order, so row `i` is basis morphism `i` and a caller pays for a
+//! [`Morphism`] only where it asks for one. A [`HomSubspace`] stores the
+//! reduced row echelon form of its spanning set in these flat coordinates, so
+//! two subspaces of compatible spaces are equal exactly when their matrices
+//! are equal.
 //!
 //! The complement rule is fixed crate-wide: to complement a subspace `B`
 //! inside an ambient subspace `Z`, scan the RREF basis rows of `Z` in order
 //! and keep each row that increases the rank of `B` plus the rows kept so
-//! far. [`HomQuotient`] representatives are combinations of the kept rows,
-//! so they are deterministic.
+//! far. [`HomQuotient`] representatives are combinations of the kept rows, so
+//! rebuilding a quotient from the same modules gives the same representatives.
+//! The AR quiver reads its irreducible-map classes off those representatives,
+//! and `tests/determinism_ar.rs` compares the resulting renderings byte for
+//! byte, in-process and across a fresh process.
 //!
 //! Two spaces are compatible when their sources are [`Module::ptr_eq`] and
 //! their targets are [`Module::ptr_eq`]. The basis construction is
@@ -20,12 +26,19 @@
 //! coordinates transport verbatim. An operation on a morphism whose
 //! endpoints do not match is a typed [`HomSpaceError`], never a silent
 //! reinterpretation.
+//!
+//! The file also holds the crate-private helpers that the Ext, sequence, and
+//! almost-split layers share with this one: `row_times`, `stack_rows`,
+//! `rref_coords`, `scale_morphism`, and `deterministic_complement`. One copy
+//! each, so a change to the complement rule or to a coordinate convention
+//! lands in one place.
 
 use std::fmt;
+use std::sync::OnceLock;
 
 use crate::field::{Fp, PrimeField};
-use crate::hom::{HomError, Morphism, hom};
-use crate::linalg::DenseMat;
+use crate::hom::{HomError, Morphism, hom_rows};
+use crate::linalg::{DenseMat, RowReducer};
 use crate::module::Module;
 
 /// Rejected Hom space input.
@@ -67,9 +80,10 @@ impl fmt::Display for HomSpaceError {
 
 impl std::error::Error for HomSpaceError {}
 
-/// One row per morphism: the vertex matrices flattened row-major and
-/// concatenated in vertex order.
-fn flat_row(f: &Morphism) -> Vec<Fp> {
+/// The morphism as one flat row: the vertex matrices flattened row-major,
+/// concatenated in vertex order. This is the layout `hom_rows` solves in, so
+/// a kernel row is already a flat row.
+pub(crate) fn flat_row(f: &Morphism) -> Vec<Fp> {
     let mut row = Vec::new();
     for v in 0..f.source().algebra().quiver().num_vertices() {
         let map = f.map_at(v);
@@ -88,10 +102,27 @@ fn flat_width(m: &Module, n: &Module) -> usize {
         .sum()
 }
 
+/// The morphism whose flat row is `row`, the inverse of [`flat_row`].
+///
+/// `row` must be a linear combination of the flat rows of morphisms
+/// `source -> target`, with canonical entries for the modules' field. Every
+/// caller in this file passes one: [`HomSpace::morphism`] combines the rows of
+/// `flat`, [`HomSubspace::basis_morphism`] takes a row of the row-space basis of
+/// the spanning rows, [`HomQuotient::representative`] combines complement rows,
+/// which are rows of that same basis, and [`HomQuotient::reduce`] combines the
+/// RREF rows of the subspace.
+///
+/// Flattening is a linear bijection between the vertex-matrix tuples and rows of
+/// width [`flat_width`], so the unflattening of a combination of flat rows is the
+/// same combination of morphisms. `Hom_A(M, N)` is a subspace of the tuples, so
+/// that combination is A-linear and the result skips the commuting-square check.
+/// The blocks are cut at `dim source_v x dim target_v`, the shape
+/// `Morphism::new` would demand.
 fn morphism_from_flat(source: &Module, target: &Module, row: &[Fp]) -> Morphism {
-    let mut maps = Vec::new();
+    let num_vertices = source.algebra().quiver().num_vertices();
+    let mut maps = Vec::with_capacity(num_vertices as usize);
     let mut offset = 0;
-    for v in 0..source.algebra().quiver().num_vertices() {
+    for v in 0..num_vertices {
         let (dm, dn) = (source.dim_at(v), target.dim_at(v));
         let mut block = DenseMat::zero(dm, dn);
         for r in 0..dm {
@@ -102,20 +133,106 @@ fn morphism_from_flat(source: &Module, target: &Module, row: &[Fp]) -> Morphism 
         offset += dm * dn;
         maps.push(block);
     }
-    Morphism::new(source, target, maps).expect("flat rows in the span of a hom basis are A-linear")
+    Morphism::new_unchecked(source, target, maps)
 }
 
-fn combine_rows(rows: &DenseMat, coords: &[Fp], field: &PrimeField) -> Vec<Fp> {
-    let mut out = vec![Fp::ZERO; rows.cols()];
-    for (k, &c) in coords.iter().enumerate() {
+/// `row * m` over `field`, of length `m.cols()`. `row` has one entry per row
+/// of `m`.
+pub(crate) fn row_times(row: &[Fp], m: &DenseMat, field: &PrimeField) -> Vec<Fp> {
+    let mut out = vec![Fp::ZERO; m.cols()];
+    for (k, &c) in row.iter().enumerate() {
         if c.is_zero() {
             continue;
         }
         for (j, out_j) in out.iter_mut().enumerate() {
-            *out_j = field.add(*out_j, field.mul(c, rows.get(k, j)));
+            *out_j = field.add(*out_j, field.mul(c, m.get(k, j)));
         }
     }
     out
+}
+
+/// The unique coordinates of `v` over the rows of `rref`, or `None` when `v`
+/// lies outside the row space.
+///
+/// `rref` must be in reduced row echelon form with no zero row, as every
+/// stored basis in the crate is. Then row `r` is the only row with a nonzero
+/// entry in its pivot column, so the coordinate at `r` is `v` at that column
+/// and no free variable exists. The final multiplication decides membership.
+pub(crate) fn rref_coords(rref: &DenseMat, v: &[Fp], field: &PrimeField) -> Option<Vec<Fp>> {
+    if rref.cols() != v.len() {
+        return None;
+    }
+    let coords: Vec<Fp> = (0..rref.rows())
+        .map(|r| {
+            let pivot = rref
+                .row(r)
+                .iter()
+                .position(|e| !e.is_zero())
+                .expect("a reduced row echelon basis has no zero row");
+            v[pivot]
+        })
+        .collect();
+    (row_times(&coords, rref, field) == v).then_some(coords)
+}
+
+/// [`rref_coords`] over many vectors: row `r` of the result holds the
+/// coordinates of row `r` of `rows`, and `None` means some row lies outside
+/// the row space.
+///
+/// The pivot columns are found once for the whole call and one matrix product
+/// decides every row, where a loop over [`rref_coords`] rescans the pivots and
+/// runs a separate `row_times` per row.
+pub(crate) fn rref_coords_many(
+    rref: &DenseMat,
+    rows: &DenseMat,
+    field: &PrimeField,
+) -> Option<DenseMat> {
+    if rref.cols() != rows.cols() {
+        return None;
+    }
+    if rows.rows() == 0 {
+        return Some(DenseMat::zero(0, rref.rows()));
+    }
+    let pivots: Vec<usize> = (0..rref.rows())
+        .map(|r| {
+            rref.row(r)
+                .iter()
+                .position(|e| !e.is_zero())
+                .expect("a reduced row echelon basis has no zero row")
+        })
+        .collect();
+    let mut coords = DenseMat::zero(rows.rows(), rref.rows());
+    for r in 0..rows.rows() {
+        for (c, &pivot) in pivots.iter().enumerate() {
+            coords.set(r, c, rows.get(r, pivot));
+        }
+    }
+    (coords.mul(rref, field) == *rows).then_some(coords)
+}
+
+/// The morphism with every entry multiplied by `c`, which must be canonical for
+/// the modules' field.
+///
+/// The result skips the commuting-square check. Scaling every entry of every
+/// vertex matrix by `c` scales both sides of each square by `c`, because a scalar
+/// pulls through a matrix product: `(c f)_{s(a)} · N(a) = c (f_{s(a)} · N(a))`
+/// equals `c (M(a) · f_{t(a)}) = M(a) · (c f)_{t(a)}`. The blocks keep the shapes
+/// of `f`, and `PrimeField::mul` returns canonical entries.
+pub(crate) fn scale_morphism(f: &Morphism, c: Fp) -> Morphism {
+    let field = f.source().field();
+    let maps = (0..f.source().algebra().quiver().num_vertices())
+        .map(|v| {
+            let block = f.map_at(v);
+            let mut out = DenseMat::zero(block.rows(), block.cols());
+            for r in 0..block.rows() {
+                for j in 0..block.cols() {
+                    out.set(r, j, field.mul(c, block.get(r, j)));
+                }
+            }
+            out
+        })
+        .collect();
+    Morphism::new_unchecked(f.source(), f.target(), maps)
 }
 
 fn check_endpoints(source: &Module, target: &Module, f: &Morphism) -> Result<(), HomSpaceError> {
@@ -128,7 +245,9 @@ fn check_endpoints(source: &Module, target: &Module, f: &Morphism) -> Result<(),
     Ok(())
 }
 
-fn stack_rows(matrices: &[&DenseMat], cols: usize) -> DenseMat {
+/// The matrices stacked in order, all with `cols` columns. An empty stack is
+/// the `0 x cols` matrix.
+pub(crate) fn stack_rows(matrices: &[&DenseMat], cols: usize) -> DenseMat {
     let rows: Vec<Vec<Fp>> = matrices
         .iter()
         .flat_map(|m| (0..m.rows()).map(|r| m.row(r).to_vec()))
@@ -144,65 +263,76 @@ fn stack_rows(matrices: &[&DenseMat], cols: usize) -> DenseMat {
 /// keep each row that increases the rank of `inner` plus the rows kept so
 /// far. The kept rows are the complement basis. This is the only complement
 /// construction in the crate.
+///
+/// One [`RowReducer`] carries the rank test across the scan, where a rank
+/// call per candidate row rebuilt the whole elimination. The decision is
+/// exact either way, and the kept rows are copies of `ambient` rows in scan
+/// order, so the result is byte for byte what the rule names.
 pub(crate) fn deterministic_complement(
     ambient: &DenseMat,
     inner: &DenseMat,
     field: &PrimeField,
 ) -> DenseMat {
-    let mut rows: Vec<Vec<Fp>> = (0..inner.rows()).map(|r| inner.row(r).to_vec()).collect();
+    let empty = DenseMat::zero(0, ambient.cols());
+    let mut reducer = RowReducer::new(ambient.cols());
+    for r in 0..inner.rows() {
+        // A dependent row of `inner` puts the rank of every stacked test
+        // below its row count, so the rule keeps nothing. Both callers pass
+        // an RREF basis, where this cannot happen.
+        if !reducer.push(inner.row(r), field) {
+            return empty;
+        }
+    }
     let mut kept: Vec<Vec<Fp>> = Vec::new();
     for r in 0..ambient.rows() {
-        rows.push(ambient.row(r).to_vec());
-        if DenseMat::from_rows(&rows).rank(field) == rows.len() {
+        if reducer.push(ambient.row(r), field) {
             kept.push(ambient.row(r).to_vec());
-        } else {
-            rows.pop();
         }
     }
     if kept.is_empty() {
-        DenseMat::zero(0, ambient.cols())
+        empty
     } else {
         DenseMat::from_rows(&kept)
     }
 }
 
-/// `Hom_A(M, N)` with the [`hom`] basis and its flat coordinates.
+/// `Hom_A(M, N)` as its flat rows, in the order `hom_rows` fixes.
 ///
-/// Fields are private; construction goes through [`HomSpace::new`], so the
-/// basis is always the deterministic [`hom`] basis of the stored endpoints.
+/// The rows are the primary form: row `i` is basis element `i` flattened, so
+/// [`HomSpace::dim`] and every coordinate operation read them directly and no
+/// [`Morphism`] is built. [`HomSpace::basis_morphism`] unflattens one row,
+/// [`HomSpace::basis_iter`] unflattens the rows a caller consumes, and
+/// [`HomSpace::basis`] unflattens all of them once and keeps them, for callers
+/// that want the whole slice.
+///
+/// Fields are private; construction goes through [`HomSpace::new`], so the rows
+/// are always the deterministic `hom_rows` rows of the stored endpoints.
 #[derive(Clone, Debug)]
 pub struct HomSpace {
     source: Module,
     target: Module,
-    basis: Vec<Morphism>,
-    // One row per basis morphism, flattened as in `flat_row`.
+    // One row per basis element, flattened as in `flat_row`.
     flat: DenseMat,
+    // The whole materialized basis, filled by the first `basis` call.
+    basis: OnceLock<Vec<Morphism>>,
 }
 
 impl HomSpace {
-    /// Builds `Hom(m, n)` with the [`hom`] basis in its deterministic order.
-    /// Errors when the modules do not share one algebra, as [`hom`].
+    /// Builds `Hom(m, n)` with the `hom_rows` rows in their deterministic
+    /// order. Errors when the modules do not share one algebra, as `hom_rows`.
     pub fn new(m: &Module, n: &Module) -> Result<HomSpace, HomError> {
-        let basis = hom(m, n)?;
-        let cols = flat_width(m, n);
-        let mut flat = DenseMat::zero(basis.len(), cols);
-        for (r, f) in basis.iter().enumerate() {
-            for (c, &v) in flat_row(f).iter().enumerate() {
-                flat.set(r, c, v);
-            }
-        }
         Ok(HomSpace {
             source: m.clone(),
             target: n.clone(),
-            basis,
-            flat,
+            flat: hom_rows(m, n)?,
+            basis: OnceLock::new(),
         })
     }
 
     /// `dim_k Hom(M, N)`.
     #[inline]
     pub fn dim(&self) -> usize {
-        self.basis.len()
+        self.flat.rows()
     }
 
     /// The source module `M`.
@@ -217,10 +347,47 @@ impl HomSpace {
         &self.target
     }
 
-    /// The basis morphisms; coordinates index into this list.
-    #[inline]
+    /// Basis morphism `i`, unflattened from row `i`.
+    ///
+    /// # Panics
+    /// Panics unless `i` is below [`HomSpace::dim`].
+    pub fn basis_morphism(&self, i: usize) -> Morphism {
+        morphism_from_flat(&self.source, &self.target, self.flat.row(i))
+    }
+
+    /// The basis morphisms in order, each unflattened as the iterator reaches
+    /// it. A caller that stops early pays for nothing past the last one it took.
+    pub fn basis_iter(&self) -> impl Iterator<Item = Morphism> + '_ {
+        (0..self.dim()).map(|i| self.basis_morphism(i))
+    }
+
+    /// The whole basis, materialized once and kept; coordinates index into this
+    /// list. Use [`HomSpace::basis_morphism`] or [`HomSpace::basis_iter`] to
+    /// take fewer.
     pub fn basis(&self) -> &[Morphism] {
-        &self.basis
+        self.basis.get_or_init(|| self.basis_iter().collect())
+    }
+
+    /// The whole basis, materialized and taken by value.
+    pub fn into_basis(self) -> Vec<Morphism> {
+        self.into_parts().1
+    }
+
+    /// The flat rows and the whole basis, both taken by value, so a caller that
+    /// keeps the two does not copy the rows.
+    pub(crate) fn into_parts(self) -> (DenseMat, Vec<Morphism>) {
+        let HomSpace {
+            source,
+            target,
+            flat,
+            basis,
+        } = self;
+        let basis = basis.into_inner().unwrap_or_else(|| {
+            (0..flat.rows())
+                .map(|i| morphism_from_flat(&source, &target, flat.row(i)))
+                .collect()
+        });
+        (flat, basis)
     }
 
     /// Whether coordinates transport verbatim between the two spaces: sources
@@ -235,9 +402,13 @@ impl HomSpace {
     /// # Panics
     /// Panics unless `coords` has length [`HomSpace::dim`].
     pub fn morphism(&self, coords: &[Fp]) -> Morphism {
-        assert_eq!(coords.len(), self.dim(), "morphism: coordinate count");
+        assert_eq!(
+            coords.len(),
+            self.dim(),
+            "morphism: needs one coordinate per basis element"
+        );
         let field = self.source.field();
-        let row = combine_rows(&self.flat, coords, &field);
+        let row = row_times(coords, &self.flat, &field);
         morphism_from_flat(&self.source, &self.target, &row)
     }
 
@@ -257,21 +428,7 @@ impl HomSpace {
     /// their flat rows. Errors when a spanning morphism has an endpoint that
     /// is not the matching endpoint of this space.
     pub fn subspace(&self, spanning: &[Morphism]) -> Result<HomSubspace, HomSpaceError> {
-        for f in spanning {
-            check_endpoints(&self.source, &self.target, f)?;
-        }
-        let field = self.source.field();
-        let rows: Vec<Vec<Fp>> = spanning.iter().map(flat_row).collect();
-        let stacked = if rows.is_empty() {
-            DenseMat::zero(0, self.flat.cols())
-        } else {
-            DenseMat::from_rows(&rows)
-        };
-        Ok(HomSubspace {
-            source: self.source.clone(),
-            target: self.target.clone(),
-            basis: stacked.row_space_basis(&field),
-        })
+        HomSubspace::spanned_by(&self.source, &self.target, spanning)
     }
 
     /// The whole space as a subspace of itself.
@@ -312,6 +469,34 @@ impl PartialEq for HomSubspace {
 impl Eq for HomSubspace {}
 
 impl HomSubspace {
+    /// The subspace of `Hom(source, target)` spanned by the given morphisms,
+    /// stored as the RREF of their flat rows.
+    ///
+    /// The `hom_rows` rows play no part, so a caller that needs only a span
+    /// skips building the whole [`HomSpace`]. Errors when a spanning morphism
+    /// has an endpoint that is not the matching module (by [`Module::ptr_eq`]).
+    pub(crate) fn spanned_by(
+        source: &Module,
+        target: &Module,
+        spanning: &[Morphism],
+    ) -> Result<HomSubspace, HomSpaceError> {
+        for f in spanning {
+            check_endpoints(source, target, f)?;
+        }
+        let field = source.field();
+        let rows: Vec<Vec<Fp>> = spanning.iter().map(flat_row).collect();
+        let stacked = if rows.is_empty() {
+            DenseMat::zero(0, flat_width(source, target))
+        } else {
+            DenseMat::from_rows(&rows)
+        };
+        Ok(HomSubspace {
+            source: source.clone(),
+            target: target.clone(),
+            basis: stacked.row_space_basis(&field),
+        })
+    }
+
     /// The source module of the parent space.
     #[inline]
     pub fn source(&self) -> &Module {
@@ -352,13 +537,13 @@ impl HomSubspace {
     }
 
     /// The solving coordinates of `f` over the RREF basis, or `None` when `f`
-    /// lies outside the subspace. A caller rechecks membership by multiplying
-    /// the coordinates against [`HomSubspace::rref_basis`]. Errors when an
+    /// lies outside the subspace. To recheck membership, multiply the
+    /// coordinates against [`HomSubspace::rref_basis`]. Errors when an
     /// endpoint of `f` does not match (by [`Module::ptr_eq`]).
     pub fn witness_contains(&self, f: &Morphism) -> Result<Option<Vec<Fp>>, HomSpaceError> {
         check_endpoints(&self.source, &self.target, f)?;
         let field = self.source.field();
-        Ok(self.basis.transpose().solve(&flat_row(f), &field))
+        Ok(rref_coords(&self.basis, &flat_row(f), &field))
     }
 
     /// The quotient of this subspace by `sub`, with the complement built by
@@ -373,11 +558,8 @@ impl HomSubspace {
             return Err(HomSpaceError::IncompatibleSubspaces);
         }
         let field = self.source.field();
-        let basis_t = self.basis.transpose();
-        for r in 0..sub.basis.rows() {
-            if basis_t.solve(sub.basis.row(r), &field).is_none() {
-                return Err(HomSpaceError::NotContained);
-            }
+        if rref_coords_many(&self.basis, &sub.basis, &field).is_none() {
+            return Err(HomSpaceError::NotContained);
         }
         let complement = deterministic_complement(&self.basis, &sub.basis, &field);
         Ok(HomQuotient {
@@ -437,9 +619,13 @@ impl HomQuotient {
     /// # Panics
     /// Panics unless `coords` has length [`HomQuotient::dim`].
     pub fn representative(&self, coords: &[Fp]) -> Morphism {
-        assert_eq!(coords.len(), self.dim(), "representative: coordinate count");
+        assert_eq!(
+            coords.len(),
+            self.dim(),
+            "representative: needs one coordinate per complement row"
+        );
         let field = self.subspace.source.field();
-        let row = combine_rows(&self.complement, coords, &field);
+        let row = row_times(coords, &self.complement, &field);
         morphism_from_flat(&self.subspace.source, &self.subspace.target, &row)
     }
 
@@ -462,7 +648,7 @@ impl HomQuotient {
             return Err(HomSpaceError::OutsideSubspace);
         };
         let coords = x[..self.complement.rows()].to_vec();
-        let member_row = combine_rows(&self.subspace.basis, &x[self.complement.rows()..], &field);
+        let member_row = row_times(&x[self.complement.rows()..], &self.subspace.basis, &field);
         let member = morphism_from_flat(&self.subspace.source, &self.subspace.target, &member_row);
         Ok((coords, member))
     }
@@ -559,12 +745,12 @@ mod tests {
         let space = HomSpace::new(&p0, &s0).unwrap();
         let p0_copy = Module::projective(&algebra, 0);
         let s0_copy = Module::simple(&algebra, 0);
-        let wrong_source = hom(&p0_copy, &s0).unwrap().remove(0);
+        let wrong_source = HomSpace::new(&p0_copy, &s0).unwrap().basis_morphism(0);
         assert_eq!(
             space.coords(&wrong_source).unwrap_err(),
             HomSpaceError::SourceMismatch
         );
-        let wrong_target = hom(&p0, &s0_copy).unwrap().remove(0);
+        let wrong_target = HomSpace::new(&p0, &s0_copy).unwrap().basis_morphism(0);
         assert_eq!(
             space.coords(&wrong_target).unwrap_err(),
             HomSpaceError::TargetMismatch
@@ -657,7 +843,7 @@ mod tests {
             let rebuilt = morphism_from_flat(
                 space.source(),
                 space.target(),
-                &combine_rows(sub.rref_basis(), &witness, &field),
+                &row_times(&witness, sub.rref_basis(), &field),
             );
             assert_eq!(rebuilt, f, "witness coordinates rebuild the morphism");
             if space.dim() > 2 {

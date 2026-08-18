@@ -14,15 +14,15 @@ use std::fmt;
 /// Schema identifier stored in [`Certificate::schema`].
 pub const CERT_SCHEMA: &str = "auslander-completion-certificate-v1";
 
-/// Maximum container nesting the parser accepts. The certificate schema
-/// nests a fixed small number of levels; the bound stops stack exhaustion
-/// from adversarial bytes.
+/// Maximum container nesting the parser accepts. The schema needs seven
+/// levels at its deepest, an arrow word inside a step of an ambiguity
+/// trace, so the bound leaves wide headroom and still stops stack
+/// exhaustion from adversarial bytes.
 pub const MAX_JSON_DEPTH: usize = 64;
 
 /// A relation as certificate data: terms `(coefficient, word)` with the
 /// coefficient as its canonical representative in `0..p` and the word as
-/// arrow indices. Terms are in strictly descending order under the sealed
-/// order.
+/// arrow indices. Terms descend strictly under the sealed order.
 pub type RelationData = Vec<(u64, Vec<u32>)>;
 
 /// The quiver as certificate data: vertex count and `(source, target)`
@@ -107,7 +107,7 @@ pub struct AutomatonData {
 /// The finiteness claim of the certificate. `Infinite` carries a witness:
 /// `prefix` reads from the start state of its source vertex to a state on a
 /// cycle, and `cycle` returns to exactly that state, so every
-/// `prefix·cycle^k` is an irreducible word.
+/// `prefix·cycle^k` is a normal word.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FinitenessData {
     Finite,
@@ -239,7 +239,7 @@ impl Certificate {
 
     /// Parses a certificate from JSON text.
     ///
-    /// The parser is strict. It rejects duplicate keys, unknown keys,
+    /// Decoding is strict. It rejects duplicate keys, unknown keys,
     /// missing keys, trailing commas, wrong types, string escapes,
     /// non-ASCII strings, signs, floats, and numbers with leading zeros.
     /// It rejects containers nested deeper than [`MAX_JSON_DEPTH`] levels
@@ -286,7 +286,7 @@ fn push_string(out: &mut String, s: &str) {
     assert!(
         s.chars()
             .all(|c| c.is_ascii() && !c.is_ascii_control() && c != '"' && c != '\\'),
-        "certificate strings must be plain ASCII without quotes or backslashes"
+        "certificate strings must be printable ASCII without quotes or backslashes"
     );
     out.push('"');
     out.push_str(s);

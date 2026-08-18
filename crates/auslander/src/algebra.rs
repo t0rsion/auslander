@@ -1,90 +1,63 @@
 //! Bound quiver algebras `kQ/I` with a certificate-verified normal-word basis.
 //!
-//! Two types live here. [`MonomialPresentation`] is the field-free analysis
-//! type for monomial ideals: forbidden words, the standard-path automaton, and
-//! the exact finiteness decision. [`Algebra`] is the sole runtime algebra
-//! type: it owns a prime field, the reduced Groebner basis of its ideal, the
-//! normal-word basis, and per-arrow multiplication tables. Every `Algebra`
-//! comes from one pipeline: completion emits a certificate, the independent
-//! verifier checks the certificate bytes, and the constructor builds the
-//! tables from the verified data. Nothing in this module truncates silently.
+//! [`Algebra`] is the sole runtime algebra type: it owns a prime field, the
+//! reduced Groebner basis of its ideal, the normal-word basis, and per-arrow
+//! multiplication tables. Every `Algebra` comes from one pipeline: completion
+//! emits a certificate, the independent verifier checks it, and the
+//! constructor builds the tables from the verified data. Nothing in this
+//! module truncates silently.
+//!
+//! Monomial input takes the same pipeline. [`monomial_presentation`] turns a
+//! [`crate::monomial::MonomialIdeal`] into a [`Presentation`] of one-term
+//! relations, and [`monomial_limits`] derives budgets adequate for it. The
+//! named constructors ([`linear_an`], [`kronecker`], and the rest) are that
+//! pair applied to the families of [`crate::monomial`].
 
 use std::fmt;
 use std::sync::Arc;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
-use crate::certificate::Certificate;
+use crate::certificate::{Certificate, FinitenessData, RelationData};
 use crate::completion::{CompletionLimits, Outcome, TruncationDiagnostics, complete};
 use crate::field::{Fp, PrimeField};
 use crate::linalg::DenseMat;
+use crate::monomial::{
+    MonomialError, MonomialIdeal, an_with_relations_ideal, cyclic_nakayama_ideal, kronecker_ideal,
+    linear_an_ideal, linear_nakayama_ideal, radical_square_zero_cycle_ideal, truncated_poly_ideal,
+};
 use crate::order::word_cmp;
+use crate::profile::{Site, hit};
 use crate::quiver::{ArrowId, PathWord, Quiver, QuiverError};
 use crate::relation::{Presentation, Relation, RelationError};
-use crate::verify::{CycleWitness, VerifiedCompletion, VerifyError, verify};
+use crate::verify::{CycleWitness, VerifiedCompletion, VerifyError, verify_certificate};
 
-/// Index into [`Algebra::basis`] (and [`MonomialPresentation::basis`]).
+/// Index into [`Algebra::basis`].
 pub type BasisIdx = usize;
-
-/// Rejected monomial presentation input.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AlgebraError {
-    /// Forbidden word `index` has length < 2. Admissibility needs `I ⊆ J²`.
-    ForbiddenWordTooShort { index: usize, len: usize },
-    /// Forbidden word `index` is not a path in the quiver.
-    ForbiddenWordInvalid { index: usize, error: QuiverError },
-    /// The standard-path language is infinite; this crate supports
-    /// finite-dimensional algebras only.
-    InfiniteDimensional,
-    /// The Kupisch series violates the conditions documented on the
-    /// constructor.
-    InvalidKupisch { reason: String },
-    /// No path with this start and length exists in the linear quiver.
-    ZeroPathOutOfRange { start: usize, len: usize },
-}
-
-impl fmt::Display for AlgebraError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ForbiddenWordTooShort { index, len } => write!(
-                f,
-                "forbidden word {index} has length {len}; admissibility needs length >= 2"
-            ),
-            Self::ForbiddenWordInvalid { index, error } => {
-                write!(f, "forbidden word {index} is not a path: {error}")
-            }
-            Self::InfiniteDimensional => f.write_str(
-                "the standard-path language is infinite; this crate supports finite-dimensional algebras only",
-            ),
-            Self::InvalidKupisch { reason } => write!(f, "invalid Kupisch series: {reason}"),
-            Self::ZeroPathOutOfRange { start, len } => write!(
-                f,
-                "no path of length {len} starting at vertex {start} in the linear quiver"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for AlgebraError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::ForbiddenWordInvalid { error, .. } => Some(error),
-            _ => None,
-        }
-    }
-}
 
 /// Rejected [`Algebra`] construction input, or an exhausted or defective
 /// pipeline run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AlgebraBuildError {
-    /// A monomial presentation was rejected before the pipeline ran.
-    Monomial(AlgebraError),
+    /// A monomial family parameter was rejected before the pipeline ran.
+    Monomial(MonomialError),
     /// A relation or presentation was rejected before the pipeline ran.
     Relation(RelationError),
-    /// The verifier proved the quotient infinite dimensional. This variant
-    /// carries the certificate of the completed basis alongside the cycle
-    /// witness.
+    /// The ideal is not admissible: the arrow ideal `J` is not nilpotent.
+    /// `J^stable_power` has dimension `dimension` and equals every higher
+    /// power. Only the subspace chain decides this. Leading words cannot:
+    /// for one loop `x`, the ideals `(x³)` and `(x³ - x²)` share every
+    /// leading word, and the second has `J² = J³ = span(x²)`.
+    NonAdmissible {
+        stable_power: usize,
+        dimension: usize,
+    },
+    /// The verified certificate's `input_relations` differ from the
+    /// relations of the presentation, first at `index`. Nothing else in the
+    /// certificate ties it to the caller's request.
+    InputRelationsMismatch { index: usize },
+    /// The verifier proved the quotient infinite dimensional. It carries the
+    /// certificate of the completed basis and the cycle witness.
     InfiniteDimensional {
         certificate: Box<Certificate>,
         witness: CycleWitness,
@@ -99,8 +72,20 @@ pub enum AlgebraBuildError {
 impl fmt::Display for AlgebraBuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Monomial(error) => write!(f, "monomial presentation rejected: {error}"),
+            Self::Monomial(error) => write!(f, "monomial input rejected: {error}"),
             Self::Relation(error) => write!(f, "relation rejected: {error}"),
+            Self::NonAdmissible {
+                stable_power,
+                dimension,
+            } => write!(
+                f,
+                "the ideal is not admissible: J^{stable_power} has dimension {dimension} \
+                 and equals every higher power, so J is not nilpotent"
+            ),
+            Self::InputRelationsMismatch { index } => write!(
+                f,
+                "the certificate's input relations differ from the presentation at index {index}"
+            ),
             Self::InfiniteDimensional { witness, .. } => write!(
                 f,
                 "the quotient is infinite dimensional: prefix {:?}, cycle {:?}",
@@ -132,175 +117,37 @@ impl std::error::Error for AlgebraBuildError {
     }
 }
 
-/// The field-free combinatorics of a monomial ideal: `kQ/(forbidden)` as an
-/// analysis object, not a runtime algebra.
+/// Rejects a certificate whose `input_relations` are not the relations of
+/// `presentation`, term for term in stored order.
 ///
-/// The basis consists of all standard paths: paths containing no forbidden
-/// word as a contiguous factor. Construction either certifies that the basis
-/// is finite or fails. The basis order is fixed: `basis[v]` is the trivial
-/// path `e_v` for `v < num_vertices`; the remaining entries are sorted by
-/// length, then source vertex, then lexicographic arrow word. Build a runtime
-/// [`Algebra`] from it with [`Algebra::from_monomial`].
-///
-/// ```
-/// use auslander::algebra::MonomialPresentation;
-/// use auslander::quiver::{ArrowId, Quiver};
-/// let loop_x = Quiver::new(1, &[(0, 0)]).unwrap();
-/// let m = MonomialPresentation::new(loop_x, vec![vec![ArrowId(0); 2]]).unwrap();
-/// assert_eq!(m.dim(), 2); // k[x]/(x²): basis e, x
-/// ```
-#[derive(Debug)]
-pub struct MonomialPresentation {
-    quiver: Quiver,
-    forbidden: Vec<Vec<ArrowId>>,
-    basis: Vec<PathWord>,
-    index_of: FxHashMap<Vec<ArrowId>, BasisIdx>,
-    from: Vec<Vec<BasisIdx>>,
-    to: Vec<Vec<BasisIdx>>,
-    between: Vec<Vec<Vec<BasisIdx>>>,
-}
-
-impl MonomialPresentation {
-    /// Builds `kQ/(forbidden)` with a certified finite standard-path basis.
-    ///
-    /// Forbidden words must be composable paths of length >= 2. This
-    /// constructor drops any word that contains another forbidden word as a
-    /// factor; the generated ideal is unchanged. Errors with
-    /// [`AlgebraError::InfiniteDimensional`] when the standard-path language
-    /// is infinite. Cycle detection on the forbidden-prefix automaton decides
-    /// this exactly.
-    pub fn new(
-        quiver: Quiver,
-        forbidden: Vec<Vec<ArrowId>>,
-    ) -> Result<MonomialPresentation, AlgebraError> {
-        for (index, word) in forbidden.iter().enumerate() {
-            if word.len() < 2 {
-                return Err(AlgebraError::ForbiddenWordTooShort {
-                    index,
-                    len: word.len(),
-                });
-            }
-            if let Err(error) = PathWord::from_arrows(&quiver, word) {
-                return Err(AlgebraError::ForbiddenWordInvalid { index, error });
-            }
-        }
-        let forbidden = minimal_words(forbidden);
-        let automaton = Automaton::build(&quiver, &forbidden);
-        if automaton.has_cycle() {
-            return Err(AlgebraError::InfiniteDimensional);
-        }
-
-        let n = quiver.num_vertices() as usize;
-        let mut basis: Vec<PathWord> = (0..quiver.num_vertices())
-            .map(PathWord::trivial_unchecked)
-            .collect();
-        let mut state: Vec<usize> = (0..n).collect();
-        let mut level_start = 0;
-        while level_start < basis.len() {
-            let level_end = basis.len();
-            for i in level_start..level_end {
-                let word = basis[i].arrows().to_vec();
-                let target = basis[i].target();
-                let s = state[i];
-                for &a in quiver.arrows_from(target) {
-                    if let Some(next) = automaton.step(s, a) {
-                        let mut extended = word.clone();
-                        extended.push(a);
-                        basis.push(PathWord::from_arrows_unchecked(&quiver, extended));
-                        state.push(next);
-                    }
-                }
-            }
-            level_start = level_end;
-        }
-
-        let (index_of, from, to, between) = index_basis(&quiver, &basis);
-        Ok(MonomialPresentation {
-            quiver,
-            forbidden,
-            basis,
-            index_of,
-            from,
-            to,
-            between,
-        })
-    }
-
-    /// `dim_k A` = number of standard paths.
-    #[inline]
-    pub fn dim(&self) -> usize {
-        self.basis.len()
-    }
-
-    #[inline]
-    pub fn quiver(&self) -> &Quiver {
-        &self.quiver
-    }
-
-    /// The standard-path basis, in the order documented on the type.
-    #[inline]
-    pub fn basis(&self) -> &[PathWord] {
-        &self.basis
-    }
-
-    /// The minimal forbidden words, sorted by length then arrow word.
-    #[inline]
-    pub fn forbidden(&self) -> &[Vec<ArrowId>] {
-        &self.forbidden
-    }
-
-    /// Basis index of `path`: `Ok(Some(i))` when the path is standard,
-    /// `Ok(None)` when it is a valid path of the quiver but zero in the algebra
-    /// (contains a forbidden factor), and `Err` when it is not a path of this
-    /// presentation's quiver at all (see [`PathWord::validate_in`]).
-    pub fn path_index(&self, path: &PathWord) -> Result<Option<BasisIdx>, QuiverError> {
-        path.validate_in(&self.quiver)?;
-        if path.is_trivial() {
-            Ok(Some(path.source() as usize))
-        } else {
-            Ok(self.index_of.get(path.arrows()).copied())
-        }
-    }
-
-    /// Basis index of `e_v`; equals `v`. Panics if `v >= num_vertices`.
-    pub fn vertex_idempotent(&self, v: u32) -> BasisIdx {
-        assert!(v < self.quiver.num_vertices());
-        v as usize
-    }
-
-    /// Basis indices of paths with source `v`, the basis of `e_v A = P_v`.
-    /// Panics if `v >= num_vertices`.
-    #[inline]
-    pub fn paths_from(&self, v: u32) -> &[BasisIdx] {
-        &self.from[v as usize]
-    }
-
-    /// Basis indices of paths with target `v`, the basis of `A e_v`.
-    /// Panics if `v >= num_vertices`.
-    #[inline]
-    pub fn paths_to(&self, v: u32) -> &[BasisIdx] {
-        &self.to[v as usize]
-    }
-
-    /// Basis indices of paths from `u` to `v`, the basis of `e_u A e_v`.
-    /// Panics if either vertex is out of range.
-    #[inline]
-    pub fn paths_between(&self, u: u32, v: u32) -> &[BasisIdx] {
-        &self.between[u as usize][v as usize]
-    }
-
-    /// Cartan matrix: `c[i][j] = dim e_i A e_j`, the number of standard
-    /// paths from `i` to `j`; row `i` is the dimension vector of the
-    /// projective `P_i = e_i A`.
-    pub fn cartan_matrix(&self) -> Vec<Vec<usize>> {
-        self.between
-            .iter()
-            .map(|row| row.iter().map(Vec::len).collect())
-            .collect()
+/// The certificate chain ties `origin` to `input_relations` and
+/// `input_relations` to the ideal through `membership`. This comparison is
+/// the one link that ties `input_relations` to what the caller asked for.
+fn check_input_relations(
+    presentation: &Presentation,
+    certificate: &Certificate,
+) -> Result<(), AlgebraBuildError> {
+    let asked = presentation.relations();
+    let found = &certificate.input_relations;
+    let differs =
+        |index: &usize| asked.get(*index).map(relation_data).as_ref() != found.get(*index);
+    match (0..asked.len().max(found.len())).find(differs) {
+        Some(index) => Err(AlgebraBuildError::InputRelationsMismatch { index }),
+        None => Ok(()),
     }
 }
 
-/// Index maps shared by both basis-carrying types: word to index for the
+/// A relation as certificate data: raw coefficients and arrow-id words, in
+/// the stored descending order.
+fn relation_data(relation: &Relation) -> RelationData {
+    relation
+        .terms()
+        .iter()
+        .map(|(coeff, word)| (coeff.raw(), word.arrows().iter().map(|a| a.0).collect()))
+        .collect()
+}
+
+/// The index maps of a normal-word basis: word to index for the
 /// non-trivial words, plus the source, target, and component partitions.
 type BasisIndexes = (
     FxHashMap<Vec<ArrowId>, BasisIdx>,
@@ -331,8 +178,11 @@ fn index_basis(quiver: &Quiver, basis: &[PathWord]) -> BasisIndexes {
 /// The runtime algebra `kQ/I` over a checked prime field.
 ///
 /// Construction runs the full pipeline: completion of the relations into the
-/// reduced Groebner basis, certificate emission, and independent verification
-/// of the certificate bytes. The basis consists of the normal words (words
+/// reduced Groebner basis, certificate emission, independent verification of
+/// the certificate, and the admissibility decision. The ideal is
+/// admissible: `I ⊆ J²` holds term by term, and the arrow ideal `J` is
+/// nilpotent, which every construction path decides by iterating the radical
+/// step. The basis consists of the normal words (words
 /// irreducible by the Groebner leading words) in the fixed order: `basis[v]`
 /// is the trivial path `e_v` for `v < num_vertices`; the remaining entries
 /// are sorted by length, then source vertex, then lexicographic arrow word.
@@ -356,24 +206,36 @@ pub struct Algebra {
     from: Vec<Vec<BasisIdx>>,
     to: Vec<Vec<BasisIdx>>,
     between: Vec<Vec<Vec<BasisIdx>>>,
-    // right_mul[i][a]: NF(basis[i]·a); left_mul[a][i]: NF(a·basis[i]).
-    // Rows are sorted by basis index. Every entry of a row shares the source
-    // of basis[i] (resp. the source of a) and the target of a (resp. of
-    // basis[i]).
+    // right_mul[i][a] is NF(basis[i]·a) and left_mul[a][i] is NF(a·basis[i]),
+    // each row sorted by basis index. Every word in a right_mul row runs from
+    // the source of basis[i] to the target of a; every word in a left_mul row
+    // runs from the source of a to the target of basis[i].
     right_mul: Vec<Vec<Vec<(BasisIdx, Fp)>>>,
     left_mul: Vec<Vec<Vec<(BasisIdx, Fp)>>>,
+    // The chain J^0 ⊇ J^1 ⊇ ... ⊇ J^d = 0, one entry per power, built once at
+    // construction by radical_chain. The last index d is the nilpotency
+    // degree. An Algebra is immutable and lives behind an Arc, so every reader
+    // shares this one copy.
+    radical_powers: Vec<Vec<Vec<DenseMat>>>,
 }
 
 impl Algebra {
-    /// Runs the full pipeline on `presentation`: completion, certificate
-    /// serialization, verification of the bytes, and table construction from
+    /// Runs the full pipeline on `presentation`: completion, independent
+    /// verification of the emitted certificate, and table construction from
     /// the verified data.
+    ///
+    /// Verification goes through [`crate::verify::verify_certificate`], which
+    /// is the same verifier [`crate::verify::verify`] runs after parsing
+    /// bytes. The engine shares no algorithm with it.
     ///
     /// Errors: [`AlgebraBuildError::Truncated`] when a budget of `limits`
     /// runs out, [`AlgebraBuildError::InfiniteDimensional`] when the verifier
-    /// proves the quotient infinite dimensional, and
-    /// [`AlgebraBuildError::Verification`] when the verifier rejects the
-    /// certificate for any other reason (an engine defect).
+    /// proves the quotient infinite dimensional,
+    /// [`AlgebraBuildError::InputRelationsMismatch`] when the verified
+    /// certificate is not about `presentation`,
+    /// [`AlgebraBuildError::NonAdmissible`] when the arrow ideal is not
+    /// nilpotent, and [`AlgebraBuildError::Verification`] when the verifier
+    /// rejects the certificate for any other reason (an engine defect).
     ///
     /// The algebra stores `limits` as its effective completion limits, and
     /// every derived completion, [`crate::opposite::opposite`] included,
@@ -382,17 +244,33 @@ impl Algebra {
         presentation: Presentation,
         limits: &CompletionLimits,
     ) -> Result<Arc<Algebra>, AlgebraBuildError> {
+        hit(Site::AlgebraNew);
         let certificate = match complete(&presentation, limits) {
             Outcome::Complete(certificate) => certificate,
             Outcome::Truncated(diagnostics) => {
                 return Err(AlgebraBuildError::Truncated(diagnostics));
             }
         };
-        match verify(&certificate.to_canonical_json()) {
-            Ok(verified) => Ok(Algebra::from_verified_with_limits(verified, limits)),
+        // verify_certificate consumes the certificate, and the infinite case
+        // has to hand it back. The verifier returns InfiniteDimensional only
+        // for a certificate whose own finiteness claim is Infinite (a Finite
+        // claim over a cyclic automaton is FinitenessClaim instead), so a copy
+        // taken in exactly that case covers the error path and the finite path
+        // copies nothing.
+        let spare = match certificate.finiteness {
+            FinitenessData::Infinite { .. } => Some(certificate.clone()),
+            FinitenessData::Finite => None,
+        };
+        match verify_certificate(certificate) {
+            Ok(verified) => {
+                check_input_relations(&presentation, verified.certificate())?;
+                Algebra::from_verified_with_limits(verified, limits)
+            }
             Err(VerifyError::InfiniteDimensional { witness }) => {
                 Err(AlgebraBuildError::InfiniteDimensional {
-                    certificate: Box::new(certificate),
+                    certificate: Box::new(
+                        spare.expect("only an infinite finiteness claim yields this error"),
+                    ),
                     witness,
                 })
             }
@@ -403,15 +281,19 @@ impl Algebra {
     /// Builds the algebra from an already verified completion. This is the
     /// dump, reload, and reverify path: serialize with
     /// [`Algebra::certificate`], later call [`crate::verify::verify`] on the
-    /// bytes, and rebuild from the token. Infallible because verification
-    /// already proved the quotient finite dimensional.
+    /// bytes, and rebuild from the token.
+    ///
+    /// Errors with [`AlgebraBuildError::NonAdmissible`] when the arrow ideal
+    /// of the verified quotient is not nilpotent. Verification proves the
+    /// quotient finite dimensional, which is weaker: it decides that from
+    /// the leading words alone.
     ///
     /// The rebuilt algebra uses [`CompletionLimits::default`] as its
     /// effective limits. This is policy: certificate bytes are untrusted
     /// input, and untrusted input must never carry or select downstream
     /// resource budgets. Use [`Algebra::from_verified_with_limits`] when a
     /// reload flow wants to preserve the budgets of the original build.
-    pub fn from_verified(verified: VerifiedCompletion) -> Arc<Algebra> {
+    pub fn from_verified(verified: VerifiedCompletion) -> Result<Arc<Algebra>, AlgebraBuildError> {
         Algebra::from_verified_with_limits(verified, &CompletionLimits::default())
     }
 
@@ -422,7 +304,8 @@ impl Algebra {
     pub fn from_verified_with_limits(
         verified: VerifiedCompletion,
         limits: &CompletionLimits,
-    ) -> Arc<Algebra> {
+    ) -> Result<Arc<Algebra>, AlgebraBuildError> {
+        hit(Site::AlgebraFromVerified);
         let quiver = verified.quiver().clone();
         let field = verified.field();
         let relations: Vec<Relation> = verified
@@ -452,6 +335,7 @@ impl Algebra {
             between,
             right_mul: Vec::new(),
             left_mul: Vec::new(),
+            radical_powers: Vec::new(),
         };
         let num_arrows = algebra.quiver.num_arrows();
         let mut right_mul = vec![vec![Vec::new(); num_arrows]; algebra.basis.len()];
@@ -470,36 +354,56 @@ impl Algebra {
         }
         algebra.right_mul = right_mul;
         algebra.left_mul = left_mul;
-        Arc::new(algebra)
+        // radical_chain needs right_mul and between, and nothing after it, so
+        // it is the last field filled.
+        algebra.radical_powers = algebra.radical_chain()?;
+        Ok(Arc::new(algebra))
     }
 
-    /// Routes a monomial presentation through the same pipeline: each
-    /// forbidden word becomes a one-term relation, then [`Algebra::new`]
-    /// runs with `limits`. The resulting basis equals the standard-path
-    /// basis of `presentation` word for word.
-    /// [`monomial_completion_limits`] derives limits that are always
-    /// adequate for a monomial presentation.
-    pub fn from_monomial(
-        field: PrimeField,
-        presentation: &MonomialPresentation,
-        limits: &CompletionLimits,
-    ) -> Result<Arc<Algebra>, AlgebraBuildError> {
-        let quiver = presentation.quiver().clone();
-        let relations = presentation
-            .forbidden()
-            .iter()
-            .map(|word| Relation::new(&quiver, field, vec![(field.one(), word.clone())]))
-            .collect::<Result<Vec<Relation>, RelationError>>()
-            .map_err(AlgebraBuildError::Relation)?;
-        let bundled =
-            Presentation::new(quiver, field, relations).map_err(AlgebraBuildError::Relation)?;
-        let algebra = Algebra::new(bundled, limits)?;
-        debug_assert_eq!(
-            algebra.basis(),
-            presentation.basis(),
-            "the normal words of a monomial ideal are its standard paths"
-        );
-        Ok(algebra)
+    /// The chain `J^0 ⊇ J^1 ⊇ ... ⊇ J^d = 0`, entry `k` holding `J^k`, or a
+    /// rejection when no `d` with `J^d = 0` exists.
+    ///
+    /// The chain is descending, so within `dim` steps it either reaches zero
+    /// or repeats a nonzero dimension. A repeat means `J^k = J^{k+1}`, hence
+    /// `J^k = J^m` for every `m >= k`, so `J` is not nilpotent and the ideal
+    /// is not admissible. Multiplication tables are the only input: leading
+    /// words alone cannot decide this, because `(x³)` and `(x³ - x²)` share
+    /// every leading word and only the first is admissible.
+    ///
+    /// The walk runs once, at construction. Every reader of a radical power
+    /// indexes the stored chain, so the cost is paid one time per algebra
+    /// rather than once per query.
+    fn radical_chain(&self) -> Result<Vec<Vec<Vec<DenseMat>>>, AlgebraBuildError> {
+        let total =
+            |power: &[Vec<DenseMat>]| -> usize { power.iter().flatten().map(DenseMat::rows).sum() };
+        let n = self.quiver.num_vertices() as usize;
+        // J^0 is A itself, and paths_between(u, v) is a basis of e_u A e_v, so
+        // the component of J^0 at (u, v) is the identity.
+        let identity: Vec<Vec<DenseMat>> = (0..n)
+            .map(|u| {
+                (0..n)
+                    .map(|v| DenseMat::identity(self.between[u][v].len()))
+                    .collect()
+            })
+            .collect();
+        let mut chain = vec![identity];
+        for _ in 0..=self.dim() {
+            let dimension = total(chain.last().expect("the chain starts at J^0"));
+            if dimension == 0 {
+                return Ok(chain);
+            }
+            let next = self.radical_step(chain.last().expect("the chain starts at J^0"));
+            let next_dimension = total(&next);
+            debug_assert!(next_dimension <= dimension, "J^{{k+1}} is contained in J^k");
+            if next_dimension == dimension {
+                return Err(AlgebraBuildError::NonAdmissible {
+                    stable_power: chain.len() - 1,
+                    dimension,
+                });
+            }
+            chain.push(next);
+        }
+        unreachable!("a strictly descending chain of subspaces of A reaches zero within dim steps")
     }
 
     /// The verified certificate this algebra was built from. Serialize it
@@ -620,6 +524,7 @@ impl Algebra {
     /// sorted by basis index. Errors when `word` is not a path of this
     /// algebra's quiver.
     pub fn nf_word(&self, word: &PathWord) -> Result<Vec<(BasisIdx, Fp)>, QuiverError> {
+        hit(Site::NfWord);
         word.validate_in(&self.quiver)?;
         if word.is_trivial() {
             return Ok(vec![(word.source() as usize, self.field.one())]);
@@ -632,6 +537,7 @@ impl Algebra {
     /// compose or the product reduces to zero. Panics on out-of-range
     /// indices.
     pub fn mul_basis(&self, p: BasisIdx, q: BasisIdx) -> Vec<(BasisIdx, Fp)> {
+        hit(Site::MulBasis);
         let (left, right) = (&self.basis[p], &self.basis[q]);
         if left.target() != right.source() {
             return Vec::new();
@@ -647,11 +553,12 @@ impl Algebra {
         self.nf_arrow_word(word)
     }
 
-    /// Division against the reduced Groebner basis. `word` is nonempty and
-    /// composable in the quiver. Correctness of the result rests on the
-    /// verified diamond property: any reduction order gives the same normal
-    /// form, so the leftmost factor of the first matching basis element is
-    /// as good as any.
+    /// Divides `word` against the reduced Groebner basis. Requires `word`
+    /// nonempty and composable in the quiver.
+    ///
+    /// The verified diamond property makes every reduction order give the
+    /// same normal form, so reducing the first matching basis element at its
+    /// leftmost factor is as good as any other choice.
     fn nf_arrow_word(&self, word: Vec<ArrowId>) -> Vec<(BasisIdx, Fp)> {
         let mut poly: Vec<(Fp, Vec<ArrowId>)> = vec![(self.field.one(), word)];
         let mut out: Vec<(BasisIdx, Fp)> = Vec::new();
@@ -692,60 +599,41 @@ impl Algebra {
         })
     }
 
-    /// A row-reduced basis of `e_u · J^k · e_v` in the coordinates of
-    /// [`Self::paths_between`]`(u, v)`. `J^0` is the algebra itself, so
-    /// `k = 0` gives the identity. Panics if either vertex is out of range.
+    /// The stored component of `e_u · J^k · e_v`, one spanning vector per
+    /// row, in the coordinates of [`Self::paths_between`]`(u, v)`. `J^0` is
+    /// the algebra itself, so `k = 0` gives the identity. Panics if either
+    /// vertex is out of range.
     ///
     /// Row-space iteration computes `J^k`: `J^1` is the span of the
     /// non-trivial basis words and `J^{k+1}` is the span of `x·a` over `x`
-    /// spanning `J^k` and arrows `a`. Word length decides nothing here: an
-    /// inhomogeneous relation can place a short normal word inside a deep
-    /// radical power.
-    pub fn radical_power_component(&self, u: u32, v: u32, k: usize) -> Vec<Vec<Fp>> {
+    /// spanning `J^k` and arrows `a`. Word length does not decide radical
+    /// depth: an inhomogeneous relation can place a short normal word inside
+    /// a deep radical power.
+    ///
+    /// The iteration runs at construction, not here, and the matrix is
+    /// borrowed, so this method costs one index.
+    pub fn radical_power_matrix(&self, u: u32, v: u32, k: usize) -> &DenseMat {
         assert!(u < self.quiver.num_vertices() && v < self.quiver.num_vertices());
-        let power = self.radical_power(k);
-        let component = &power[u as usize][v as usize];
-        (0..component.rows())
-            .map(|r| component.row(r).to_vec())
-            .collect()
+        &self.radical_power(k)[u as usize][v as usize]
     }
 
-    /// The least `k` with `J^k = 0`. Finite for every constructed algebra:
-    /// the radical of a finite-dimensional algebra is nilpotent.
+    /// The least `k` with `J^k = 0`, read off the chain construction built.
+    /// Finite for every constructed algebra: an `Algebra` exists only when its
+    /// arrow ideal `J` is nilpotent. The Jacobson radical of a
+    /// finite-dimensional algebra is always nilpotent, but `J` is the arrow
+    /// ideal, and a quotient can be finite dimensional with `J` not nilpotent.
+    #[inline]
     pub fn nilpotency_degree(&self) -> usize {
-        let mut k = 0;
-        let mut power = self.radical_power(0);
-        loop {
-            let total: usize = power.iter().flatten().map(DenseMat::rows).sum();
-            if total == 0 {
-                return k;
-            }
-            let next = self.radical_step(&power);
-            let next_total: usize = next.iter().flatten().map(DenseMat::rows).sum();
-            assert!(
-                next_total < total,
-                "radical iteration stalled on a nonzero power; this is a bug in auslander"
-            );
-            power = next;
-            k += 1;
-        }
+        self.radical_powers.len() - 1
     }
 
     /// Row-reduced component matrices of `J^k`, indexed `[u][v]` with columns
     /// over `paths_between(u, v)`.
-    fn radical_power(&self, k: usize) -> Vec<Vec<DenseMat>> {
-        let n = self.quiver.num_vertices() as usize;
-        let mut power: Vec<Vec<DenseMat>> = (0..n)
-            .map(|u| {
-                (0..n)
-                    .map(|v| DenseMat::identity(self.between[u][v].len()))
-                    .collect()
-            })
-            .collect();
-        for _ in 0..k {
-            power = self.radical_step(&power);
-        }
-        power
+    ///
+    /// The stored chain stops at `J^d = 0`, and `J^k = 0` for every `k >= d`,
+    /// so an index past the end reads the last entry.
+    fn radical_power(&self, k: usize) -> &[Vec<DenseMat>] {
+        &self.radical_powers[k.min(self.nilpotency_degree())]
     }
 
     /// `J^{k+1}` from `J^k`: right-multiply every spanning row by every
@@ -791,7 +679,7 @@ impl Algebra {
                                 mat.set(r, c, value);
                             }
                         }
-                        mat.row_space_basis(&self.field)
+                        mat.into_row_space_basis(&self.field)
                     })
                     .collect()
             })
@@ -861,195 +749,88 @@ fn add_scaled(
     merged
 }
 
-/// Drops duplicate words and words containing another as a contiguous factor;
-/// the generated ideal is unchanged. The result is sorted by length, then
-/// lexicographically.
-fn minimal_words(mut words: Vec<Vec<ArrowId>>) -> Vec<Vec<ArrowId>> {
-    words.sort();
-    words.dedup();
-    words.sort_by_key(Vec::len);
-    let mut minimal: Vec<Vec<ArrowId>> = Vec::new();
-    for word in words {
-        let contains_kept = minimal
-            .iter()
-            .any(|v| word.windows(v.len()).any(|w| w == v.as_slice()));
-        if !contains_kept {
-            minimal.push(word);
-        }
-    }
-    minimal
-}
-
-/// Deterministic automaton recognizing standard paths.
+/// `ideal` as a [`Presentation`] over `field`: one monic one-term relation
+/// per forbidden word, in the ideal's own order.
 ///
-/// States `v < num_vertices`: "at vertex `v`, no forbidden-word progress".
-/// Remaining states: the nonempty proper prefixes of the (minimal) forbidden
-/// words. The state after reading a standard path is its longest suffix that
-/// is such a prefix. A transition is absent exactly when the arrow does not
-/// start at the state's vertex, or when appending it completes a forbidden
-/// word. Minimality of the forbidden set guarantees that no prefix state
-/// contains a forbidden factor, so every state is reachable from a start
-/// state. Any cycle then proves the standard-path language infinite.
-struct Automaton {
-    trans: Vec<Vec<Option<usize>>>,
-}
-
-impl Automaton {
-    fn build(quiver: &Quiver, forbidden: &[Vec<ArrowId>]) -> Automaton {
-        let n = quiver.num_vertices() as usize;
-        let mut prefixes: Vec<Vec<ArrowId>> = Vec::new();
-        let mut prefix_index: FxHashMap<Vec<ArrowId>, usize> = FxHashMap::default();
-        for word in forbidden {
-            for len in 1..word.len() {
-                let prefix = word[..len].to_vec();
-                if !prefix_index.contains_key(&prefix) {
-                    prefix_index.insert(prefix.clone(), prefixes.len());
-                    prefixes.push(prefix);
-                }
-            }
-        }
-        let forbidden_set: FxHashSet<&[ArrowId]> = forbidden.iter().map(Vec::as_slice).collect();
-
-        let num_states = n + prefixes.len();
-        let mut trans = vec![vec![None; quiver.num_arrows()]; num_states];
-        for (s, row) in trans.iter_mut().enumerate() {
-            let (word, vertex): (&[ArrowId], u32) = if s < n {
-                (&[], s as u32)
-            } else {
-                let w = prefixes[s - n].as_slice();
-                (w, quiver.target(w[w.len() - 1]))
-            };
-            for &a in quiver.arrows_from(vertex) {
-                let mut extended = word.to_vec();
-                extended.push(a);
-                // Longest suffix in (forbidden ∪ prefixes) decides; minimality makes
-                // the two sets disjoint and rules out shorter forbidden suffixes
-                // hiding under a prefix match.
-                let mut next = Some(quiver.target(a) as usize);
-                for start in 0..extended.len() {
-                    let suffix = &extended[start..];
-                    if forbidden_set.contains(suffix) {
-                        next = None;
-                        break;
-                    }
-                    if let Some(&k) = prefix_index.get(suffix) {
-                        next = Some(n + k);
-                        break;
-                    }
-                }
-                row[a.index()] = next;
-            }
-        }
-        Automaton { trans }
-    }
-
-    /// Kahn's algorithm; every state is reachable, so any cycle means
-    /// infinitely many standard paths.
-    fn has_cycle(&self) -> bool {
-        let m = self.trans.len();
-        let mut indegree = vec![0usize; m];
-        for row in &self.trans {
-            for &t in row.iter().flatten() {
-                indegree[t] += 1;
-            }
-        }
-        let mut stack: Vec<usize> = (0..m).filter(|&s| indegree[s] == 0).collect();
-        let mut visited = 0;
-        while let Some(s) = stack.pop() {
-            visited += 1;
-            for &t in self.trans[s].iter().flatten() {
-                indegree[t] -= 1;
-                if indegree[t] == 0 {
-                    stack.push(t);
-                }
-            }
-        }
-        visited < m
-    }
-
-    #[inline]
-    fn step(&self, s: usize, a: ArrowId) -> Option<usize> {
-        self.trans[s][a.index()]
-    }
-}
-
-/// Completion limits that are always adequate for `presentation`, each
-/// the default or a bound derived from the presentation, whichever is
-/// larger. `max_word_len` covers the longest self-overlap superposition,
-/// `2·L - 1` for the longest forbidden word length `L`. `max_basis`
-/// covers the forbidden words. `max_steps` covers one reduction step per
-/// forbidden word plus one work unit per emitted standard path. The named
-/// monomial constructors use these limits, so a long forbidden word does
-/// not truncate.
-pub fn monomial_completion_limits(presentation: &MonomialPresentation) -> CompletionLimits {
-    let defaults = CompletionLimits::default();
-    let longest = presentation
+/// [`MonomialIdeal::new`] already checked that every forbidden word is a
+/// path of length >= 2, which is what [`Relation::new`] asks for, so nothing
+/// here can be rejected.
+pub fn monomial_presentation(ideal: &MonomialIdeal, field: PrimeField) -> Presentation {
+    let quiver = ideal.quiver().clone();
+    let relations = ideal
         .forbidden()
         .iter()
-        .map(Vec::len)
-        .max()
-        .unwrap_or(0);
+        .map(|word| {
+            Relation::new(&quiver, field, vec![(field.one(), word.clone())])
+                .expect("a forbidden word is a path of length >= 2")
+        })
+        .collect();
+    Presentation::new(quiver, field, relations).expect("the relations were built over this quiver")
+}
+
+/// Completion limits adequate for `ideal`: each entry is the default or a
+/// bound derived from the forbidden words, whichever is larger.
+///
+/// `max_word_len` covers the longest self-overlap superposition, `2·L - 1`
+/// for the longest forbidden word length `L`. `max_basis` covers the
+/// forbidden words. `max_ambiguities` covers `2·L` keys for each ordered
+/// pair of forbidden words. `max_origin_terms` keeps the default: a monomial
+/// completion never combines provenance, because every composition reduces to
+/// zero, so each origin keeps the one term its forbidden word started with.
+///
+/// `max_steps` keeps the default as well, and that is the one budget these
+/// limits do not derive. Each emitted normal word costs one step, so a
+/// monomial algebra of dimension above `max_steps` truncates. The truncation
+/// is typed, so the caller sees it.
+pub fn monomial_limits(ideal: &MonomialIdeal) -> CompletionLimits {
+    let defaults = CompletionLimits::default();
+    let words = ideal.forbidden().len();
+    let longest = ideal.forbidden().iter().map(Vec::len).max().unwrap_or(0);
     CompletionLimits {
-        max_basis: defaults.max_basis.max(presentation.forbidden().len()),
+        max_basis: defaults.max_basis.max(words),
         max_word_len: defaults
             .max_word_len
             .max(longest.saturating_mul(2).saturating_sub(1)),
-        max_steps: defaults.max_steps.max(
-            presentation
-                .dim()
-                .saturating_add(presentation.forbidden().len()),
+        max_steps: defaults.max_steps,
+        max_origin_terms: defaults.max_origin_terms,
+        max_ambiguities: defaults.max_ambiguities.max(
+            words
+                .saturating_mul(words)
+                .saturating_mul(longest.saturating_mul(2)),
         ),
     }
 }
 
-fn from_monomial_derived(
+/// The runtime algebra of `ideal` over `field`, built with
+/// [`monomial_limits`].
+pub fn monomial_algebra(
+    ideal: &MonomialIdeal,
     field: PrimeField,
-    presentation: &MonomialPresentation,
 ) -> Result<Arc<Algebra>, AlgebraBuildError> {
-    Algebra::from_monomial(
-        field,
-        presentation,
-        &monomial_completion_limits(presentation),
-    )
+    Algebra::new(monomial_presentation(ideal, field), &monomial_limits(ideal))
 }
 
-fn linear_quiver(n: usize) -> Quiver {
-    let n = u32::try_from(n).expect("vertex count fits in u32");
-    let arrows: Vec<(u32, u32)> = (0..n.saturating_sub(1)).map(|i| (i, i + 1)).collect();
-    Quiver::new(n, &arrows).expect("endpoints in range by construction")
-}
-
-fn cyclic_quiver(n: usize) -> Quiver {
-    let arrows: Vec<(u32, u32)> = (0..n).map(|i| (i as u32, ((i + 1) % n) as u32)).collect();
-    Quiver::new(u32::try_from(n).expect("vertex count fits in u32"), &arrows)
-        .expect("endpoints in range by construction")
-}
-
-/// The [`MonomialPresentation`] of linearly oriented `A_n`: vertices `0..n`,
-/// arrows `i → i+1`, no relations.
-pub fn linear_an_presentation(n: usize) -> MonomialPresentation {
-    MonomialPresentation::new(linear_quiver(n), Vec::new())
-        .expect("acyclic quiver without relations is finite-dimensional")
+/// The path algebra `kQ` over `field`, with no relations.
+///
+/// Errors with [`AlgebraBuildError::InfiniteDimensional`] when `quiver` has a
+/// cycle, since then `kQ` has infinitely many paths. The default completion
+/// limits are adequate: with no relation there is no superposition word.
+pub fn path_algebra(quiver: Quiver, field: PrimeField) -> Result<Arc<Algebra>, AlgebraBuildError> {
+    let presentation =
+        Presentation::new(quiver, field, Vec::new()).expect("there is no relation to reject");
+    Algebra::new(presentation, &CompletionLimits::default())
 }
 
 /// Path algebra of linearly oriented `A_n` over `field`.
 pub fn linear_an(n: usize, field: PrimeField) -> Arc<Algebra> {
-    from_monomial_derived(field, &linear_an_presentation(n))
+    monomial_algebra(&linear_an_ideal(n), field)
         .expect("the zero ideal over an acyclic quiver completes")
 }
 
-/// The [`MonomialPresentation`] of the Kronecker-type algebra: vertices
-/// `0, 1` and `m` parallel arrows `0 → 1`, no relations.
-pub fn kronecker_presentation(m: usize) -> MonomialPresentation {
-    let arrows = vec![(0u32, 1u32); m];
-    let quiver = Quiver::new(2, &arrows).expect("endpoints in range by construction");
-    MonomialPresentation::new(quiver, Vec::new())
-        .expect("acyclic quiver without relations is finite-dimensional")
-}
-
-/// Kronecker-type algebra over `field`. Hereditary; `dim = m + 2`.
+/// Kronecker-type algebra over `field`: vertices `0, 1` and `m` parallel
+/// arrows `0 → 1`. Hereditary; `dim = m + 2`.
 pub fn kronecker(m: usize, field: PrimeField) -> Arc<Algebra> {
-    from_monomial_derived(field, &kronecker_presentation(m))
+    monomial_algebra(&kronecker_ideal(m), field)
         .expect("the zero ideal over an acyclic quiver completes")
 }
 
@@ -1058,183 +839,48 @@ pub fn dual_numbers(field: PrimeField) -> Arc<Algebra> {
     truncated_poly(2, field).expect("x² is an admissible relation")
 }
 
-/// The [`MonomialPresentation`] of `k[x]/(xⁿ)`: one vertex, one loop `x`,
-/// forbidden word `xⁿ`. Errors for `n < 2` (the ideal would not be
-/// admissible).
-pub fn truncated_poly_presentation(n: usize) -> Result<MonomialPresentation, AlgebraError> {
-    let quiver = Quiver::new(1, &[(0, 0)]).expect("endpoints in range by construction");
-    MonomialPresentation::new(quiver, vec![vec![ArrowId(0); n]])
-}
-
-/// `k[x]/(xⁿ)` over `field`, as [`truncated_poly_presentation`].
+/// `k[x]/(xⁿ)` over `field`, as [`crate::monomial::truncated_poly_ideal`].
 pub fn truncated_poly(n: usize, field: PrimeField) -> Result<Arc<Algebra>, AlgebraBuildError> {
-    let presentation = truncated_poly_presentation(n).map_err(AlgebraBuildError::Monomial)?;
-    from_monomial_derived(field, &presentation)
+    let ideal = truncated_poly_ideal(n).map_err(AlgebraBuildError::Monomial)?;
+    monomial_algebra(&ideal, field)
 }
 
-/// The [`MonomialPresentation`] of the linear Nakayama algebra over linearly
-/// oriented `A_n` with `dim P_i = kupisch[i]`.
-///
-/// Valid series `c`: nonempty; `c[n-1] == 1`; `c[i] >= 2` for `i < n-1`
-/// (admissibility); `c[i+1] >= c[i] - 1` (rad `P_i` is a quotient of
-/// `P_{i+1}`). Anything else errors; for example `[3, 3, 2]`, where no
-/// admissible ideal gives the prescribed projective dimensions.
-pub fn linear_nakayama_presentation(
-    kupisch: &[usize],
-) -> Result<MonomialPresentation, AlgebraError> {
-    let n = kupisch.len();
-    if n == 0 {
-        return Err(AlgebraError::InvalidKupisch {
-            reason: "series is empty".to_string(),
-        });
-    }
-    if kupisch[n - 1] != 1 {
-        return Err(AlgebraError::InvalidKupisch {
-            reason: format!(
-                "linear series must end with 1, got c[{}] = {}",
-                n - 1,
-                kupisch[n - 1]
-            ),
-        });
-    }
-    for i in 0..n - 1 {
-        if kupisch[i] < 2 {
-            return Err(AlgebraError::InvalidKupisch {
-                reason: format!("c[{i}] = {} but interior entries need c >= 2", kupisch[i]),
-            });
-        }
-        if kupisch[i + 1] < kupisch[i] - 1 {
-            return Err(AlgebraError::InvalidKupisch {
-                reason: format!(
-                    "c[{}] = {} violates c[i+1] >= c[i] - 1 = {}",
-                    i + 1,
-                    kupisch[i + 1],
-                    kupisch[i] - 1
-                ),
-            });
-        }
-    }
-    let mut forbidden = Vec::new();
-    for (i, &c) in kupisch.iter().enumerate() {
-        // Forbid the path from i of length c; it exists only when
-        // i + c <= n - 1.
-        if i + c <= n - 1 {
-            forbidden.push((i..i + c).map(|j| ArrowId(j as u32)).collect());
-        }
-    }
-    MonomialPresentation::new(linear_quiver(n), forbidden)
-}
-
-/// Linear Nakayama algebra over `field`, as [`linear_nakayama_presentation`].
+/// Linear Nakayama algebra over `field`, as
+/// [`crate::monomial::linear_nakayama_ideal`].
 pub fn linear_nakayama(
     kupisch: &[usize],
     field: PrimeField,
 ) -> Result<Arc<Algebra>, AlgebraBuildError> {
-    let presentation =
-        linear_nakayama_presentation(kupisch).map_err(AlgebraBuildError::Monomial)?;
-    from_monomial_derived(field, &presentation)
+    let ideal = linear_nakayama_ideal(kupisch).map_err(AlgebraBuildError::Monomial)?;
+    monomial_algebra(&ideal, field)
 }
 
-/// The [`MonomialPresentation`] of the cyclic Nakayama algebra over the cycle
-/// `0 → 1 → … → n-1 → 0` with `dim P_i = kupisch[i]`.
-///
-/// Valid series `c`: nonempty; `c[i] >= 2` for all `i` (admissibility);
-/// cyclically `c[(i+1) % n] >= c[i] - 1`. Anything else errors.
-pub fn cyclic_nakayama_presentation(
-    kupisch: &[usize],
-) -> Result<MonomialPresentation, AlgebraError> {
-    let n = kupisch.len();
-    if n == 0 {
-        return Err(AlgebraError::InvalidKupisch {
-            reason: "series is empty".to_string(),
-        });
-    }
-    for (i, &c) in kupisch.iter().enumerate() {
-        if c < 2 {
-            return Err(AlgebraError::InvalidKupisch {
-                reason: format!("c[{i}] = {c} but cyclic entries need c >= 2"),
-            });
-        }
-        if kupisch[(i + 1) % n] < c - 1 {
-            return Err(AlgebraError::InvalidKupisch {
-                reason: format!(
-                    "c[{}] = {} violates cyclic c[i+1] >= c[i] - 1 = {}",
-                    (i + 1) % n,
-                    kupisch[(i + 1) % n],
-                    c - 1
-                ),
-            });
-        }
-    }
-    let forbidden: Vec<Vec<ArrowId>> = (0..n)
-        .map(|i| {
-            (0..kupisch[i])
-                .map(|j| ArrowId(((i + j) % n) as u32))
-                .collect()
-        })
-        .collect();
-    MonomialPresentation::new(cyclic_quiver(n), forbidden)
-}
-
-/// Cyclic Nakayama algebra over `field`, as [`cyclic_nakayama_presentation`].
+/// Cyclic Nakayama algebra over `field`, as
+/// [`crate::monomial::cyclic_nakayama_ideal`].
 pub fn cyclic_nakayama(
     kupisch: &[usize],
     field: PrimeField,
 ) -> Result<Arc<Algebra>, AlgebraBuildError> {
-    let presentation =
-        cyclic_nakayama_presentation(kupisch).map_err(AlgebraBuildError::Monomial)?;
-    from_monomial_derived(field, &presentation)
+    let ideal = cyclic_nakayama_ideal(kupisch).map_err(AlgebraBuildError::Monomial)?;
+    monomial_algebra(&ideal, field)
 }
 
-/// The [`MonomialPresentation`] of the cyclic quiver on `n` vertices with
-/// `rad² = 0`: every length-2 path forbidden. `dim = 2n`.
-pub fn radical_square_zero_cycle_presentation(n: usize) -> MonomialPresentation {
-    let forbidden: Vec<Vec<ArrowId>> = (0..n)
-        .map(|i| vec![ArrowId(i as u32), ArrowId(((i + 1) % n) as u32)])
-        .collect();
-    MonomialPresentation::new(cyclic_quiver(n), forbidden)
-        .expect("rad² = 0 leaves only vertices and arrows")
-}
-
-/// Cyclic quiver with `rad² = 0` over `field`, as
-/// [`radical_square_zero_cycle_presentation`].
+/// Cyclic quiver on `n` vertices with `rad² = 0` over `field`, as
+/// [`crate::monomial::radical_square_zero_cycle_ideal`]. `dim = 2n`.
 pub fn radical_square_zero_cycle(n: usize, field: PrimeField) -> Arc<Algebra> {
-    from_monomial_derived(field, &radical_square_zero_cycle_presentation(n))
+    monomial_algebra(&radical_square_zero_cycle_ideal(n), field)
         .expect("rad² = 0 leaves only vertices and arrows")
-}
-
-/// The [`MonomialPresentation`] of linearly oriented `A_n` with zero
-/// relations: each `(start, len)` in `zero_paths` kills the unique path of
-/// length `len` from vertex `start` (arrows `start, …, start + len - 1`).
-/// `kA_3/(ab)` is `an_with_relations_presentation(3, &[(0, 2)])`.
-///
-/// Errors when a zero path runs past vertex `n - 1` or has length < 2.
-pub fn an_with_relations_presentation(
-    n: usize,
-    zero_paths: &[(usize, usize)],
-) -> Result<MonomialPresentation, AlgebraError> {
-    for &(start, len) in zero_paths {
-        if n == 0 || start + len > n - 1 {
-            return Err(AlgebraError::ZeroPathOutOfRange { start, len });
-        }
-    }
-    let forbidden = zero_paths
-        .iter()
-        .map(|&(start, len)| (start..start + len).map(|j| ArrowId(j as u32)).collect())
-        .collect();
-    MonomialPresentation::new(linear_quiver(n), forbidden)
 }
 
 /// Linearly oriented `A_n` with zero relations over `field`, as
-/// [`an_with_relations_presentation`].
+/// [`crate::monomial::an_with_relations_ideal`].
 pub fn an_with_relations(
     n: usize,
     zero_paths: &[(usize, usize)],
     field: PrimeField,
 ) -> Result<Arc<Algebra>, AlgebraBuildError> {
-    let presentation =
-        an_with_relations_presentation(n, zero_paths).map_err(AlgebraBuildError::Monomial)?;
-    from_monomial_derived(field, &presentation)
+    let ideal = an_with_relations_ideal(n, zero_paths).map_err(AlgebraBuildError::Monomial)?;
+    monomial_algebra(&ideal, field)
 }
 
 /// The commutative square over `field`: vertices `0..4`, arrows `a: 0 → 1`,
@@ -1253,8 +899,8 @@ pub fn commutative_square(field: PrimeField) -> Arc<Algebra> {
     .expect("ab - cd is a valid uniform relation");
     let presentation = Presentation::new(quiver, field, vec![relation])
         .expect("the relation was built over this quiver and field");
-    // Every limit derived from this presentation sits below the default,
-    // so the defaults are the derived limits.
+    // The one relation has length 2, so completion needs word length 3 at
+    // most and a handful of steps. The defaults cover that.
     Algebra::new(presentation, &CompletionLimits::default())
         .expect("the commutative square is finite dimensional")
 }
@@ -1262,6 +908,8 @@ pub fn commutative_square(field: PrimeField) -> Arc<Algebra> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::monomial::MonomialPresentation;
+    use crate::verify::verify;
 
     fn f5() -> PrimeField {
         PrimeField::new(5).unwrap()
@@ -1270,6 +918,97 @@ mod tests {
     fn word(algebra: &Algebra, arrows: &[u32]) -> PathWord {
         let ids: Vec<ArrowId> = arrows.iter().copied().map(ArrowId).collect();
         PathWord::from_arrows(algebra.quiver(), &ids).unwrap()
+    }
+
+    /// One vertex, one loop `x`, and the relation given as
+    /// `(coefficient, exponent)` terms.
+    fn loop_presentation(field: PrimeField, terms: &[(i64, usize)]) -> Presentation {
+        let quiver = Quiver::new(1, &[(0, 0)]).unwrap();
+        let relation = Relation::new(
+            &quiver,
+            field,
+            terms
+                .iter()
+                .map(|&(c, n)| (field.elem(c), vec![ArrowId(0); n]))
+                .collect(),
+        )
+        .expect("the terms are parallel words of length >= 2");
+        Presentation::new(quiver, field, vec![relation]).expect("built over this quiver and field")
+    }
+
+    /// The witness of the admissibility defect. `x³ - x²` passes every
+    /// relation check and completes: the leading word is `x³`, its
+    /// automaton is acyclic, and the verifier reports a finite quotient of
+    /// dimension 3. The quotient is `k[x]/(x²) × k`, where the arrow ideal
+    /// `J = span(x, x²)` has `J² = J³ = span(x²)` and never reaches zero.
+    #[test]
+    fn a_stable_nonzero_arrow_ideal_is_rejected_as_non_admissible() {
+        let presentation = loop_presentation(f5(), &[(1, 3), (-1, 2)]);
+        assert_eq!(
+            Algebra::new(presentation.clone(), &CompletionLimits::default()).unwrap_err(),
+            AlgebraBuildError::NonAdmissible {
+                stable_power: 2,
+                dimension: 1,
+            }
+        );
+        // The completion and the verifier both accept, so the reload path
+        // needs the same check as `Algebra::new`.
+        let certificate = match complete(&presentation, &CompletionLimits::default()) {
+            Outcome::Complete(certificate) => certificate,
+            Outcome::Truncated(diagnostics) => panic!("unexpected truncation: {diagnostics:?}"),
+        };
+        let verified = verify(&certificate.to_canonical_json()).expect("the certificate verifies");
+        assert_eq!(verified.normal_words().len(), 3);
+        assert_eq!(
+            Algebra::from_verified(verified).unwrap_err(),
+            AlgebraBuildError::NonAdmissible {
+                stable_power: 2,
+                dimension: 1,
+            }
+        );
+    }
+
+    /// Arrows `a: 0 → 1`, `b: 1 → 3`, `c: 0 → 2`, `d: 2 → 4`, `e: 4 → 3`,
+    /// and the relation `cde - ab`. The ideal is admissible, so the algebra
+    /// builds. Its nilpotency degree is 4 while the longest normal word has
+    /// length 2: `J³ = span(ab)` because `cd·e` rewrites to `ab`.
+    #[test]
+    fn an_admissible_inhomogeneous_presentation_builds() {
+        let field = f5();
+        let quiver = Quiver::new(5, &[(0, 1), (1, 3), (0, 2), (2, 4), (4, 3)]).unwrap();
+        let relation = Relation::new(
+            &quiver,
+            field,
+            vec![
+                (field.one(), vec![ArrowId(2), ArrowId(3), ArrowId(4)]),
+                (field.elem(-1), vec![ArrowId(0), ArrowId(1)]),
+            ],
+        )
+        .unwrap();
+        let presentation = Presentation::new(quiver, field, vec![relation]).unwrap();
+        let a = Algebra::new(presentation, &CompletionLimits::default()).unwrap();
+        assert_eq!(a.dim(), 13);
+        assert_eq!(a.basis().iter().map(PathWord::len).max(), Some(2));
+        assert_eq!(a.nilpotency_degree(), 4);
+    }
+
+    #[test]
+    fn a_certificate_about_another_presentation_is_rejected() {
+        let field = f5();
+        let a = loop_presentation(field, &[(1, 3)]);
+        let b = loop_presentation(field, &[(1, 4)]);
+        let built = Algebra::new(a.clone(), &CompletionLimits::default()).unwrap();
+        assert_eq!(check_input_relations(&a, built.certificate()), Ok(()));
+        assert_eq!(
+            check_input_relations(&b, built.certificate()),
+            Err(AlgebraBuildError::InputRelationsMismatch { index: 0 })
+        );
+        let empty =
+            Presentation::new(Quiver::new(1, &[(0, 0)]).unwrap(), field, Vec::new()).unwrap();
+        assert_eq!(
+            check_input_relations(&empty, built.certificate()),
+            Err(AlgebraBuildError::InputRelationsMismatch { index: 0 })
+        );
     }
 
     #[test]
@@ -1295,23 +1034,23 @@ mod tests {
         let a = truncated_poly(65, f5()).unwrap();
         assert_eq!(a.dim(), 65);
         assert_eq!(a.completion_limits().max_word_len, 129);
-        let presentation = truncated_poly_presentation(65).unwrap();
+        let ideal = truncated_poly_ideal(65).unwrap();
         assert!(matches!(
-            Algebra::from_monomial(f5(), &presentation, &CompletionLimits::default()),
+            Algebra::new(
+                monomial_presentation(&ideal, f5()),
+                &CompletionLimits::default()
+            ),
             Err(AlgebraBuildError::Truncated(diagnostics))
                 if diagnostics.reason == crate::completion::TruncationReason::WordLenBudget
         ));
     }
 
     #[test]
-    fn monomial_completion_limits_never_fall_below_the_defaults() {
-        let presentation = truncated_poly_presentation(3).unwrap();
-        assert_eq!(
-            monomial_completion_limits(&presentation),
-            CompletionLimits::default()
-        );
-        let long = truncated_poly_presentation(100).unwrap();
-        let limits = monomial_completion_limits(&long);
+    fn monomial_limits_never_fall_below_the_defaults() {
+        let ideal = truncated_poly_ideal(3).unwrap();
+        assert_eq!(monomial_limits(&ideal), CompletionLimits::default());
+        let long = truncated_poly_ideal(100).unwrap();
+        let limits = monomial_limits(&long);
         assert_eq!(limits.max_word_len, 199);
         assert_eq!(limits.max_basis, CompletionLimits::default().max_basis);
         assert_eq!(limits.max_steps, CompletionLimits::default().max_steps);
@@ -1321,13 +1060,14 @@ mod tests {
     fn from_verified_keeps_default_limits_and_with_limits_stores_them() {
         let a = truncated_poly(65, f5()).unwrap();
         let bytes = a.certificate().to_canonical_json();
-        let reloaded = Algebra::from_verified(verify(&bytes).unwrap());
+        let reloaded = Algebra::from_verified(verify(&bytes).unwrap()).unwrap();
         assert_eq!(reloaded.completion_limits(), &CompletionLimits::default());
         let raised = CompletionLimits {
             max_word_len: 129,
             ..CompletionLimits::default()
         };
-        let preserved = Algebra::from_verified_with_limits(verify(&bytes).unwrap(), &raised);
+        let preserved =
+            Algebra::from_verified_with_limits(verify(&bytes).unwrap(), &raised).unwrap();
         assert_eq!(preserved.completion_limits(), &raised);
     }
 
@@ -1336,7 +1076,7 @@ mod tests {
         assert!(matches!(
             truncated_poly(1, f5()),
             Err(AlgebraBuildError::Monomial(
-                AlgebraError::ForbiddenWordTooShort { index: 0, len: 1 }
+                MonomialError::ForbiddenWordTooShort { index: 0, len: 1 }
             ))
         ));
     }
@@ -1416,7 +1156,7 @@ mod tests {
         assert!(matches!(
             linear_nakayama(&[3, 3, 2], f5()),
             Err(AlgebraBuildError::Monomial(
-                AlgebraError::InvalidKupisch { .. }
+                MonomialError::InvalidKupisch { .. }
             ))
         ));
     }
@@ -1426,7 +1166,7 @@ mod tests {
         assert!(matches!(
             linear_nakayama(&[4, 2, 1], f5()),
             Err(AlgebraBuildError::Monomial(
-                AlgebraError::InvalidKupisch { .. }
+                MonomialError::InvalidKupisch { .. }
             ))
         ));
     }
@@ -1436,7 +1176,7 @@ mod tests {
         assert!(matches!(
             cyclic_nakayama(&[2, 1, 2], f5()),
             Err(AlgebraBuildError::Monomial(
-                AlgebraError::InvalidKupisch { .. }
+                MonomialError::InvalidKupisch { .. }
             ))
         ));
     }
@@ -1446,27 +1186,9 @@ mod tests {
         assert!(matches!(
             cyclic_nakayama(&[4, 2, 2], f5()),
             Err(AlgebraBuildError::Monomial(
-                AlgebraError::InvalidKupisch { .. }
+                MonomialError::InvalidKupisch { .. }
             ))
         ));
-    }
-
-    #[test]
-    fn loop_without_relations_is_infinite_dimensional() {
-        let quiver = Quiver::new(1, &[(0, 0)]).unwrap();
-        assert_eq!(
-            MonomialPresentation::new(quiver, Vec::new()).unwrap_err(),
-            AlgebraError::InfiniteDimensional
-        );
-    }
-
-    #[test]
-    fn cycle_without_relations_is_infinite_dimensional() {
-        let quiver = Quiver::new(3, &[(0, 1), (1, 2), (2, 0)]).unwrap();
-        assert_eq!(
-            MonomialPresentation::new(quiver, Vec::new()).unwrap_err(),
-            AlgebraError::InfiniteDimensional
-        );
     }
 
     #[test]
@@ -1479,55 +1201,6 @@ mod tests {
             }
             other => panic!("expected InfiniteDimensional, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn forbidden_words_reduced_to_minimal() {
-        // A4 with both ab and abc: abc contains ab, so only ab survives.
-        let quiver = Quiver::new(4, &[(0, 1), (1, 2), (2, 3)]).unwrap();
-        let m = MonomialPresentation::new(
-            quiver,
-            vec![
-                vec![ArrowId(0), ArrowId(1), ArrowId(2)],
-                vec![ArrowId(0), ArrowId(1)],
-            ],
-        )
-        .unwrap();
-        assert_eq!(m.forbidden(), &[vec![ArrowId(0), ArrowId(1)]]);
-        assert_eq!(m.dim(), 8); // e0..e3, a, b, c, bc
-    }
-
-    #[test]
-    fn loop_with_x_cubed_forbidden_is_finite() {
-        let quiver = Quiver::new(1, &[(0, 0)]).unwrap();
-        let m = MonomialPresentation::new(quiver, vec![vec![ArrowId(0); 3]]).unwrap();
-        assert_eq!(m.dim(), 3);
-        let a = Algebra::from_monomial(f5(), &m, &CompletionLimits::default()).unwrap();
-        assert_eq!(a.dim(), 3);
-    }
-
-    #[test]
-    fn two_loops_with_xx_yy_forbidden_is_infinite() {
-        // xyxyxy… never contains xx or yy; the automaton fallback must find the cycle.
-        let quiver = Quiver::new(1, &[(0, 0), (0, 0)]).unwrap();
-        let result = MonomialPresentation::new(
-            quiver,
-            vec![vec![ArrowId(0), ArrowId(0)], vec![ArrowId(1), ArrowId(1)]],
-        );
-        assert_eq!(result.unwrap_err(), AlgebraError::InfiniteDimensional);
-    }
-
-    #[test]
-    fn two_loops_with_rad_square_zero_has_dim_3() {
-        let quiver = Quiver::new(1, &[(0, 0), (0, 0)]).unwrap();
-        let forbidden = vec![
-            vec![ArrowId(0), ArrowId(0)],
-            vec![ArrowId(0), ArrowId(1)],
-            vec![ArrowId(1), ArrowId(0)],
-            vec![ArrowId(1), ArrowId(1)],
-        ];
-        let m = MonomialPresentation::new(quiver, forbidden).unwrap();
-        assert_eq!(m.dim(), 3);
     }
 
     #[test]
@@ -1575,32 +1248,11 @@ mod tests {
     }
 
     #[test]
-    fn forbidden_word_too_short_rejected() {
-        let quiver = Quiver::new(2, &[(0, 1)]).unwrap();
-        assert!(matches!(
-            MonomialPresentation::new(quiver, vec![vec![ArrowId(0)]]),
-            Err(AlgebraError::ForbiddenWordTooShort { index: 0, len: 1 })
-        ));
-    }
-
-    #[test]
-    fn forbidden_word_not_composable_rejected() {
-        let quiver = Quiver::new(3, &[(0, 1), (1, 2)]).unwrap();
-        assert!(matches!(
-            MonomialPresentation::new(quiver, vec![vec![ArrowId(1), ArrowId(0)]]),
-            Err(AlgebraError::ForbiddenWordInvalid {
-                index: 0,
-                error: QuiverError::NotComposable { position: 0 },
-            })
-        ));
-    }
-
-    #[test]
     fn an_zero_path_out_of_range_rejected() {
         assert!(matches!(
             an_with_relations(3, &[(1, 2)], f5()),
             Err(AlgebraBuildError::Monomial(
-                AlgebraError::ZeroPathOutOfRange { start: 1, len: 2 }
+                MonomialError::ZeroPathOutOfRange { start: 1, len: 2 }
             ))
         ));
     }
@@ -1614,11 +1266,14 @@ mod tests {
         assert_eq!(a.paths_to(2), &[2, 4]); // A e_2: e_2, b
     }
 
+    /// The runtime pipeline and the field-free analysis agree on a monomial
+    /// ideal: normal words are standard paths, in the same order.
     #[test]
-    fn from_monomial_basis_equals_the_standard_path_basis() {
+    fn normal_words_equal_the_standard_paths() {
         let quiver = Quiver::new(4, &[(0, 1), (1, 2), (1, 3)]).unwrap();
-        let m = MonomialPresentation::new(quiver, vec![vec![ArrowId(0), ArrowId(1)]]).unwrap();
-        let a = Algebra::from_monomial(f5(), &m, &CompletionLimits::default()).unwrap();
+        let ideal = MonomialIdeal::new(quiver, vec![vec![ArrowId(0), ArrowId(1)]]).unwrap();
+        let m = MonomialPresentation::new(ideal.clone()).unwrap();
+        let a = monomial_algebra(&ideal, f5()).unwrap();
         assert_eq!(a.basis(), m.basis());
         assert_eq!(a.cartan_matrix(), m.cartan_matrix());
     }
@@ -1655,7 +1310,7 @@ mod tests {
         let a = commutative_square(f5());
         let bytes = a.certificate().to_canonical_json();
         let verified = verify(&bytes).expect("the stored certificate verifies");
-        let rebuilt = Algebra::from_verified(verified);
+        let rebuilt = Algebra::from_verified(verified).expect("the ideal is admissible");
         assert_eq!(rebuilt.dim(), a.dim());
         assert_eq!(rebuilt.basis(), a.basis());
         assert_eq!(rebuilt.relations(), a.relations());
@@ -1672,19 +1327,20 @@ mod tests {
     }
 
     #[test]
-    fn radical_power_components_descend_by_row_space_iteration() {
+    fn radical_power_matrices_descend_by_row_space_iteration() {
         let f = f5();
         let a = linear_an(3, f);
+        let rank = |u, v, k| a.radical_power_matrix(u, v, k).rows();
         // e_0 A e_2 is one-dimensional (the word ab), which lies in J and J².
-        assert_eq!(a.radical_power_component(0, 2, 0).len(), 1);
-        assert_eq!(a.radical_power_component(0, 2, 1).len(), 1);
-        assert_eq!(a.radical_power_component(0, 2, 2).len(), 1);
-        assert_eq!(a.radical_power_component(0, 2, 3).len(), 0);
+        assert_eq!(rank(0, 2, 0), 1);
+        assert_eq!(rank(0, 2, 1), 1);
+        assert_eq!(rank(0, 2, 2), 1);
+        assert_eq!(rank(0, 2, 3), 0);
         // e_0 A e_1 is the arrow a: in J but not in J².
-        assert_eq!(a.radical_power_component(0, 1, 1).len(), 1);
-        assert_eq!(a.radical_power_component(0, 1, 2).len(), 0);
+        assert_eq!(rank(0, 1, 1), 1);
+        assert_eq!(rank(0, 1, 2), 0);
         // The trivial component at a vertex leaves J immediately.
-        assert_eq!(a.radical_power_component(0, 0, 0).len(), 1);
-        assert_eq!(a.radical_power_component(0, 0, 1).len(), 0);
+        assert_eq!(rank(0, 0, 0), 1);
+        assert_eq!(rank(0, 0, 1), 0);
     }
 }

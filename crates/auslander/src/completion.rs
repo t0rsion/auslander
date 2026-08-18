@@ -31,7 +31,15 @@
 //! words, in the fixed basis order of the design, section 6: trivial
 //! paths in vertex order, then length, then source, then the
 //! lexicographic arrow word. Each emitted word costs one work unit of
-//! `max_steps`, so a huge finite language truncates honestly.
+//! `max_steps`, so a huge finite normal-word language truncates honestly.
+//!
+//! Two sizes grow on their own budgets, because `max_steps` does not
+//! bound them. Provenance compounds: one reduction step costs one unit
+//! and adds up to the whole origin of the basis element it uses, so
+//! `max_origin_terms` bounds each origin. Ambiguity enumeration is
+//! quadratic in the basis and free of steps over a monomial ideal, where
+//! every composition is exactly zero, so `max_ambiguities` bounds the
+//! keys.
 //!
 //! `automaton` serializes the engine's normal-word automaton: one empty
 //! word per vertex, then the proper nonempty leading-word prefixes sorted
@@ -66,6 +74,17 @@ pub struct CompletionLimits {
     /// checked before the next word is allocated, so a huge finite
     /// normal-word language truncates instead of exhausting memory.
     pub max_steps: usize,
+    /// Maximum number of provenance terms in one origin. One reduction step
+    /// adds up to the whole origin of the basis element it uses, so
+    /// provenance compounds across the basis while `max_steps` charges one
+    /// unit per step. The budget is checked at every origin mutation.
+    pub max_origin_terms: usize,
+    /// Maximum number of ambiguity keys held at once, and of entries in the
+    /// certificate's `ambiguities` list. Enumeration over all pairs of
+    /// leading words is quadratic in the basis and independent of
+    /// `max_steps`: over a monomial ideal every composition is zero, so the
+    /// queue drains at zero step cost however large it is.
+    pub max_ambiguities: usize,
 }
 
 impl Default for CompletionLimits {
@@ -76,6 +95,8 @@ impl Default for CompletionLimits {
             max_basis: 4096,
             max_word_len: 64,
             max_steps: 1_000_000,
+            max_origin_terms: 4096,
+            max_ambiguities: 65_536,
         }
     }
 }
@@ -89,6 +110,10 @@ pub enum TruncationReason {
     WordLenBudget,
     /// The run needed more than `max_steps` work units.
     StepBudget,
+    /// One origin would exceed `max_origin_terms` provenance terms.
+    OriginBudget,
+    /// The ambiguity enumeration would exceed `max_ambiguities` keys.
+    AmbiguityBudget,
 }
 
 /// Where a truncated run stopped.
@@ -119,7 +144,7 @@ pub enum Outcome {
 
 type Word = Vec<ArrowId>;
 
-/// Terms in strictly descending order under the sealed order.
+/// Terms descend strictly under the sealed order.
 #[derive(Clone, Debug)]
 struct Poly {
     terms: Vec<(Fp, Word)>,
@@ -223,14 +248,16 @@ fn add_scaled(
 }
 
 /// `target += c · left · src · right` on provenance, dropping zero sums.
+/// Stops at the first insertion that puts `target` past `max` terms.
 fn origin_add_scaled(
     field: PrimeField,
+    max: usize,
     target: &mut Origin,
     c: Fp,
     left: &[ArrowId],
     src: &Origin,
     right: &[ArrowId],
-) {
+) -> Result<(), Exhausted> {
     for ((index, l, r), k) in src {
         let key = (*index, concat2(left, l), concat2(r, right));
         let current = target.get(&key).copied().unwrap_or(field.zero());
@@ -239,8 +266,12 @@ fn origin_add_scaled(
             target.remove(&key);
         } else {
             target.insert(key, sum);
+            if target.len() > max {
+                return Err(Exhausted::Origin);
+            }
         }
     }
+    Ok(())
 }
 
 fn make_monic(field: PrimeField, poly: &mut Poly, origin: &mut Origin) {
@@ -329,7 +360,23 @@ fn superposition_len(basis: &[BasisElem], key: AmbKey) -> usize {
     }
 }
 
-struct StepsExhausted;
+/// Which budget stopped a routine that reports the reason and nothing else.
+#[derive(Clone, Copy, Debug)]
+enum Exhausted {
+    Steps,
+    Origin,
+    Ambiguities,
+}
+
+impl Exhausted {
+    fn reason(self) -> TruncationReason {
+        match self {
+            Exhausted::Steps => TruncationReason::StepBudget,
+            Exhausted::Origin => TruncationReason::OriginBudget,
+            Exhausted::Ambiguities => TruncationReason::AmbiguityBudget,
+        }
+    }
+}
 
 struct Engine<'a> {
     field: PrimeField,
@@ -365,14 +412,14 @@ impl Engine<'_> {
         poly: &mut Poly,
         mut origin: Option<&mut Origin>,
         mut trace: Option<&mut Vec<TraceStep>>,
-    ) -> Result<(), StepsExhausted> {
+    ) -> Result<(), Exhausted> {
         loop {
             let Some((term_index, basis_index, position)) = find_reduction(basis, skip, poly)
             else {
                 return Ok(());
             };
             if self.steps >= self.limits.max_steps {
-                return Err(StepsExhausted);
+                return Err(Exhausted::Steps);
             }
             self.steps += 1;
             let (coeff, word) = poly.terms[term_index].clone();
@@ -400,67 +447,89 @@ impl Engine<'_> {
             if let Some(target) = origin.as_deref_mut() {
                 origin_add_scaled(
                     self.field,
+                    self.limits.max_origin_terms,
                     target,
                     neg,
                     &left,
                     &basis[basis_index].origin,
                     &right,
-                );
+                )?;
             }
         }
     }
 
-    /// The composition polynomial and provenance for `key`. Overlap:
-    /// `g_i·v - u·g_j`. Inclusion: `g_i - u·g_j·v`.
-    fn composition(&self, basis: &[BasisElem], key: AmbKey) -> (Poly, Origin) {
+    /// All ambiguities of the ordered pair `(i, j)`, added to `out`. Errors
+    /// when the key count passes `max_ambiguities`, so the set never holds
+    /// more than that plus the keys of one pair.
+    fn enqueue_pair(
+        &self,
+        basis: &[BasisElem],
+        i: usize,
+        j: usize,
+        out: &mut BTreeSet<AmbKey>,
+    ) -> Result<(), Exhausted> {
+        pair_ambiguities(i, j, lead_word(&basis[i]), lead_word(&basis[j]), out);
+        if out.len() > self.limits.max_ambiguities {
+            return Err(Exhausted::Ambiguities);
+        }
+        Ok(())
+    }
+
+    /// The composition polynomial for `key`, with its provenance written
+    /// into `origin` when the caller asks for it. Both kinds read
+    /// `g_i·v_i - u·g_j·v_j`: overlap puts the tail on the left factor
+    /// (`g_i·v - u·g_j`), inclusion on the right one (`g_i - u·g_j·v`).
+    fn composition(
+        &self,
+        basis: &[BasisElem],
+        key: AmbKey,
+        origin: Option<&mut Origin>,
+    ) -> Result<Poly, Exhausted> {
         let (i, j, kind, offset) = key;
         let li = lead_word(&basis[i]).clone();
         let lj = lead_word(&basis[j]).clone();
-        let neg_one = self.field.neg(self.field.one());
+        let one = self.field.one();
+        let neg_one = self.field.neg(one);
         let (u, v): (&[ArrowId], &[ArrowId]) = if kind == KIND_OVERLAP {
             (&li[..offset], &lj[li.len() - offset..])
         } else {
             (&li[..offset], &li[offset + lj.len()..])
         };
-        let mut poly;
-        let mut origin;
-        if kind == KIND_OVERLAP {
-            poly = add_scaled(
-                self.field,
-                &Poly::zero(),
-                self.field.one(),
-                &[],
-                &basis[i].poly,
-                v,
-            );
-            origin = Origin::new();
-            origin_add_scaled(
-                self.field,
-                &mut origin,
-                self.field.one(),
-                &[],
-                &basis[i].origin,
-                v,
-            );
-            poly = add_scaled(self.field, &poly, neg_one, u, &basis[j].poly, &[]);
-            origin_add_scaled(self.field, &mut origin, neg_one, u, &basis[j].origin, &[]);
+        let (vi, vj): (&[ArrowId], &[ArrowId]) = if kind == KIND_OVERLAP {
+            (v, &[])
         } else {
-            poly = basis[i].poly.clone();
-            origin = basis[i].origin.clone();
-            poly = add_scaled(self.field, &poly, neg_one, u, &basis[j].poly, v);
-            origin_add_scaled(self.field, &mut origin, neg_one, u, &basis[j].origin, v);
+            (&[], v)
+        };
+        let poly = add_scaled(self.field, &Poly::zero(), one, &[], &basis[i].poly, vi);
+        let poly = add_scaled(self.field, &poly, neg_one, u, &basis[j].poly, vj);
+        if let Some(target) = origin {
+            let max = self.limits.max_origin_terms;
+            origin_add_scaled(self.field, max, target, one, &[], &basis[i].origin, vi)?;
+            origin_add_scaled(self.field, max, target, neg_one, u, &basis[j].origin, vj)?;
         }
-        (poly, origin)
+        Ok(poly)
     }
 
     /// Drops every element whose leading word contains another element's
     /// leading word as a factor, sorts the rest by leading word, and
-    /// reduces each element's tail by the others. Returns the reduced
-    /// basis and whether the leading-word set changed.
+    /// reduces each remaining element by the others. No surviving leading
+    /// word is a factor of another, so that reduction touches only tails.
+    /// Returns the reduced basis and whether it dropped any element; the
+    /// caller re-runs completion while elements keep dropping.
     fn interreduce(
         &mut self,
         basis: Vec<BasisElem>,
     ) -> Result<(Vec<BasisElem>, bool), TruncationDiagnostics> {
+        // Redundancy below is antisymmetric only because leading words are
+        // pairwise distinct, which keeps `find_factor` strictly
+        // length-decreasing between two different elements. Every word has
+        // length >= 2, so a composition that reduces to a nonzero polynomial
+        // has a leading word no basis element reduces, hence a new one.
+        assert_eq!(
+            basis.iter().map(lead_word).collect::<BTreeSet<_>>().len(),
+            basis.len(),
+            "leading words are pairwise distinct"
+        );
         let mut kept: Vec<BasisElem> = Vec::new();
         for (i, elem) in basis.iter().enumerate() {
             let redundant = basis.iter().enumerate().any(|(j, other)| {
@@ -474,17 +543,14 @@ impl Engine<'_> {
         kept.sort_by(|a, b| word_cmp(lead_word(a), lead_word(b)));
         for index in 0..kept.len() {
             let mut elem = kept[index].clone();
-            if self
-                .reduce_full(
-                    &kept,
-                    Some(index),
-                    &mut elem.poly,
-                    Some(&mut elem.origin),
-                    None,
-                )
-                .is_err()
-            {
-                return Err(self.diag(kept.len(), 0, TruncationReason::StepBudget));
+            if let Err(exhausted) = self.reduce_full(
+                &kept,
+                Some(index),
+                &mut elem.poly,
+                Some(&mut elem.origin),
+                None,
+            ) {
+                return Err(self.diag(kept.len(), 0, exhausted.reason()));
             }
             kept[index] = elem;
         }
@@ -499,7 +565,9 @@ impl Engine<'_> {
         let mut keys: BTreeSet<AmbKey> = BTreeSet::new();
         for i in 0..basis.len() {
             for j in 0..basis.len() {
-                pair_ambiguities(i, j, lead_word(&basis[i]), lead_word(&basis[j]), &mut keys);
+                if let Err(exhausted) = self.enqueue_pair(basis, i, j, &mut keys) {
+                    return Err(self.diag(basis.len(), keys.len(), exhausted.reason()));
+                }
             }
         }
         let input_relations: Vec<RelationData> = presentation
@@ -512,11 +580,9 @@ impl Engine<'_> {
             let mut poly = poly_from_relation(relation);
             let start = poly_data(&poly);
             let mut steps = Vec::new();
-            if self
-                .reduce_full(basis, None, &mut poly, None, Some(&mut steps))
-                .is_err()
+            if let Err(exhausted) = self.reduce_full(basis, None, &mut poly, None, Some(&mut steps))
             {
-                return Err(self.diag(basis.len(), keys.len(), TruncationReason::StepBudget));
+                return Err(self.diag(basis.len(), keys.len(), exhausted.reason()));
             }
             debug_assert!(
                 poly.is_zero(),
@@ -527,14 +593,16 @@ impl Engine<'_> {
         let total = keys.len();
         let mut ambiguities = Vec::with_capacity(total);
         for (done, &key) in keys.iter().enumerate() {
-            let (mut poly, _) = self.composition(basis, key);
+            // The certificate carries no provenance for a composition, so
+            // this call skips the origin and cannot exhaust its budget.
+            let mut poly = self
+                .composition(basis, key, None)
+                .map_err(|exhausted| self.diag(basis.len(), total - done, exhausted.reason()))?;
             let start = poly_data(&poly);
             let mut steps = Vec::new();
-            if self
-                .reduce_full(basis, None, &mut poly, None, Some(&mut steps))
-                .is_err()
+            if let Err(exhausted) = self.reduce_full(basis, None, &mut poly, None, Some(&mut steps))
             {
-                return Err(self.diag(basis.len(), total - done, TruncationReason::StepBudget));
+                return Err(self.diag(basis.len(), total - done, exhausted.reason()));
             }
             debug_assert!(
                 poly.is_zero(),
@@ -670,11 +738,12 @@ fn run(
         let mut poly = poly_from_relation(relation);
         let mut origin = Origin::new();
         origin.insert((index, Vec::new(), Vec::new()), engine.field.one());
-        if engine
-            .reduce_full(&basis, None, &mut poly, Some(&mut origin), None)
-            .is_err()
+        if origin.len() > limits.max_origin_terms {
+            return Err(engine.diag(basis.len(), 0, TruncationReason::OriginBudget));
+        }
+        if let Err(exhausted) = engine.reduce_full(&basis, None, &mut poly, Some(&mut origin), None)
         {
-            return Err(engine.diag(basis.len(), 0, TruncationReason::StepBudget));
+            return Err(engine.diag(basis.len(), 0, exhausted.reason()));
         }
         if poly.is_zero() {
             continue;
@@ -689,7 +758,9 @@ fn run(
         let mut queue: BTreeSet<AmbKey> = BTreeSet::new();
         for i in 0..basis.len() {
             for j in 0..basis.len() {
-                pair_ambiguities(i, j, lead_word(&basis[i]), lead_word(&basis[j]), &mut queue);
+                if let Err(exhausted) = engine.enqueue_pair(&basis, i, j, &mut queue) {
+                    return Err(engine.diag(basis.len(), queue.len(), exhausted.reason()));
+                }
             }
         }
         while let Some(key) = queue.pop_first() {
@@ -697,12 +768,17 @@ fn run(
             if superposition_len(&basis, key) > limits.max_word_len {
                 return Err(engine.diag(basis.len(), pending, TruncationReason::WordLenBudget));
             }
-            let (mut poly, mut origin) = engine.composition(&basis, key);
-            if engine
-                .reduce_full(&basis, None, &mut poly, Some(&mut origin), None)
-                .is_err()
+            let mut origin = Origin::new();
+            let mut poly = match engine.composition(&basis, key, Some(&mut origin)) {
+                Ok(poly) => poly,
+                Err(exhausted) => {
+                    return Err(engine.diag(basis.len(), pending, exhausted.reason()));
+                }
+            };
+            if let Err(exhausted) =
+                engine.reduce_full(&basis, None, &mut poly, Some(&mut origin), None)
             {
-                return Err(engine.diag(basis.len(), pending, TruncationReason::StepBudget));
+                return Err(engine.diag(basis.len(), pending, exhausted.reason()));
             }
             if poly.is_zero() {
                 continue;
@@ -714,20 +790,12 @@ fn run(
             basis.push(BasisElem { poly, origin });
             let new = basis.len() - 1;
             for other in 0..basis.len() {
-                pair_ambiguities(
-                    new,
-                    other,
-                    lead_word(&basis[new]),
-                    lead_word(&basis[other]),
-                    &mut queue,
-                );
-                pair_ambiguities(
-                    other,
-                    new,
-                    lead_word(&basis[other]),
-                    lead_word(&basis[new]),
-                    &mut queue,
-                );
+                if let Err(exhausted) = engine
+                    .enqueue_pair(&basis, new, other, &mut queue)
+                    .and_then(|()| engine.enqueue_pair(&basis, other, new, &mut queue))
+                {
+                    return Err(engine.diag(basis.len(), queue.len(), exhausted.reason()));
+                }
             }
         }
         let (reduced, dropped) = engine.interreduce(basis)?;
@@ -739,11 +807,11 @@ fn run(
     engine.emit(presentation, &basis)
 }
 
-/// The irreducible-prefix automaton over the final leading words.
-/// States `0..n` are the vertices. The rest are the proper nonempty
-/// prefixes of leading words, sorted lexicographically. Reading an
-/// irreducible word from its source-vertex state ends in the state of its
-/// longest tracked suffix. A forbidden factor leaves no transition.
+/// The normal-word automaton over the final leading words. States `0..n`
+/// are the vertices. The rest are the proper nonempty prefixes of leading
+/// words, sorted lexicographically. Reading a normal word from its
+/// source-vertex state ends in the state of that word's longest tracked
+/// suffix. An arrow that completes a leading word has no transition.
 struct PrefixAutomaton {
     /// The word of each state; empty for the start states.
     words: Vec<Word>,
@@ -827,7 +895,7 @@ impl PrefixAutomaton {
     /// is finite. The prefix reads from the start state of its source
     /// vertex to a state on the cycle, and the cycle returns to exactly
     /// that state, so every step follows an automaton edge and the whole
-    /// walk spells an irreducible word.
+    /// walk spells a normal word.
     fn cycle_witness(&self) -> Option<(Vec<u32>, Vec<u32>)> {
         let m = self.trans.len();
         let mut reachable = vec![false; m];
@@ -1478,6 +1546,69 @@ mod tests {
         );
     }
 
+    /// One reduction step adds the whole origin of the basis element it
+    /// uses, so provenance grows faster than the step count. The first
+    /// budget below stops the seed of `r0`, the second the third
+    /// provenance term of `xxx`.
+    #[test]
+    fn tight_origin_budget_truncates() {
+        let none = CompletionLimits {
+            max_origin_terms: 0,
+            ..CompletionLimits::default()
+        };
+        assert_eq!(
+            truncated(&overlap_example(), &none),
+            TruncationDiagnostics {
+                basis_len: 0,
+                pending_ambiguities: 0,
+                steps_used: 0,
+                reason: TruncationReason::OriginBudget,
+            }
+        );
+        let two = CompletionLimits {
+            max_origin_terms: 2,
+            ..CompletionLimits::default()
+        };
+        assert_eq!(
+            truncated(&overlap_example(), &two),
+            TruncationDiagnostics {
+                basis_len: 2,
+                pending_ambiguities: 2,
+                steps_used: 1,
+                reason: TruncationReason::OriginBudget,
+            }
+        );
+    }
+
+    /// One vertex, three loops, every length-2 word forbidden. Each of the
+    /// 9 leading words overlaps 3 others, so the eager enumeration builds
+    /// 27 keys. Every composition of a monomial ideal is exactly zero, so
+    /// the drain charges no reduction steps and `max_steps` never fires:
+    /// only `max_ambiguities` bounds the queue.
+    #[test]
+    fn tight_ambiguity_budget_truncates() {
+        let quiver = Quiver::new(1, &[(0, 0), (0, 0), (0, 0)]).unwrap();
+        let field = f(2);
+        let relations = (0..3)
+            .flat_map(|p| (0..3).map(move |q| (p, q)))
+            .map(|(p, q)| rel(&quiver, field, &[(1, &[p, q])]))
+            .collect();
+        let presentation = Presentation::new(quiver, field, relations).unwrap();
+        let limits = CompletionLimits {
+            max_ambiguities: 4,
+            ..CompletionLimits::default()
+        };
+        assert_eq!(
+            truncated(&presentation, &limits),
+            TruncationDiagnostics {
+                basis_len: 9,
+                pending_ambiguities: 5,
+                steps_used: 0,
+                reason: TruncationReason::AmbiguityBudget,
+            }
+        );
+    }
+
     #[test]
     fn identical_input_gives_identical_bytes() {
         let p = overlap_example();
@@ -1503,7 +1634,7 @@ mod tests {
         assert!(c.origin.is_empty());
         assert!(c.membership.is_empty());
         assert!(c.ambiguities.is_empty());
-        // One free loop has infinitely many irreducible words. Per the
+        // One free loop has infinitely many normal words. Per the
         // module contract the list stays empty and the finiteness section
         // carries the witness.
         assert_eq!(c.normal_words, Vec::<Vec<u32>>::new());

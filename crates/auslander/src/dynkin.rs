@@ -30,7 +30,7 @@ pub enum DynkinType {
     /// The path on `n` vertices, `n ≥ 1`.
     A(usize),
     /// The tree with one vertex of degree three whose three arms have lengths
-    /// `1`, `1` and `n - 3`, so `n` vertices in all, `n ≥ 4`.
+    /// `1, 1, n - 3`, so `n` vertices in all, `n ≥ 4`.
     D(usize),
     /// The tree with one vertex of degree three whose arms have lengths
     /// `1, 2, 2`.
@@ -282,9 +282,12 @@ pub fn positive_roots(quiver: &Quiver) -> Option<Vec<Vec<usize>>> {
     )
 }
 
-/// A quiver whose underlying graph is the named Dynkin diagram, oriented away
-/// from the branch vertex; `None` when the parameter names no diagram or the
+/// A quiver whose underlying graph is the named Dynkin diagram, every arrow
+/// oriented away from vertex 0; `None` when the parameter names no diagram or the
 /// vertex count does not fit the `u32` vertex indexing of [`Quiver`].
+///
+/// Vertex 0 is the center of the star: the branch vertex for `D` and `E`, and one
+/// end of the path for `A`.
 pub fn dynkin_quiver(dynkin: DynkinType) -> Option<Quiver> {
     u32::try_from(dynkin.num_vertices()?).ok()?;
     Some(match dynkin {
@@ -323,7 +326,7 @@ pub enum DynkinError {
     /// The algebra has relations, so it is a proper quotient of `kQ`.
     /// Gabriel's theorem lists the indecomposables of `kQ` itself.
     NonzeroIdeal {
-        /// Number of Groebner relations the algebra carries.
+        /// Number of elements in the algebra's reduced Groebner basis.
         relations: usize,
     },
     /// The underlying graph of the quiver is no Dynkin diagram, so `kQ` is not
@@ -355,18 +358,23 @@ impl fmt::Display for DynkinError {
 
 impl std::error::Error for DynkinError {}
 
-/// Every indecomposable right module of a hereditary path algebra `kQ` with
-/// `Q` of Dynkin type, one per positive root of the underlying graph
-/// (Gabriel), ordered as [`positive_roots`] orders the roots.
+/// Every indecomposable right module of a hereditary path algebra `kQ` with `Q` of
+/// Dynkin type, one per positive root of the underlying graph, ordered as
+/// [`positive_roots`] orders the roots.
 ///
-/// Each module is built from a simple module by a chain of Bernstein-Gelfand-
-/// Ponomarev reflection functors: an admissible sequence of sinks is applied to
-/// the root until it becomes simple, and the corresponding functors `S_i^-` are
-/// applied back. Nothing is enumerated over the field.
+/// Gabriel's theorem is what makes the list complete: for `Q` of Dynkin type the
+/// dimension vector is a bijection from isomorphism classes of indecomposables to
+/// positive roots. The length of the list is
+/// [`DynkinType::indecomposable_count`].
+///
+/// Each module is built from a simple module by a chain of
+/// Bernstein-Gelfand-Ponomarev reflection functors. An admissible sequence of
+/// sinks is applied to the root until it becomes simple, then the matching
+/// functors `S_i^-` are applied back. Nothing is enumerated over the field.
 ///
 /// Every module comes with the certificate [`decompose`] produced for it. The
-/// construction proves indecomposability, so the certificate is an independent
-/// check rather than the source of the claim.
+/// construction already proves indecomposability, so that certificate is an
+/// independent check rather than the source of the claim.
 ///
 /// # Errors
 /// [`DynkinError::NonzeroIdeal`] when the algebra is a proper quotient of
@@ -420,13 +428,12 @@ struct Rep {
 
 /// The indecomposable representation of `quiver` with dimension vector `root`.
 ///
-/// `sinks` is an admissible sequence of sinks and `roots` the number of
-/// positive roots, both supplied by the caller. The state of the reflection
-/// chain is the pair (position in `sinks`, current root), so after
-/// `sinks.len() * roots` steps without reaching a simple root the chain would
-/// have repeated a state and could never reach one. The Bernstein-Gelfand-
-/// Ponomarev theorem says the chain does reach one, so exceeding that count is
-/// a library bug.
+/// `sinks` is an admissible sequence of sinks and `roots` the number of positive
+/// roots, both supplied by the caller. The state of the reflection chain is the
+/// pair (position in `sinks`, current root). After `sinks.len() * roots` steps
+/// without reaching a simple root the chain would have repeated a state, and a
+/// repeated state can never reach one. Bernstein-Gelfand-Ponomarev says the chain
+/// does reach one, so exceeding that count is a library bug.
 fn reflect_up_from_simple(
     quiver: &Quiver,
     sinks: &[u32],
@@ -528,7 +535,7 @@ fn reflect_minus(source_endpoints: &[(u32, u32)], i: u32, rep: &Rep, field: Prim
             }
         }
     }
-    let (reduced, pivots) = phi.rref(&field);
+    let (reduced, pivots) = phi.into_rref(&field);
     assert_eq!(
         pivots.len(),
         rep.dims[i as usize],
@@ -791,14 +798,7 @@ mod tests {
     use crate::iso::{IsoOutcome, is_isomorphic};
 
     fn path_algebra(quiver: Quiver, field: PrimeField) -> Arc<Algebra> {
-        let presentation = crate::algebra::MonomialPresentation::new(quiver, Vec::new())
-            .expect("an acyclic quiver has a finite kQ");
-        Algebra::from_monomial(
-            field,
-            &presentation,
-            &crate::completion::CompletionLimits::default(),
-        )
-        .expect("the zero ideal completes")
+        crate::algebra::path_algebra(quiver, field).expect("the zero ideal completes")
     }
 
     fn dynkin_types() -> Vec<DynkinType> {

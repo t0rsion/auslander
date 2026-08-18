@@ -1,4 +1,4 @@
-//! Morphisms of right modules, the Hom functor, and kernels, images, cokernels.
+//! Morphisms of right modules, the Hom functor, and kernels, images, and cokernels.
 //!
 //! A morphism `f: M → N` stores one `dim M_v × dim N_v` matrix per vertex, acting on
 //! row vectors (`x ↦ x f_v`). A-linearity is the commuting square
@@ -17,8 +17,10 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::field::{Fp, PrimeField};
+use crate::homspace::HomSpace;
 use crate::linalg::{DenseMat, SparseMat, SparseRow};
 use crate::module::Module;
+use crate::profile::{Site, hit};
 use crate::quiver::ArrowId;
 
 /// Rejected morphism input.
@@ -37,8 +39,8 @@ pub enum HomError {
         got: (usize, usize),
     },
     /// `maps[vertex]` holds an entry at `(row, col)` whose representative is not
-    /// canonical for the modules' field (not below its modulus); the entry was
-    /// produced by a different field.
+    /// canonical for the modules' field, meaning it is not below the modulus.
+    /// Such an entry comes from arithmetic over some other field.
     NonCanonicalEntry { vertex: u32, row: usize, col: usize },
     /// The square `f_{s(a)} · N(a) = M(a) · f_{t(a)}` fails at this arrow.
     SquareViolated { arrow: ArrowId },
@@ -117,6 +119,7 @@ impl Morphism {
         target: &Module,
         maps: Vec<DenseMat>,
     ) -> Result<Morphism, HomError> {
+        hit(Site::MorphismNew);
         let (m, n) = (source, target);
         check_parallel(m, n)?;
         let quiver = m.algebra().quiver();
@@ -149,6 +152,7 @@ impl Morphism {
             }
         }
         for i in 0..quiver.num_arrows() {
+            hit(Site::MorphismSquare);
             let arrow = ArrowId(i as u32);
             let (u, v) = (quiver.source(arrow), quiver.target(arrow));
             let left = maps[u as usize].mul(n.map(arrow), &field);
@@ -162,6 +166,50 @@ impl Morphism {
             target: target.clone(),
             maps,
         })
+    }
+
+    /// Builds a morphism `source -> target` from maps the caller has already
+    /// proved A-linear, without the checks [`Morphism::new`] runs.
+    ///
+    /// The caller takes on every obligation `Morphism::new` discharges:
+    /// `source` and `target` share one algebra, `maps` holds one matrix per
+    /// vertex, `maps[v]` is `dim source_v x dim target_v`, every entry is a
+    /// canonical representative for the field, and
+    /// `maps[s(a)] · target(a) = source(a) · maps[t(a)]` at every arrow `a`.
+    /// Break one and the value is not a morphism, and everything downstream
+    /// of it is wrong rather than rejected.
+    ///
+    /// Under `debug_assertions` this runs `Morphism::new` on the same
+    /// arguments and panics if it rejects them, so `cargo test` checks every
+    /// square that a release build skips.
+    ///
+    /// Every call site states the theorem that discharges the obligations, in
+    /// the docstring of the function it sits in. One call site has no such
+    /// place: the loop body in [`crate::module::direct_sum`], so its theorem
+    /// is here.
+    ///
+    /// The arrow matrix of the sum is block diagonal:
+    /// `sum(a)[off_k[u] + r][off_k[w] + c] = s_k(a)[r][c]` on the diagonal
+    /// blocks and zero off them, where `u = s(a)` and `w = t(a)`.
+    /// The inclusion `incl_k` selects a block of columns, so
+    /// `(incl_{k,u} · sum(a))[i][j] = sum(a)[off_k[u] + i][j]`, which is
+    /// `s_k(a)[i][c]` at `j = off_k[w] + c` and zero at every `j` in another
+    /// block. That is `(s_k(a) · incl_{k,w})[i][j]` entry for entry. The
+    /// projection `prj_k` selects a block of rows, so
+    /// `(sum(a) · prj_{k,w})[t][c] = sum(a)[t][off_k[w] + c]`, which is
+    /// `s_k(a)[i][c]` at `t = off_k[u] + i` and zero at every `t` in another
+    /// block; that is `(prj_{k,u} · s_k(a))[t][c]`. The entries of both are
+    /// `0` and `1`, which are canonical for every prime field.
+    pub(crate) fn new_unchecked(source: &Module, target: &Module, maps: Vec<DenseMat>) -> Morphism {
+        debug_assert!(
+            Morphism::new(source, target, maps.clone()).is_ok(),
+            "new_unchecked: the maps are not an A-linear map of these modules"
+        );
+        Morphism {
+            source: source.clone(),
+            target: target.clone(),
+            maps,
+        }
     }
 
     /// The source module.
@@ -189,6 +237,7 @@ impl Morphism {
     /// Errors with [`HomError::EndpointMismatch`] unless the target of `self` is the
     /// source of `g` in the sense of [`Module::ptr_eq`].
     pub fn then(&self, g: &Morphism) -> Result<Morphism, HomError> {
+        hit(Site::MorphismThen);
         if !self.target.ptr_eq(&g.source) {
             return Err(HomError::EndpointMismatch);
         }
@@ -217,9 +266,14 @@ impl Morphism {
     /// The image of a module element given as one row vector per vertex.
     ///
     /// # Panics
-    /// Panics when a vector's length differs from the source dimension at its vertex.
+    /// Panics when `element` does not hold one vector per vertex, or when a vector's
+    /// length differs from the source dimension at its vertex.
     pub fn apply(&self, element: &[Vec<Fp>]) -> Vec<Vec<Fp>> {
-        assert_eq!(element.len(), self.maps.len(), "apply: vertex count");
+        assert_eq!(
+            element.len(),
+            self.maps.len(),
+            "apply: needs one vector per vertex"
+        );
         let field = self.source.field();
         self.maps
             .iter()
@@ -228,6 +282,7 @@ impl Morphism {
             .collect()
     }
 
+    /// Whether every vertex matrix is zero.
     pub fn is_zero(&self) -> bool {
         self.maps
             .iter()
@@ -266,18 +321,66 @@ pub fn zero_morphism(m: &Module, n: &Module) -> Result<Morphism, HomError> {
     })
 }
 
-/// A basis of `Hom_A(m, n)`, from the kernel of the commuting-square linear system
-/// in the entries of the vertex matrices: for each arrow `a` and each pair `(i, j)`,
+/// The flat rows of `Hom_A(m, n)`: one row per basis element, the kernel of the
+/// commuting-square linear system in the entries of the vertex matrices. For each
+/// arrow `a` and each pair `(i, j)`,
 /// `Σ_c f_{s(a)}[i][c] · N(a)[c][j] − Σ_r M(a)[i][r] · f_{t(a)}[r][j] = 0`.
 ///
 /// Relations impose no further conditions: both modules already satisfy them, so any
 /// solution is automatically `kQ/I`-linear.
-pub fn hom(m: &Module, n: &Module) -> Result<Vec<Morphism>, HomError> {
+///
+/// A row is a basis element in flat coordinates. The unknown `f_v[r][c]` is
+/// variable `offsets[v] + r * dim N_v + c`, so variables run vertex-major, then
+/// row-major inside a vertex, which is the flattening
+/// [`crate::homspace::HomSpace`] stores. Unflattening one row costs one
+/// `Morphism`, so a caller that wants only a dimension pays for none.
+///
+/// The order of the rows is part of the contract. [`SparseMat::kernel_basis`] emits
+/// one basis vector per free column of the reduced row echelon form, in increasing
+/// column order. Two runs over the same pair of modules therefore return the same
+/// rows in the same positions. [`crate::homspace::HomSpace`] coordinates and the AR
+/// renderings committed under `tests/golden-ar` inherit this order, and
+/// `tests/determinism_ar.rs` compares them byte for byte. Change the variable layout
+/// or the free-column order and that gate fails.
+pub(crate) fn hom_rows(m: &Module, n: &Module) -> Result<DenseMat, HomError> {
+    hit(Site::Hom);
     check_parallel(m, n)?;
+    let field = m.field();
+    let (constraints, _) = square_constraints(m, n);
+    let kernel = constraints.kernel_basis(&field);
+    let mut rows = DenseMat::zero(kernel.rows(), constraints.cols());
+    for r in 0..kernel.rows() {
+        for &(idx, val) in kernel.row(r).entries() {
+            rows.set(r, idx, val);
+        }
+    }
+    Ok(rows)
+}
+
+/// A basis of `Hom_A(m, n)`, in the order `hom_rows` fixes.
+///
+/// It materializes every basis morphism. A caller that reads only a dimension
+/// wants [`hom_dim`], and one that reads a few basis elements wants
+/// [`HomSpace::basis_morphism`].
+pub fn hom(m: &Module, n: &Module) -> Result<Vec<Morphism>, HomError> {
+    Ok(HomSpace::new(m, n)?.into_basis())
+}
+
+/// The commuting-square system of `Hom_A(m, n)` and the variable offsets, one
+/// per vertex.
+///
+/// The unknown `f_v[r][c]` is variable `offsets[v] + r * dim N_v + c`, and the
+/// matrix has one column per unknown. Row `(a, i, j)` is entry `(i, j)` of
+/// `f_{s(a)} · N(a) − M(a) · f_{t(a)}`. Rows that are identically zero are
+/// dropped: they constrain nothing, and dropping them leaves the row space,
+/// the rank, and the kernel unchanged.
+///
+/// Both callers rely on the column order, which is the order of the Hom basis
+/// [`hom`] documents.
+fn square_constraints(m: &Module, n: &Module) -> (SparseMat, Vec<usize>) {
     let field = m.field();
     let quiver = m.algebra().quiver();
     let num_vertices = quiver.num_vertices() as usize;
-    // Variable for f_v[r][c]: offsets[v] + r * dim N_v + c.
     let mut offsets = Vec::with_capacity(num_vertices);
     let mut total = 0usize;
     for v in 0..num_vertices {
@@ -312,32 +415,22 @@ pub fn hom(m: &Module, n: &Module) -> Result<Vec<Morphism>, HomError> {
             }
         }
     }
-    let kernel = SparseMat::from_rows(rows, total).kernel_basis(&field);
-    let mut basis = Vec::with_capacity(kernel.rows());
-    for r in 0..kernel.rows() {
-        let mut maps: Vec<DenseMat> = m
-            .dim_vector()
-            .iter()
-            .zip(n.dim_vector())
-            .map(|(&a, &b)| DenseMat::zero(a, b))
-            .collect();
-        for &(idx, val) in kernel.row(r).entries() {
-            // Zero-sized blocks contain no variable, so among equal offsets the last
-            // vertex is the one the index belongs to.
-            let v = offsets.partition_point(|&o| o <= idx) - 1;
-            let local = idx - offsets[v];
-            let cols = n.dim_vector()[v];
-            maps[v].set(local / cols, local % cols, val);
-        }
-        basis.push(Morphism::new(m, n, maps).expect("kernel solutions satisfy the squares"));
-    }
-    Ok(basis)
+    (SparseMat::from_rows(rows, total), offsets)
 }
 
 /// `dim_k Hom_A(m, n)`; errors when the modules do not share one algebra, as
 /// [`hom`].
+///
+/// The answer is `columns - rank` of the commuting-square system.
+/// [`SparseMat::kernel_basis`] emits one row per free column, so the basis
+/// [`hom`] returns has exactly that length. Rank needs the forward
+/// elimination alone, where a basis needs the back substitution, the kernel
+/// rows, and one `Morphism` per row.
 pub fn hom_dim(m: &Module, n: &Module) -> Result<usize, HomError> {
-    hom(m, n).map(|basis| basis.len())
+    hit(Site::HomDim);
+    check_parallel(m, n)?;
+    let (constraints, _) = square_constraints(m, n);
+    Ok(constraints.cols() - constraints.rank(&m.field()))
 }
 
 /// Coordinates of each row of `vectors` in the row basis `basis`: the matrix `X`
@@ -350,6 +443,7 @@ pub(crate) fn express_in_row_basis(
     vectors: &DenseMat,
     field: &PrimeField,
 ) -> DenseMat {
+    hit(Site::ExpressInRowBasis);
     let bt = basis.transpose();
     let mut out = DenseMat::zero(vectors.rows(), basis.rows());
     for r in 0..vectors.rows() {
@@ -368,6 +462,7 @@ pub(crate) fn express_in_row_basis(
 /// # Panics
 /// Panics when a column of `rhs` lies outside the column space of `a`.
 fn solve_columns(a: &DenseMat, rhs: &DenseMat, field: &PrimeField) -> DenseMat {
+    hit(Site::SolveColumns);
     let rt = rhs.transpose();
     let mut out = DenseMat::zero(a.cols(), rhs.cols());
     for j in 0..rhs.cols() {
@@ -384,14 +479,35 @@ fn solve_columns(a: &DenseMat, rhs: &DenseMat, field: &PrimeField) -> DenseMat {
 /// The submodule of `parent` spanned at each vertex by the rows of `bases[v]`,
 /// together with its inclusion.
 ///
-/// The rows must span an A-invariant family of subspaces; the induced arrow map
-/// `S(a)` solves `S(a) · bases[t(a)] = bases[s(a)] · M(a)`.
+/// Write `M(a)` for the arrow matrix of `parent`. The rows of `bases[v]` must be
+/// canonical for the parent's field and linearly independent, and their row
+/// spaces must form an A-invariant family. The induced arrow map `S(a)` solves
+/// `S(a) · bases[t(a)] = bases[s(a)] · M(a)`.
+///
+/// Independence is a precondition the caller carries, checked only under
+/// `debug_assertions`. It is what makes `S(a)` the unique solution and what
+/// carries the relations: from `S(a) · bases[t(a)] = bases[s(a)] · M(a)` at every
+/// arrow, a relation `ρ` gives `S(ρ) · bases[t(ρ)] = bases[s(ρ)] · M(ρ) = 0`, and
+/// only a full-rank `bases[t(ρ)]` cancels on the left to leave `S(ρ) = 0`. With
+/// dependent rows the solve still succeeds and `S(a)` is any of several answers.
+///
+/// The inclusion is `bases` itself and skips the checks of [`Morphism::new`]. Its
+/// square at `a` reads `bases[s(a)] · M(a) = S(a) · bases[t(a)]`, which is the
+/// equation [`express_in_row_basis`] solved, and that solve panics rather than
+/// return a vector outside the row span. The shapes are right because `bases[v]`
+/// is `dims[v] x dim parent_v`, and the entries are the caller's own canonical
+/// ones.
 pub(crate) fn submodule_with_inclusion(
     parent: &Module,
     bases: Vec<DenseMat>,
 ) -> (Module, Morphism) {
+    hit(Site::Submodule);
     let field = parent.field();
     let quiver = parent.algebra().quiver();
+    debug_assert!(
+        bases.iter().all(|b| b.rank(&field) == b.rows()),
+        "submodule_with_inclusion: the spanning rows are not linearly independent"
+    );
     let dims: Vec<usize> = bases.iter().map(DenseMat::rows).collect();
     let maps = (0..quiver.num_arrows())
         .map(|i| {
@@ -403,24 +519,45 @@ pub(crate) fn submodule_with_inclusion(
         .collect();
     let sub = Module::new(parent.algebra().clone(), dims, maps)
         .expect("a submodule of a module is a module");
-    let inclusion = Morphism::new(&sub, parent, bases).expect("submodule inclusion commutes");
+    let inclusion = Morphism::new_unchecked(&sub, parent, bases);
     (sub, inclusion)
 }
 
 /// The quotient of `parent` by the subspaces spanned at each vertex by the rows of
 /// `bases[v]`, together with its projection.
 ///
-/// The projection matrix is `Q_v = (right kernel of bases[v])ᵀ`: `x · Q_v = 0` exactly
-/// on the subspace and `Q_v` has full column rank, so `x ↦ x Q_v` is a surjection with
-/// kernel the subspace. Invariance makes `N(a) · Q_{t(a)}` land in the column space of
-/// `Q_{s(a)}`, and the induced map solves `Q_{s(a)} · C(a) = N(a) · Q_{t(a)}`.
+/// Write `M(a)` for the arrow matrix of `parent`. The row spaces of `bases` must
+/// form an A-invariant family. The projection matrix is
+/// `Q_v = (right kernel of bases[v])ᵀ`: `x · Q_v = 0` exactly on the subspace, and
+/// `Q_v` has full column rank, so `x ↦ x Q_v` is a surjection whose kernel is the
+/// subspace. Invariance makes `M(a) · Q_{t(a)}` land in the column space of
+/// `Q_{s(a)}`, and the induced map solves `Q_{s(a)} · C(a) = M(a) · Q_{t(a)}`.
+///
+/// Full column rank is not a caller precondition here: each column of `Q_v` is a
+/// row of [`DenseMat::kernel_basis`], which carries a 1 in its own free column,
+/// so the columns are independent. It is what makes `C(a)` unique and what carries
+/// the relations, since only a full-column-rank `Q_{s(ρ)}` cancels on the right of
+/// `Q_{s(ρ)} · C(ρ) = M(ρ) · Q_{t(ρ)} = 0`. A `debug_assert` holds
+/// `kernel_basis` to it.
+///
+/// The projection is `projections` itself and skips the checks of
+/// [`Morphism::new`]. Its square at `a` reads `Q_{s(a)} · C(a) = M(a) · Q_{t(a)}`,
+/// which is the equation [`solve_columns`] solved, and that solve panics rather
+/// than return a column outside the column space. The shapes are right because
+/// `Q_v` is `dim parent_v x dims[v]`, and the entries come from `kernel_basis` and
+/// `solve` over the parent's own field.
 pub(crate) fn quotient_with_projection(parent: &Module, bases: &[DenseMat]) -> (Module, Morphism) {
+    hit(Site::Quotient);
     let field = parent.field();
     let quiver = parent.algebra().quiver();
     let projections: Vec<DenseMat> = bases
         .iter()
         .map(|b| b.kernel_basis(&field).transpose())
         .collect();
+    debug_assert!(
+        projections.iter().all(|q| q.rank(&field) == q.cols()),
+        "quotient_with_projection: the projection columns are not linearly independent"
+    );
     let dims: Vec<usize> = projections.iter().map(DenseMat::cols).collect();
     let maps = (0..quiver.num_arrows())
         .map(|i| {
@@ -432,8 +569,7 @@ pub(crate) fn quotient_with_projection(parent: &Module, bases: &[DenseMat]) -> (
         .collect();
     let quotient = Module::new(parent.algebra().clone(), dims, maps)
         .expect("a quotient of a module is a module");
-    let projection =
-        Morphism::new(parent, &quotient, projections).expect("quotient projection commutes");
+    let projection = Morphism::new_unchecked(parent, &quotient, projections);
     (quotient, projection)
 }
 
@@ -446,8 +582,9 @@ fn row_space_bases(f: &Morphism, field: &PrimeField, num_vertices: u32) -> Vec<D
 /// The kernel of `f` with its inclusion into `f.source()`.
 ///
 /// At each vertex the kernel of the row action `x ↦ x f_v` is the left null space of
-/// `f_v`, i.e. the right null space of `f_vᵀ`.
+/// `f_v`, that is, the right null space of `f_vᵀ`.
 pub fn kernel(f: &Morphism) -> (Module, Morphism) {
+    hit(Site::HomKernel);
     let m = f.source();
     let field = m.field();
     let bases: Vec<DenseMat> = (0..m.algebra().quiver().num_vertices())
@@ -460,6 +597,7 @@ pub fn kernel(f: &Morphism) -> (Module, Morphism) {
 ///
 /// At each vertex the image of the row action is the row space of `f_v`.
 pub fn image(f: &Morphism) -> (Module, Morphism) {
+    hit(Site::HomImage);
     let n = f.target();
     let field = n.field();
     let bases = row_space_bases(f, &field, n.algebra().quiver().num_vertices());
@@ -467,7 +605,10 @@ pub fn image(f: &Morphism) -> (Module, Morphism) {
 }
 
 /// The cokernel of `f` with the projection from `f.target()`.
+///
+/// At each vertex it is the quotient of `N_v` by the row space of `f_v`.
 pub fn cokernel(f: &Morphism) -> (Module, Morphism) {
+    hit(Site::HomCokernel);
     let n = f.target();
     let field = n.field();
     let bases = row_space_bases(f, &field, n.algebra().quiver().num_vertices());
@@ -537,7 +678,7 @@ mod tests {
     // Right-module Yoneda gives Hom(P_v, M) ≅ M_v. For linearly oriented A_2 (arrow
     // 0 → 1), P_0 = e_0 A has dimension vector (1, 1) and P_1 has (0, 1), so
     // Hom(P_0, P_1) ≅ (P_1)_0 = 0 while Hom(P_1, P_0) ≅ (P_0)_1 = k: the nonzero map
-    // sends e_1 to the path a, i.e. it runs P_1 → P_0, opposite to the left-module
+    // sends e_1 to the path a, so it runs P_1 → P_0, opposite to the left-module
     // convention. Hence End(P_0 ⊕ P_1) = End(P_0) ⊕ End(P_1) ⊕ Hom(P_1, P_0) = k³.
     #[test]
     fn endomorphisms_of_p0_plus_p1_over_a2_have_dimension_3() {
@@ -623,7 +764,8 @@ mod tests {
         let algebra = linear_an(2, field);
         let p0 = Module::projective(&algebra, 0);
         let p1 = Module::projective(&algebra, 1);
-        // f_1 = [1] alone would need f_0 · N(a) = M(a) · f_1 = [1] with f_0 empty-width.
+        // The square at arrow 0 needs f_0 · N(a) = M(a) · f_1 = [1], but f_0 is 1x0,
+        // so the left side is the 1x1 zero matrix.
         let maps = vec![DenseMat::zero(1, 0), DenseMat::identity(1)];
         assert_eq!(
             Morphism::new(&p0, &p1, maps).unwrap_err(),

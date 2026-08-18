@@ -1,10 +1,11 @@
 //! Radical, top, socle, and Loewy series of right modules.
 //!
-//! In the row-vector convention (see [`crate::module`]):
-//! `rad(M)_v = M·J at v` is the sum over arrows `a: u → v` of the row spaces of
-//! `M(a)`. The images of the row actions `x ↦ x M(a)` land at the arrow's target.
-//! `soc(M)_v = {x ∈ M_v : x M(a) = 0 for every arrow a with source v}`, because
-//! every nontrivial path begins with an arrow leaving its source vertex.
+//! The formulas come out of the row-vector convention (see [`crate::module`]).
+//! The part of `rad M = M·J` at `v` is the sum over arrows `a: u → v` of the row
+//! spaces of `M(a)`, because the row action `x ↦ x M(a)` lands at the arrow's
+//! target. The part of `soc M` at `v` is
+//! `{x ∈ M_v : x M(a) = 0 for every arrow a out of v}`, because every nontrivial
+//! path starts with an arrow leaving its source vertex.
 
 use crate::field::Fp;
 use crate::hom::{Morphism, quotient_with_projection, submodule_with_inclusion};
@@ -35,17 +36,19 @@ fn radical_bases(m: &Module) -> Vec<DenseMat> {
                     rows.push(map.row(r).to_vec());
                 }
             }
-            stacked(&rows, m.dim_at(v)).row_space_basis(&field)
+            stacked(&rows, m.dim_at(v)).into_row_space_basis(&field)
         })
         .collect()
 }
 
-/// At each vertex `v`, a row basis of `{x ∈ M_v : x J^k = 0}`. A spanning
-/// set of `e_v J^k` comes from [`crate::algebra::Algebra::radical_power_component`]
-/// over every target vertex, each spanning row acting through
-/// [`Module::element_action`]. Word length decides nothing here: an
-/// inhomogeneous relation can place a short normal word inside a deep
-/// radical power.
+/// At each vertex `v`, a row basis of `{x ∈ M_v : x J^k = 0}`.
+///
+/// A spanning set of `e_v J^k` comes from
+/// [`crate::algebra::Algebra::radical_power_matrix`] over every target vertex,
+/// one spanning row per matrix row, each acting through
+/// [`Module::element_action`]. Word length decides nothing: `J^k` is not the
+/// span of the normal words of length `k` or more, because an inhomogeneous
+/// relation can put a short normal word in a deep radical power.
 fn joint_kernel_bases(m: &Module, k: usize) -> Vec<DenseMat> {
     let field = m.field();
     let algebra = m.algebra();
@@ -55,8 +58,10 @@ fn joint_kernel_bases(m: &Module, k: usize) -> Vec<DenseMat> {
             let mut rows: Vec<Vec<Fp>> = Vec::new();
             for w in 0..quiver.num_vertices() {
                 let component = algebra.paths_between(v, w);
-                for coefficients in algebra.radical_power_component(v, w, k) {
-                    let terms: Vec<(usize, Fp)> = coefficients
+                let power = algebra.radical_power_matrix(v, w, k);
+                for r in 0..power.rows() {
+                    let terms: Vec<(usize, Fp)> = power
+                        .row(r)
                         .iter()
                         .enumerate()
                         .filter(|(_, c)| !c.is_zero())
@@ -67,12 +72,12 @@ fn joint_kernel_bases(m: &Module, k: usize) -> Vec<DenseMat> {
                     }
                     // x · A = 0 iff x is orthogonal to every column of A.
                     let columns = m.element_action(&terms).transpose();
-                    for r in 0..columns.rows() {
-                        rows.push(columns.row(r).to_vec());
+                    for i in 0..columns.rows() {
+                        rows.push(columns.row(i).to_vec());
                     }
                 }
             }
-            stacked(&rows, m.dim_at(v)).kernel_basis(&field)
+            stacked(&rows, m.dim_at(v)).into_kernel_basis(&field)
         })
         .collect()
 }

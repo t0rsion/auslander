@@ -1,6 +1,6 @@
 [package]
 name = "auslander"
-version = "0.4.0"
+version = "0.5.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -13,3 +13,12 @@ categories = ["mathematics", "science"]
 
 [dependencies]
 rustc-hash = "2.0"
+
+[features]
+# Exact call counters in the primitives. See `src/profile.rs`. Off by default;
+# no released build carries them.
+profiling = []
+
+[[bench]]
+name = "perf"
+harness = false

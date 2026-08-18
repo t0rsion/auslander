@@ -186,7 +186,9 @@ impl OppositeMap {
     }
 
     /// The opposite-side arrow of `a`: the same id, endpoints swapped.
-    /// Panics if `a` is not an arrow of the algebra's quiver.
+    ///
+    /// # Panics
+    /// Panics unless `a` is an arrow of the algebra's quiver.
     #[inline]
     pub fn arrow_to_op(&self, a: ArrowId) -> ArrowId {
         assert!(
@@ -198,6 +200,9 @@ impl OppositeMap {
     }
 
     /// The algebra-side arrow of an opposite arrow, as [`Self::arrow_to_op`].
+    ///
+    /// # Panics
+    /// Panics unless `a` is an arrow of the opposite quiver.
     #[inline]
     pub fn arrow_from_op(&self, a: ArrowId) -> ArrowId {
         assert!(
@@ -388,8 +393,10 @@ impl ElementMatrix {
     }
 
     /// The coefficients of entry `(k, l)` on
-    /// `paths_between(targets()[l], sources()[k])`. Panics if `k` or `l` is out
-    /// of range.
+    /// `paths_between(targets()[l], sources()[k])`.
+    ///
+    /// # Panics
+    /// Panics unless `k` and `l` are in range.
     #[inline]
     pub fn entry(&self, k: usize, l: usize) -> &[Fp] {
         &self.entries[k][l]
@@ -555,24 +562,28 @@ impl ElementMatrix {
     }
 }
 
-/// The Nakayama functor `ν = D Hom_A(−, A)` on a map between projective sums:
-/// the induced morphism `⊕_k I_{sources[k]} → ⊕_l I_{targets[l]}` between the
-/// corresponding sums of the injectives built by [`Module::injective`].
+/// The Nakayama functor `ν = D Hom_A(−, A)` on a map between projective sums: the
+/// induced morphism `⊕_k I_{sources[k]} → ⊕_l I_{targets[l]}` between the matching
+/// sums of the injectives built by [`Module::injective`].
 ///
-/// Convention derivation (right modules, row vectors). The `(k, l)` component
-/// of the map is left multiplication by `x = Σ_r c_r·r ∈ e_{t_l} A e_{s_k}`
-/// (see [`ElementMatrix`]). `Hom_A(−, A)` turns it into right multiplication
-/// `·x: A e_{t_l} → A e_{s_k}`. `D` of that is
-/// `ν(x): D(A e_{s_k}) = I_{s_k} → D(A e_{t_l}) = I_{t_l}`. So `ν` is
-/// covariant and `ν(P_i) = I_i` exactly. On the dual bases of
-/// [`Module::injective`], `ν(x)(q^*) = q^* ∘ (·x)` evaluates on a basis word
-/// `p: w → t_l` to the coefficient of `q` in the normal form of `p·x`, so in
-/// the row-vector convention the matrix at vertex `w` has entry
-/// `Σ_r c_r · [q](p·r)` at row `q ∈ paths(w, s_k)`, column
-/// `p ∈ paths(w, t_l)`. Applied to a minimal presentation
-/// `P_1 → P_0 → M → 0`, this is the map whose kernel is `τ M`:
-/// `Hom_A(−, A)` gives `0 → Hom(M, A) → Hom(P_0, A) → Hom(P_1, A) → Tr M → 0`,
-/// and dualizing gives `0 → τ M → ν P_1 → ν P_0 → ν M → 0`.
+/// The conventions come out of right modules and row vectors, in three steps. The
+/// `(k, l)` component of the input map is left multiplication by
+/// `x = Σ_r c_r·r ∈ e_{t_l} A e_{s_k}` (see [`ElementMatrix`]). `Hom_A(−, A)`
+/// turns that into right multiplication `·x: A e_{t_l} → A e_{s_k}`. `D` turns
+/// that into `ν(x): D(A e_{s_k}) = I_{s_k} → D(A e_{t_l}) = I_{t_l}`. Two
+/// reversals cancel, so `ν` is covariant, and `ν(P_i) = I_i` exactly.
+///
+/// The matrix follows from the same reading. On the dual bases of
+/// [`Module::injective`], `ν(x)(q^*) = q^* ∘ (·x)` sends a basis word
+/// `p: w → t_l` to the coefficient of `q` in the normal form of `p·x`. In the
+/// row-vector convention the matrix at vertex `w` therefore has entry
+/// `Σ_r c_r · [q](p·r)` at row `q ∈ paths(w, s_k)` and column
+/// `p ∈ paths(w, t_l)`.
+///
+/// Apply this to a minimal presentation `P_1 → P_0 → M → 0` and the kernel is the
+/// AR translate. `Hom_A(−, A)` gives
+/// `0 → Hom(M, A) → Hom(P_0, A) → Hom(P_1, A) → Tr M → 0`, and dualizing gives
+/// `0 → τ M → ν P_1 → ν P_0 → ν M → 0`.
 pub fn nu_of_presentation_map(matrix: &ElementMatrix) -> Morphism {
     let algebra = matrix.algebra();
     let field = matrix.field();
@@ -703,14 +714,14 @@ mod tests {
     }
 
     /// x^65 as a general relation needs `max_word_len = 129`; the default
-    /// 64 truncates. The opposite recompletes the reversed relation with
-    /// the STORED limits, so it inherits the raised budget. Rebuilding
-    /// the same algebra from its certificate with `from_verified` resets
-    /// to the defaults by policy, and there the opposite truncates.
+    /// 64 truncates. The opposite recompletes the reversed relation with the
+    /// limits stored on the algebra, so it inherits the raised budget.
+    /// Rebuilding the same algebra from its certificate with `from_verified`
+    /// resets to the defaults by policy, and there the opposite truncates.
     #[test]
     fn opposite_and_tau_inherit_raised_completion_limits() {
         use crate::algebra::AlgebraBuildError;
-        use crate::ar::{Tau, tau};
+        use crate::ar::tau;
         use crate::completion::CompletionLimits;
         use crate::verify::verify;
         let field = f5();
@@ -729,13 +740,11 @@ mod tests {
         assert_eq!(op.opposite().completion_limits(), &raised);
         // Over the symmetric algebra k[x]/(x^65), tau = Omega^2 and
         // Omega(k[x]/(x)) = k[x]/(x^64), so tau S = S.
-        match tau(&Module::simple(&a, 0)).unwrap() {
-            Tau::Module(t) => assert_eq!(t.dim_vector(), &[1]),
-            Tau::Zero => panic!("the simple over k[x]/(x^65) is not projective"),
-        }
+        assert_eq!(tau(&Module::simple(&a, 0)).unwrap().dim_vector(), &[1]);
         let defaults = crate::algebra::Algebra::from_verified(
             verify(&a.certificate().to_canonical_json()).unwrap(),
-        );
+        )
+        .expect("x^65 is admissible");
         assert!(matches!(
             opposite(&defaults),
             Err(AlgebraBuildError::Truncated(_))

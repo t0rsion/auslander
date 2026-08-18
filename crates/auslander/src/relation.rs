@@ -11,16 +11,23 @@ use crate::field::{Fp, PrimeField};
 use crate::order::word_cmp;
 use crate::quiver::{ArrowId, PathWord, Quiver, QuiverError};
 
-/// Rejected relation input. `index` names the offending term position in the
-/// input list passed to [`Relation::new`].
+/// Rejected relation input. Where a variant carries `index`, it is the
+/// position of the offending term: in the list passed to [`Relation::new`],
+/// or in the stored terms of the relation that [`Presentation::new`]
+/// rejected.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RelationError {
     /// A relation needs at least one term.
     Empty,
+    /// The relation was built over a field with modulus `found`, and the
+    /// presentation has modulus `expected`. Coefficients are canonical
+    /// representatives, so the same raw value means different elements in
+    /// the two fields.
+    FieldMismatch { expected: u64, found: u64 },
     /// Term `index` has coefficient zero.
     ZeroCoefficient { index: usize },
-    /// Term `index` has a coefficient outside `0..p`; it was made for another
-    /// field.
+    /// Term `index` has a coefficient outside `0..p`, so it comes from a
+    /// field with a larger modulus.
     NonCanonicalCoefficient { index: usize },
     /// Term `index` repeats the word of an earlier term.
     DuplicateWord { index: usize },
@@ -40,12 +47,16 @@ impl fmt::Display for RelationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => f.write_str("relation needs at least one term"),
+            Self::FieldMismatch { expected, found } => write!(
+                f,
+                "relation is over the field with modulus {found}, the presentation over {expected}"
+            ),
             Self::ZeroCoefficient { index } => {
                 write!(f, "term {index} has coefficient zero")
             }
             Self::NonCanonicalCoefficient { index } => write!(
                 f,
-                "term {index} has a coefficient outside 0..p; it was made for another field"
+                "term {index} has a coefficient outside 0..p; its field has a larger modulus"
             ),
             Self::DuplicateWord { index } => {
                 write!(f, "term {index} repeats the word of an earlier term")
@@ -76,24 +87,32 @@ impl std::error::Error for RelationError {
     }
 }
 
-/// A uniform admissible relation: a nonzero k-combination of distinct
-/// parallel paths of length >= 2.
+/// A uniform relation: a nonzero k-combination of distinct parallel paths of
+/// length >= 2.
 ///
 /// Terms are in strictly descending order under [`crate::order::word_cmp`];
-/// coefficients are nonzero and canonical for the field the relation was
-/// built with.
+/// coefficients are nonzero and canonical for [`Relation::field`], the field
+/// the relation was built over. The relation carries that field so a later
+/// [`Presentation`] cannot reinterpret the coefficients over another one.
+///
+/// Length >= 2 gives `I ⊆ J²`, one half of admissibility. The other half,
+/// nilpotence of `J`, depends on the whole ideal and is decided when
+/// [`crate::algebra::Algebra`] is built.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Relation {
+    field: PrimeField,
     terms: Vec<(Fp, PathWord)>,
 }
 
 impl Relation {
-    /// Validates and normalizes `terms` into a relation over `quiver` and
+    /// Validates `terms` and sorts them into a relation over `quiver` and
     /// `field`.
     ///
     /// Rejects an empty term list, zero or non-canonical coefficients,
     /// duplicate words, non-path words, words of length < 2, and mixed
     /// sources or targets. Sorts the terms in strictly descending order.
+    /// Coefficients are kept as given: nothing here scales the relation to a
+    /// monic leading term.
     pub fn new(
         quiver: &Quiver,
         field: PrimeField,
@@ -133,7 +152,17 @@ impl Relation {
             checked.push((coeff, word));
         }
         checked.sort_by(|(_, a), (_, b)| word_cmp(b.arrows(), a.arrows()));
-        Ok(Relation { terms: checked })
+        Ok(Relation {
+            field,
+            terms: checked,
+        })
+    }
+
+    /// The field the relation was built over. Its coefficients are canonical
+    /// representatives for this field and mean something else in any other.
+    #[inline]
+    pub fn field(&self) -> PrimeField {
+        self.field
     }
 
     /// Terms in strictly descending order under the sealed order.
@@ -142,7 +171,7 @@ impl Relation {
         &self.terms
     }
 
-    /// The largest term.
+    /// The term with the largest word, `terms[0]`.
     #[inline]
     pub fn leading(&self) -> (&Fp, &PathWord) {
         let (coeff, word) = &self.terms[0];
@@ -174,23 +203,26 @@ pub struct Presentation {
 impl Presentation {
     /// Bundles relations with the quiver and field they were built over.
     ///
-    /// Every relation must already be a [`Relation`] over this quiver and
-    /// field. The check here is cheap: every word must be a path of `quiver`
-    /// and every coefficient must be nonzero and canonical for `field`. A
-    /// failure reports the term index inside the offending relation.
+    /// Each relation must already be a [`Relation`] over this quiver and
+    /// field. Two things are checked: [`Relation::field`] must equal `field`,
+    /// and every word must be a path of `quiver`. Coefficients, uniformity,
+    /// word length, and term order are not rechecked; [`Relation::new`]
+    /// established them over the field the relation carries, and that is now
+    /// this field. A rejected word names its term index inside the offending
+    /// relation, never which relation failed.
     pub fn new(
         quiver: Quiver,
         field: PrimeField,
         relations: Vec<Relation>,
     ) -> Result<Presentation, RelationError> {
         for relation in &relations {
-            for (index, (coeff, word)) in relation.terms.iter().enumerate() {
-                if coeff.is_zero() {
-                    return Err(RelationError::ZeroCoefficient { index });
-                }
-                if coeff.raw() >= field.modulus() {
-                    return Err(RelationError::NonCanonicalCoefficient { index });
-                }
+            if relation.field != field {
+                return Err(RelationError::FieldMismatch {
+                    expected: field.modulus(),
+                    found: relation.field.modulus(),
+                });
+            }
+            for (index, (_, word)) in relation.terms.iter().enumerate() {
                 word.validate_in(&quiver)
                     .map_err(|error| RelationError::InvalidWord { index, error })?;
             }
@@ -388,7 +420,28 @@ mod tests {
         let r = Relation::new(&q, f7, vec![(f7.elem(6), ids(&[0, 1]))]).unwrap();
         assert_eq!(
             Presentation::new(q, f5(), vec![r]),
-            Err(RelationError::NonCanonicalCoefficient { index: 0 })
+            Err(RelationError::FieldMismatch {
+                expected: 5,
+                found: 7,
+            })
+        );
+    }
+
+    /// Over F_5 the coefficient -1 is the raw value 4, which is canonical for
+    /// F_7 too and means +4 there. Only the stored field separates the two.
+    #[test]
+    fn presentation_rejects_a_relation_whose_coefficient_fits_the_other_field() {
+        let q = commutative_square();
+        let f5 = f5();
+        let r = Relation::new(&q, f5, vec![(f5.elem(-1), ids(&[0, 1]))]).unwrap();
+        assert_eq!(r.terms()[0].0, f5.elem(4));
+        assert_eq!(r.field(), f5);
+        assert_eq!(
+            Presentation::new(q, PrimeField::new(7).unwrap(), vec![r]),
+            Err(RelationError::FieldMismatch {
+                expected: 7,
+                found: 5,
+            })
         );
     }
 }

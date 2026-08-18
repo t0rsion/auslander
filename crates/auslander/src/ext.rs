@@ -1,33 +1,41 @@
-//! Ext dimensions and global dimension via minimal resolutions and Yoneda bases.
+//! Ext groups over minimal resolutions: dimensions, global dimension,
+//! [`ExtSpace`] and [`ExtClass`] as explicit vector space data, and Yoneda
+//! products with their chain-lift witnesses.
 //!
-//! `Ext^k(M, N)` is the cohomology of `Hom_A(P_•, N)` for a projective resolution
-//! `P_• → M`. Every term produced by [`projective_cover`](crate::resolution::projective_cover) is `⊕_v P_v^{t_v}` in a
-//! canonical layout, and Yoneda gives `Hom_A(e_v A, N) ≅ N_v`. So `Hom_A(P, N)` has
-//! an explicit basis indexed by (generator, basis vector of `N` at its vertex). The
-//! element for generator `g` at `v` and index `j` sends the summand basis path
-//! `p: v → w` to the `j`-th row of `N(p)`. Coordinates of any morphism in this basis
-//! are read off its generator rows. No linear system is solved.
+//! `Ext^k(M, N)` is the cohomology of `Hom_A(P_*, N)` for a projective
+//! resolution `P_* -> M`. Every term built by
+//! [`projective_cover`](crate::resolution::projective_cover) is a sum
+//! `(+)_v P_v^{t_v}` in a canonical layout, and Yoneda identifies
+//! `Hom_A(e_v A, N)` with `N_v`. So `Hom_A(P, N)` has an explicit basis indexed
+//! by (generator, basis vector of `N` at the generator's vertex). The element
+//! for generator `g` at `v` and index `j` sends the summand basis path
+//! `p: v -> w` to row `j` of `N(p)`. Coordinates of a morphism in this basis are
+//! its generator rows, read off directly. No linear system is solved.
 //!
-//! Sign convention: the induced cochain maps are `δ^i(f) = f ∘ d_{i+1}` with no
-//! signs. Alternating signs only normalize `δ² = 0` under other differentials'
-//! conventions. Here `δ² = 0` follows from `d² = 0`. Any sign choice rescales basis
-//! vectors without changing ranks, so dimension computations are sign-free.
+//! Sign convention: the induced cochain map is `delta^k(f) = d_{k+1}.then(f)`,
+//! with no signs. Alternating signs exist to force `delta^2 = 0` under other
+//! conventions for the differential; here it follows from `d^2 = 0`. A sign
+//! choice rescales basis vectors and leaves every rank alone, so no dimension
+//! depends on it.
 //!
-//! Exactness: [`ext_dim`]`(m, n, k)` resolves `m` for `k + 1` steps. The result is
-//! either a complete finite resolution or a prefix with differentials
-//! `d_1, …, d_{k+1}`. Cohomology at position `k` needs only `d_k` and `d_{k+1}`,
-//! so the answer is exact for every `k`, even when the projective dimension is
-//! unknown.
+//! Exactness: [`ext_dim`]`(m, n, k)` resolves `m` for `k + 1` steps. The result
+//! is either a complete finite resolution or a prefix with differentials
+//! `d_1, ..., d_{k+1}`. Cohomology at position `k` needs only `d_k` and
+//! `d_{k+1}`, so the answer is exact for every `k`, even when the projective
+//! dimension is unknown.
 
 use std::fmt;
 use std::sync::Arc;
 
 use crate::algebra::Algebra;
-use crate::field::{Fp, PrimeField};
+use crate::field::Fp;
 use crate::hom::Morphism;
-use crate::homspace::deterministic_complement;
+use crate::homspace::{
+    deterministic_complement, row_times, rref_coords, rref_coords_many, stack_rows,
+};
 use crate::linalg::DenseMat;
 use crate::module::Module;
+use crate::quiver::ArrowId;
 use crate::radical::top;
 use crate::resolution::{Bounded, ProjectiveResolution, projective_dimension, resolve};
 
@@ -50,8 +58,9 @@ impl fmt::Display for ExtError {
 
 impl std::error::Error for ExtError {}
 
-/// Summand layout of a projective term `⊕_v P_v^{t_v}` built by [`projective_cover`](crate::resolution::projective_cover):
-/// generators are ordered by vertex then copy. At each vertex the term's basis is the
+/// Summand layout of a projective term `(+)_v P_v^{t_v}` built by
+/// [`projective_cover`](crate::resolution::projective_cover): generators are
+/// ordered by vertex, then by copy. At each vertex the term's basis is the
 /// concatenation of the summands' path bases in generator order.
 struct Layout {
     /// Vertex of each generator, in canonical order.
@@ -60,9 +69,10 @@ struct Layout {
     offsets: Vec<Vec<usize>>,
 }
 
-/// Recovers the layout from the term alone: `t_v = dim (top P)_v` because
-/// `top P_v = S_v`. The block-total assertion fails only if the term is not built
-/// by [`projective_cover`](crate::resolution::projective_cover), which never happens inside this module.
+/// Recovers the layout from the term alone: `t_v = dim (top P)_v`, because
+/// `top P_v = S_v`. The block-total assertion holds for every resolution term
+/// and for the zero module; a failure means the term is not a canonical
+/// projective sum, which is a bug in auslander.
 fn layout(term: &Module) -> Layout {
     let algebra = term.algebra();
     let n = algebra.quiver().num_vertices();
@@ -93,7 +103,8 @@ fn layout(term: &Module) -> Layout {
     }
 }
 
-/// `dim Hom_A(term, n) = Σ_g dim N_{v_g}` by Yoneda.
+/// `dim Hom_A(term, n)`, which by Yoneda is the sum of `dim N_{v_g}` over the
+/// generators `g`.
 fn hom_space_dim(lay: &Layout, n: &Module) -> usize {
     lay.gen_vertex.iter().map(|&v| n.dim_at(v)).sum()
 }
@@ -124,9 +135,9 @@ fn yoneda_basis(term: &Module, lay: &Layout, n: &Module) -> Vec<Morphism> {
     basis
 }
 
-/// Coordinates of `f: term → n` in the Yoneda basis: the trivial path `e_v` is the
-/// first basis path of every `(v, v)` block, so the coordinate block of generator `g`
-/// is row `offsets[v_g][g]` of `f` at `v_g`.
+/// Coordinates of `f: term -> n` in the Yoneda basis: the trivial path `e_v` is
+/// the first basis path of every `(v, v)` block, so the coordinate block of
+/// generator `g` is row `offsets[v_g][g]` of `f` at `v_g`.
 fn coordinates(f: &Morphism, lay: &Layout, n: &Module) -> Vec<Fp> {
     let mut coords = Vec::new();
     for (g, &v) in lay.gen_vertex.iter().enumerate() {
@@ -138,7 +149,8 @@ fn coordinates(f: &Morphism, lay: &Layout, n: &Module) -> Vec<Fp> {
     coords
 }
 
-/// Rank of `δ^i: Hom(P_i, N) → Hom(P_{i+1}, N)`, `f ↦ d.then(f)`, in Yoneda bases.
+/// Rank of `delta^k: Hom(P_k, N) -> Hom(P_{k+1}, N)`, `f -> d.then(f)`, in the
+/// Yoneda bases.
 fn delta_rank(d: &Morphism, term: &Module, lay: &Layout, next_lay: &Layout, n: &Module) -> usize {
     let field = term.field();
     if hom_space_dim(next_lay, n) == 0 {
@@ -156,7 +168,7 @@ fn delta_rank(d: &Morphism, term: &Module, lay: &Layout, next_lay: &Layout, n: &
     if rows.is_empty() {
         return 0;
     }
-    DenseMat::from_rows(&rows).rank(&field)
+    DenseMat::from_rows(&rows).into_rank(&field)
 }
 
 fn check_pair(m: &Module, n: &Module) -> Result<(), ExtError> {
@@ -166,14 +178,15 @@ fn check_pair(m: &Module, n: &Module) -> Result<(), ExtError> {
     Ok(())
 }
 
-/// `[dim Ext^0(m, n), …, dim Ext^max_k(m, n)]`, each entry exact (see the module
-/// docs: the resolution prefix is always long enough). Errors when the modules
-/// do not share one algebra.
+/// `[dim Ext^0(m, n), ..., dim Ext^max_k(m, n)]`, every entry exact because the
+/// resolution prefix is always long enough (see the module docs). Errors when
+/// the modules do not share one algebra.
 pub fn ext_table(m: &Module, n: &Module, max_k: usize) -> Result<Vec<usize>, ExtError> {
     check_pair(m, n)?;
     let res = resolve(m, max_k + 1);
     let layouts: Vec<Layout> = res.terms.iter().map(layout).collect();
-    // A finite resolution continues with zero terms: Hom = 0 and δ = 0 beyond it.
+    // A finite resolution continues with zero terms: past its end, Hom is zero
+    // and delta is zero.
     let h: Vec<usize> = (0..=max_k)
         .map(|i| layouts.get(i).map_or(0, |lay| hom_space_dim(lay, n)))
         .collect();
@@ -192,7 +205,7 @@ pub fn ext_table(m: &Module, n: &Module, max_k: usize) -> Result<Vec<usize>, Ext
             let boundary = if k == 0 { 0 } else { ranks[k - 1] };
             assert!(
                 kernel_dim >= boundary,
-                "im δ^{} ⊄ ker δ^{k}; this is a bug in auslander",
+                "im delta^{} is not contained in ker delta^{k}; this is a bug in auslander",
                 k.wrapping_sub(1)
             );
             kernel_dim - boundary
@@ -208,13 +221,15 @@ pub fn ext_dim(m: &Module, n: &Module, k: usize) -> Result<usize, ExtError> {
 
 /// The global dimension of the algebra, resolved up to `bound` differentials.
 ///
-/// Infallible on valid input: the simples it resolves are constructed here over
-/// the given algebra, so no endpoint mismatch can arise.
-/// For a finite-dimensional algebra `gldim A = pd (A/rad A) = max_v pd S_v`: every
-/// module has a finite composition series with simple factors, so the supremum of
-/// projective dimensions is attained on the simples. Returns `Exact` when every
-/// simple resolves within `bound`, otherwise `AtLeast(bound + 1)` (the minimal
-/// resolution of some simple has a nonzero syzygy past the bound).
+/// For a finite-dimensional algebra `gldim A = pd (A/rad A) = max_v pd S_v`:
+/// every module has a finite composition series with simple factors, so the
+/// supremum of projective dimensions is attained on the simples. Returns
+/// `Exact` when every simple resolves within `bound`, otherwise
+/// `AtLeast(bound + 1)`, which says the minimal resolution of some simple still
+/// has a nonzero syzygy past the bound.
+///
+/// The function does not fail: it builds the simples it resolves over the given
+/// algebra itself, so no endpoint mismatch can arise.
 pub fn global_dimension(algebra: &Arc<Algebra>, bound: usize) -> Bounded<usize> {
     let mut max = 0usize;
     let mut cut = false;
@@ -267,7 +282,7 @@ fn cochain_from_coordinates(term: &Module, lay: &Layout, n: &Module, coords: &[F
     assert_eq!(
         offset,
         coords.len(),
-        "cochain_from_coordinates: coordinate count"
+        "coords needs one entry per (generator, basis vector) pair"
     );
     Morphism::new(term, n, maps).expect("generator images extend to an A-linear map")
 }
@@ -293,37 +308,29 @@ fn delta_matrix(
     out
 }
 
-/// `coords * rows` as a vector of length `rows.cols()`.
-fn combine_rows(rows: &DenseMat, coords: &[Fp], field: &PrimeField) -> Vec<Fp> {
-    let mut out = vec![Fp::ZERO; rows.cols()];
-    for (k, &c) in coords.iter().enumerate() {
-        if c.is_zero() {
-            continue;
-        }
-        for (j, out_j) in out.iter_mut().enumerate() {
-            *out_j = field.add(*out_j, field.mul(c, rows.get(k, j)));
-        }
-    }
-    out
+/// Whether the two modules carry the same dimension vector and the same arrow
+/// actions. A recomputed module is a fresh value, never [`Module::ptr_eq`] to
+/// the stored one, so the comparison runs entry by entry.
+fn same_module(a: &Module, b: &Module) -> bool {
+    a.dim_vector() == b.dim_vector()
+        && (0..a.algebra().quiver().num_arrows())
+            .all(|i| a.map(ArrowId(i as u32)) == b.map(ArrowId(i as u32)))
 }
 
-/// `top` stacked above `bottom`; both must share a column count.
-fn stack_rows(top: &DenseMat, bottom: &DenseMat) -> DenseMat {
-    let rows: Vec<Vec<Fp>> = (0..top.rows())
-        .map(|r| top.row(r).to_vec())
-        .chain((0..bottom.rows()).map(|r| bottom.row(r).to_vec()))
-        .collect();
-    if rows.is_empty() {
-        DenseMat::zero(0, top.cols())
-    } else {
-        DenseMat::from_rows(&rows)
-    }
+/// Whether the two morphisms carry the same vertex matrices. [`Morphism`]
+/// equality also demands pointer-equal endpoints, which a recomputation never
+/// has, so it cannot serve here.
+fn same_morphism(a: &Morphism, b: &Morphism) -> bool {
+    (0..a.source().algebra().quiver().num_vertices()).all(|v| a.map_at(v) == b.map_at(v))
 }
 
 /// The lift `phi: term -> T` with `phi.then(through) = rhs`, for `through: T -> B`
-/// and `rhs: term -> B` with `term` a canonical projective sum. Each generator
-/// image solves one linear system with free variables zeroed, so the lift is
-/// deterministic.
+/// and `rhs: term -> B` with `term` a canonical projective sum. Every generator
+/// image solves with free variables zeroed, so the lift is deterministic.
+///
+/// All generators at one vertex solve against the same `through` matrix, so
+/// they are grouped by vertex and one [`DenseMat::solve_many`] per vertex
+/// replaces one `solve` per generator.
 ///
 /// # Panics
 /// Panics when a generator image of `rhs` lies outside the image of `through`;
@@ -333,15 +340,36 @@ pub(crate) fn lift_through(term: &Module, through: &Morphism, rhs: &Morphism) ->
     debug_assert!(rhs.target().ptr_eq(through.target()));
     let field = term.field();
     let lay = layout(term);
-    let mut coords = Vec::new();
+    let vertices = term.algebra().quiver().num_vertices() as usize;
+    let mut at_vertex: Vec<Vec<usize>> = vec![Vec::new(); vertices];
     for (g, &v) in lay.gen_vertex.iter().enumerate() {
-        let row = lay.offsets[v as usize][g];
-        let x = through
-            .map_at(v)
-            .transpose()
-            .solve(rhs.map_at(v).row(row), &field)
-            .expect("lift_through: the right side lands in the image of the lifted-through map");
-        coords.extend(x);
+        at_vertex[v as usize].push(g);
+    }
+    // Column `j` of `solved[v]` is the image of the `j`-th generator at `v`,
+    // generators in index order.
+    let solved: Vec<DenseMat> = (0..vertices)
+        .map(|v| {
+            let rows: Vec<Vec<Fp>> = at_vertex[v]
+                .iter()
+                .map(|&g| rhs.map_at(v as u32).row(lay.offsets[v][g]).to_vec())
+                .collect();
+            if rows.is_empty() {
+                return DenseMat::zero(through.source().dim_at(v as u32), 0);
+            }
+            through
+                .map_at(v as u32)
+                .transpose()
+                .solve_many(&DenseMat::from_rows(&rows).transpose(), &field)
+                .expect("lift_through: the right side lands in the image of the lifted-through map")
+        })
+        .collect();
+    let mut taken = vec![0usize; vertices];
+    let mut coords = Vec::new();
+    for &v in &lay.gen_vertex {
+        let x = &solved[v as usize];
+        let j = taken[v as usize];
+        taken[v as usize] += 1;
+        coords.extend((0..x.rows()).map(|i| x.get(i, j)));
     }
     cochain_from_coordinates(term, &lay, through.source(), &coords)
 }
@@ -372,6 +400,11 @@ pub enum ExtClassError {
     /// The identity class lives only in `Ext^0(M, M)`: degree 0 with
     /// pointer-equal endpoints.
     NotDegreeZeroEndo,
+    /// The left class's resolution prefix and the product space's prefix
+    /// disagree at this degree, in the term or in the differential into it.
+    /// Both come from [`resolve`] on the same module, so a disagreement is a
+    /// crate defect, not bad input.
+    ResolutionDisagreement { degree: usize },
 }
 
 impl fmt::Display for ExtClassError {
@@ -397,6 +430,10 @@ impl fmt::Display for ExtClassError {
                 "coordinate {index} is not a canonical element of the modules' field"
             ),
             Self::NotDegreeZeroEndo => f.write_str("the identity class lives only in Ext^0(M, M)"),
+            Self::ResolutionDisagreement { degree } => write!(
+                f,
+                "two resolutions of one module disagree at degree {degree}; crate defect"
+            ),
         }
     }
 }
@@ -463,10 +500,7 @@ impl ExtSpace {
             let cocycles = if k + 1 < resolution.terms.len() {
                 let next_lay = layout(&resolution.terms[k + 1]);
                 let delta = delta_matrix(&resolution.maps[k], &term, &lay, &next_lay, n);
-                delta
-                    .transpose()
-                    .kernel_basis(&field)
-                    .row_space_basis(&field)
+                delta.left_kernel_basis(&field).into_row_space_basis(&field)
             } else {
                 DenseMat::identity(width)
             };
@@ -476,7 +510,7 @@ impl ExtSpace {
                 let prev = &resolution.terms[k - 1];
                 let prev_lay = layout(prev);
                 delta_matrix(&resolution.maps[k - 1], prev, &prev_lay, &lay, n)
-                    .row_space_basis(&field)
+                    .into_row_space_basis(&field)
             };
             (term, cocycles, coboundaries)
         } else {
@@ -486,14 +520,11 @@ impl ExtSpace {
                 DenseMat::zero(0, 0),
             )
         };
-        let cocycles_t = cocycles.transpose();
-        for r in 0..coboundaries.rows() {
-            assert!(
-                cocycles_t.solve(coboundaries.row(r), &field).is_some(),
-                "im delta^{} is not contained in ker delta^{k}; this is a bug in auslander",
-                k.wrapping_sub(1)
-            );
-        }
+        assert!(
+            rref_coords_many(&cocycles, &coboundaries, &field).is_some(),
+            "im delta^{} is not contained in ker delta^{k}; this is a bug in auslander",
+            k.wrapping_sub(1)
+        );
         let complement = deterministic_complement(&cocycles, &coboundaries, &field);
         let lay = layout(&term);
         let reps = (0..complement.rows())
@@ -512,7 +543,7 @@ impl ExtSpace {
         })))
     }
 
-    /// `dim_k Ext^k(M, N)`: the number of complement rows. Equals
+    /// `dim_Fp Ext^k(M, N)`: the number of complement rows. Equals
     /// [`ext_dim`]`(m, n, k)`.
     #[inline]
     pub fn dim(&self) -> usize {
@@ -585,6 +616,52 @@ impl ExtSpace {
             && self.0.degree == other.0.degree
     }
 
+    /// Whether the two compatible spaces carry the same stored data: the
+    /// resolution prefix term by term and differential by differential, the
+    /// cochain term, the cocycle, coboundary and complement bases, and the
+    /// representatives.
+    ///
+    /// Incompatible spaces are never equal. Terms and representatives are
+    /// compared entry by entry, because a recomputed space owns fresh module
+    /// values that no pointer test can match.
+    pub fn matches(&self, other: &ExtSpace) -> bool {
+        let (a, b) = (&*self.0, &*other.0);
+        self.is_compatible(other)
+            && a.resolution.end == b.resolution.end
+            && a.resolution.terms.len() == b.resolution.terms.len()
+            && a.resolution
+                .terms
+                .iter()
+                .zip(&b.resolution.terms)
+                .all(|(x, y)| same_module(x, y))
+            && a.resolution
+                .maps
+                .iter()
+                .zip(&b.resolution.maps)
+                .all(|(x, y)| same_morphism(x, y))
+            && same_morphism(&a.resolution.augmentation, &b.resolution.augmentation)
+            && same_module(&a.term, &b.term)
+            && a.cocycles == b.cocycles
+            && a.coboundaries == b.coboundaries
+            && a.complement == b.complement
+            && a.reps.len() == b.reps.len()
+            && a.reps.iter().zip(&b.reps).all(|(x, y)| same_morphism(x, y))
+    }
+
+    /// Whether every stored matrix equals a fresh [`ExtSpace::new`] over the
+    /// live endpoint modules, by [`ExtSpace::matches`].
+    ///
+    /// This is the only check that makes a space trustworthy. Every recheck
+    /// that reads a space (the action matrices, the socle, the reduction of a
+    /// cocycle) runs through the stored resolution and the stored bases, so a
+    /// tampered space would otherwise certify itself.
+    pub fn matches_recomputation(&self) -> bool {
+        match ExtSpace::new(&self.0.source, &self.0.target, self.0.degree) {
+            Ok(fresh) => self.matches(&fresh),
+            Err(_) => false,
+        }
+    }
+
     /// The zero class of this space.
     pub fn zero_class(&self) -> ExtClass {
         ExtClass {
@@ -603,8 +680,9 @@ impl ExtSpace {
     }
 
     /// The class of the cocycle `f: P_k -> N`: checks both endpoints by
-    /// [`Module::ptr_eq`], checks `d_{k+1}.then(f) = 0`, and reduces modulo
-    /// the coboundaries against the stacked complement-plus-RREF system.
+    /// [`Module::ptr_eq`], checks `d_{k+1}.then(f) = 0`, then reduces modulo
+    /// `B^k` by solving `f` against the complement rows stacked above the
+    /// coboundary basis and keeping the complement part.
     pub fn class_from_cocycle(&self, f: &Morphism) -> Result<ExtClass, ExtClassError> {
         let inner = &self.0;
         if !f.source().ptr_eq(&inner.term) {
@@ -627,15 +705,79 @@ impl ExtSpace {
         }
         let lay = layout(&inner.term);
         let f_coords = coordinates(f, &lay, &inner.target);
-        let stacked = stack_rows(&inner.complement, &inner.coboundaries);
+        let stacked = stack_rows(
+            &[&inner.complement, &inner.coboundaries],
+            inner.complement.cols(),
+        );
         let x = stacked
             .transpose()
             .solve(&f_coords, &field)
-            .expect("a cocycle lies in the span of complement plus coboundaries; this is a bug in auslander");
+            .expect("a cocycle lies in the span of the complement plus the coboundaries; this is a bug in auslander");
         Ok(ExtClass {
             space: self.clone(),
             coords: x[..inner.complement.rows()].to_vec(),
         })
+    }
+
+    /// A copy of the space with the three stored bases replaced and the
+    /// representatives rebuilt from the new complement.
+    ///
+    /// Surgery for the mutation corpus: the result is an `ExtSpace` value
+    /// that no constructor would produce, so [`ExtSpace::matches_recomputation`]
+    /// must reject it.
+    #[cfg(test)]
+    pub(crate) fn with_bases(
+        &self,
+        cocycles: DenseMat,
+        coboundaries: DenseMat,
+        complement: DenseMat,
+    ) -> ExtSpace {
+        let inner = &self.0;
+        let lay = layout(&inner.term);
+        let reps = (0..complement.rows())
+            .map(|r| cochain_from_coordinates(&inner.term, &lay, &inner.target, complement.row(r)))
+            .collect();
+        self.with_parts(cocycles, coboundaries, complement, reps)
+    }
+
+    /// A copy of the space with the representatives replaced and every basis
+    /// kept. Surgery for the mutation corpus, as [`ExtSpace::with_bases`].
+    #[cfg(test)]
+    pub(crate) fn with_representatives(&self, reps: Vec<Morphism>) -> ExtSpace {
+        let inner = &self.0;
+        self.with_parts(
+            inner.cocycles.clone(),
+            inner.coboundaries.clone(),
+            inner.complement.clone(),
+            reps,
+        )
+    }
+
+    #[cfg(test)]
+    fn with_parts(
+        &self,
+        cocycles: DenseMat,
+        coboundaries: DenseMat,
+        complement: DenseMat,
+        reps: Vec<Morphism>,
+    ) -> ExtSpace {
+        let inner = &self.0;
+        ExtSpace(Arc::new(ExtSpaceInner {
+            source: inner.source.clone(),
+            target: inner.target.clone(),
+            degree: inner.degree,
+            resolution: ProjectiveResolution {
+                terms: inner.resolution.terms.clone(),
+                maps: inner.resolution.maps.clone(),
+                augmentation: inner.resolution.augmentation.clone(),
+                end: inner.resolution.end,
+            },
+            term: inner.term.clone(),
+            cocycles,
+            coboundaries,
+            complement,
+            reps,
+        }))
     }
 
     /// The class with the given coordinates over the complement basis.
@@ -744,7 +886,7 @@ impl ExtClass {
     pub fn representative(&self) -> Morphism {
         let inner = &self.space.0;
         let field = inner.source.field();
-        let row = combine_rows(&inner.complement, &self.coords, &field);
+        let row = row_times(&self.coords, &inner.complement, &field);
         let lay = layout(&inner.term);
         cochain_from_coordinates(&inner.term, &lay, &inner.target, &row)
     }
@@ -752,6 +894,9 @@ impl ExtClass {
     /// The Yoneda product `Ext^m(M, N) x Ext^n(N, L) -> Ext^{m+n}(M, L)`,
     /// matching the endpoint order of [`Morphism::then`]. Errors when the
     /// middle modules disagree (by [`Module::ptr_eq`]).
+    ///
+    /// Each call builds the product space. To multiply many classes into one
+    /// space, build it once and use [`ExtClass::then_in`].
     pub fn then(&self, other: &ExtClass) -> Result<ExtClass, ExtClassError> {
         self.then_with_witness(other).map(|(class, _)| class)
     }
@@ -762,17 +907,44 @@ impl ExtClass {
         &self,
         other: &ExtClass,
     ) -> Result<(ExtClass, ProductWitness), ExtClassError> {
+        let product_space = self.product_space(other)?;
+        self.then_with_witness_in(other, &product_space)
+    }
+
+    /// The Yoneda product reduced in `product_space` instead of a fresh one.
+    ///
+    /// `product_space` must be `Ext^{m+n}(M, L)` for the endpoints of the two
+    /// factors: source pointer-equal to this class's source, target
+    /// pointer-equal to `other`'s target, degree the sum. A space that fails
+    /// any of those is [`ExtClassError::IncompatibleSpaces`]. Recomputed
+    /// compatible spaces carry identical bases, so the coordinates are the
+    /// ones [`ExtClass::then`] returns.
+    pub fn then_in(
+        &self,
+        other: &ExtClass,
+        product_space: &ExtSpace,
+    ) -> Result<ExtClass, ExtClassError> {
+        self.then_with_witness_in(other, product_space)
+            .map(|(class, _)| class)
+    }
+
+    /// [`ExtClass::then_in`] with the chain lifts that computed the product.
+    pub fn then_with_witness_in(
+        &self,
+        other: &ExtClass,
+        product_space: &ExtSpace,
+    ) -> Result<(ExtClass, ProductWitness), ExtClassError> {
         if !self.space.0.target.ptr_eq(&other.space.0.source) {
             return Err(ExtClassError::MiddleMismatch);
         }
         let n = other.space.0.degree;
-        let product_space = ExtSpace::new(
-            &self.space.0.source,
-            &other.space.0.target,
-            self.space.0.degree + n,
-        )
-        .expect("the product endpoints share one algebra through the middle module");
-        let lifts = chain_lifts(self, other, &product_space);
+        if !product_space.0.source.ptr_eq(&self.space.0.source)
+            || !product_space.0.target.ptr_eq(&other.space.0.target)
+            || product_space.0.degree != self.space.0.degree + n
+        {
+            return Err(ExtClassError::IncompatibleSpaces);
+        }
+        let lifts = chain_lifts(self, other, product_space)?;
         let g = other.representative();
         let h = lifts[n]
             .then(&g)
@@ -782,29 +954,52 @@ impl ExtClass {
             .expect("a Yoneda product of cocycles is a cocycle");
         Ok((class, ProductWitness { lifts }))
     }
+
+    /// `Ext^{m+n}(M, L)` for the two factors. Errors when the middle modules
+    /// disagree (by [`Module::ptr_eq`]).
+    pub fn product_space(&self, other: &ExtClass) -> Result<ExtSpace, ExtClassError> {
+        if !self.space.0.target.ptr_eq(&other.space.0.source) {
+            return Err(ExtClassError::MiddleMismatch);
+        }
+        Ok(ExtSpace::new(
+            &self.space.0.source,
+            &other.space.0.target,
+            self.space.0.degree + other.space.0.degree,
+        )
+        .expect("the product endpoints share one algebra through the middle module"))
+    }
 }
 
-/// The chain terms `P^M_m, ..., P^M_{m+n}` and `P^N_0, ..., P^N_n` with their
-/// differentials, extended by zero modules and zero maps past a finite
-/// resolution, and the lifts `phi_i: P^M_{m+i} -> P^N_i` with
-/// `phi_0.then(aug_N) = f` and `d^M_{m+i+1}.then(phi_i) = phi_{i+1}.then(d^N_{i+1})`.
-/// Every lift solves per-generator systems with zeroed free variables, so the
-/// family is deterministic.
-fn chain_lifts(alpha: &ExtClass, beta: &ExtClass, product_space: &ExtSpace) -> Vec<Morphism> {
+/// The chain lifts `phi_0, ..., phi_n` with `phi_i: P^M_{m+i} -> P^N_i`,
+/// `phi_0.then(aug_N) = f` for `f` the representative of `alpha`, and
+/// `d^M_{m+i+1}.then(phi_i) = phi_{i+1}.then(d^N_{i+1})` for `0 <= i < n`.
+///
+/// Both chains are extended by zero modules and zero maps past the end of a
+/// finite resolution. Every lift solves per-generator systems with free
+/// variables zeroed, so the family is deterministic.
+fn chain_lifts(
+    alpha: &ExtClass,
+    beta: &ExtClass,
+    product_space: &ExtSpace,
+) -> Result<Vec<Morphism>, ExtClassError> {
     let m = alpha.space.0.degree;
     let n = beta.space.0.degree;
     let deep = &product_space.0.resolution;
-    debug_assert!(
-        alpha
-            .space
-            .0
-            .resolution
-            .terms
-            .iter()
-            .zip(&deep.terms)
-            .all(|(a, b)| a.dim_vector() == b.dim_vector()),
-        "recomputed minimal resolution prefix disagrees; this is a bug in auslander"
-    );
+    // Both prefixes come from `resolve` on the same module, so they must
+    // agree term by term. The lifts below transport the representative onto
+    // `deep.terms[m]` and would build a morphism over the wrong actions if
+    // they did not, so the disagreement is reported, not asserted away.
+    let own = &alpha.space.0.resolution;
+    for (degree, (x, y)) in own.terms.iter().zip(&deep.terms).enumerate() {
+        if !same_module(x, y) {
+            return Err(ExtClassError::ResolutionDisagreement { degree });
+        }
+    }
+    for (k, (x, y)) in own.maps.iter().zip(&deep.maps).enumerate() {
+        if !same_morphism(x, y) {
+            return Err(ExtClassError::ResolutionDisagreement { degree: k + 1 });
+        }
+    }
     let algebra = alpha.space.0.source.algebra();
     let chain_m: Vec<Module> = (m..=m + n)
         .map(|j| {
@@ -853,7 +1048,7 @@ fn chain_lifts(alpha: &ExtClass, beta: &ExtClass, product_space: &ExtSpace) -> V
     let nv = algebra.quiver().num_vertices();
     let rep_maps: Vec<DenseMat> = (0..nv).map(|v| rep.map_at(v).clone()).collect();
     let f = Morphism::new(&chain_m[0], &beta.space.0.source, rep_maps)
-        .expect("the recomputed resolution prefix matches, so the representative transports");
+        .expect("the compared resolution prefix matches, so the representative transports");
     let mut lifts = vec![lift_through(&chain_m[0], &res_n.augmentation, &f)];
     for i in 1..=n {
         let rhs = chain_dm[i - 1]
@@ -861,7 +1056,7 @@ fn chain_lifts(alpha: &ExtClass, beta: &ExtClass, product_space: &ExtSpace) -> V
             .expect("chain endpoints line up by construction");
         lifts.push(lift_through(&chain_m[i], &chain_dn[i - 1], &rhs));
     }
-    lifts
+    Ok(lifts)
 }
 
 /// The chain lifts behind one Yoneda product, `phi_i: P^M_{m+i} -> P^N_i` in
@@ -878,13 +1073,44 @@ impl ProductWitness {
         &self.lifts
     }
 
-    /// Rechecks that the lifts tie `alpha` and `beta` to `product`: the two
-    /// lift identity families, the reduction of `phi_n.then(g)` to the
-    /// product coordinates by multiplication and coboundary membership, and
-    /// that the product space's stored bases equal a fresh recomputation
-    /// from the live endpoint modules, so a tampered complement or
-    /// coboundary basis is rejected even when the reduction is trivial.
+    /// Rechecks that the lifts tie `alpha` and `beta` to `product`.
+    ///
+    /// The product space is recomputed from the live endpoint modules and
+    /// compared in full by [`ExtSpace::matches`], so nothing it stores is
+    /// taken on trust. The two factor spaces are trusted: their bases fix what
+    /// `alpha.representative()` and `beta.representative()` mean, and this
+    /// method does not recheck them. Recheck a factor with
+    /// [`ExtSpace::matches_recomputation`] before you rely on it.
+    ///
+    /// The remaining checks are the two lift identity families and the
+    /// reduction of `phi_n.then(g)` to the product coordinates, by
+    /// multiplication and coboundary membership. The space comparison is what
+    /// membership alone cannot do: on every cheap fixture the raw product
+    /// cocycle already lies in the complement span, so a tampered coboundary
+    /// basis still passes the membership solve and only the comparison
+    /// rejects it.
     pub fn verify(&self, alpha: &ExtClass, beta: &ExtClass, product: &ExtClass) -> bool {
+        let inner = &product.space.0;
+        match ExtSpace::new(&inner.source, &inner.target, inner.degree) {
+            Ok(fresh) => self.verify_against(alpha, beta, product, &fresh),
+            Err(_) => false,
+        }
+    }
+
+    /// [`ProductWitness::verify`] with the product space's recomputation
+    /// supplied by the caller.
+    ///
+    /// `recomputed` must be a fresh [`ExtSpace::new`] over the product
+    /// endpoints; this method compares it against `product.space()` with
+    /// [`ExtSpace::matches`] and takes neither on trust beyond that. Pass the
+    /// space you already built when you verify many products in one space.
+    pub fn verify_against(
+        &self,
+        alpha: &ExtClass,
+        beta: &ExtClass,
+        product: &ExtClass,
+        recomputed: &ExtSpace,
+    ) -> bool {
         let m = alpha.space.0.degree;
         let n = beta.space.0.degree;
         if product.space.0.degree != m + n
@@ -893,16 +1119,7 @@ impl ProductWitness {
             || !product.space.0.target.ptr_eq(&beta.space.0.target)
             || self.lifts.len() != n + 1
             || product.coords.len() != product.space.dim()
-        {
-            return false;
-        }
-        let Ok(recomputed) = ExtSpace::new(&product.space.0.source, &product.space.0.target, m + n)
-        else {
-            return false;
-        };
-        if product.space.0.cocycles != recomputed.0.cocycles
-            || product.space.0.coboundaries != recomputed.0.coboundaries
-            || product.space.0.complement != recomputed.0.complement
+            || !product.space.matches(recomputed)
         {
             return false;
         }
@@ -957,17 +1174,15 @@ impl ProductWitness {
         }
         let lay = layout(&product.space.0.term);
         let h_coords = coordinates(&h, &lay, &product.space.0.target);
-        let expected = combine_rows(&product.space.0.complement, &product.coords, &field);
+        let expected = row_times(&product.coords, &product.space.0.complement, &field);
         let diff: Vec<Fp> = h_coords
             .iter()
             .zip(&expected)
             .map(|(&a, &b)| field.sub(a, b))
             .collect();
-        let cob = &product.space.0.coboundaries;
-        let Some(x) = cob.transpose().solve(&diff, &field) else {
-            return false;
-        };
-        combine_rows(cob, &x, &field) == diff
+        // The space matched its recomputation above, so its coboundary basis
+        // is a genuine RREF and the membership solve reads off its pivots.
+        rref_coords(&product.space.0.coboundaries, &diff, &field).is_some()
     }
 }
 
@@ -986,12 +1201,13 @@ mod tests {
         PrimeField::new(5).unwrap()
     }
 
-    // Right modules over linearly oriented A_3 (arrows a: 0 → 1, b: 1 → 2). The
-    // nonsplit extension realized by arrow a is 0 → S_1 → M → S_0 → 0 with
-    // M = P_0/rad² of dimension vector (1, 1, 0), top S_0 and socle S_1, so the
-    // nonzero Ext group is Ext¹(S_0, S_1). In general dim Ext¹(S_i, S_j) equals
-    // the number of arrows i → j (same pairing as for left modules over A^op read
-    // backwards; ASS III.2.12 states it for right modules).
+    // Right modules over linearly oriented A_3 (arrows a: 0 -> 1, b: 1 -> 2).
+    // The non-split extension realized by arrow a is 0 -> S_1 -> M -> S_0 -> 0
+    // with M = P_0/rad^2 of dimension vector (1, 1, 0), top S_0 and socle S_1,
+    // so the nonzero Ext group is Ext^1(S_0, S_1). In general
+    // dim Ext^1(S_i, S_j) is the number of arrows i -> j (the same pairing as
+    // for left modules over A^op read backwards; ASS III.2.12 states it for
+    // right modules).
     #[test]
     fn a3_ext_1_between_simples_counts_arrows_source_to_target() {
         let field = f5();
@@ -1003,7 +1219,7 @@ mod tests {
                 assert_eq!(
                     ext_dim(&simples[i], &simples[j], 1).unwrap(),
                     expected,
-                    "Ext¹(S_{i}, S_{j})"
+                    "Ext^1(S_{i}, S_{j})"
                 );
                 for k in 2..=4 {
                     assert_eq!(
@@ -1018,13 +1234,13 @@ mod tests {
         assert_eq!(global_dimension(&algebra, 5), Bounded::Exact(1));
     }
 
-    // kA_3/(ab), right modules: pd S_0 = 2 via 0 → P_2 → P_1 → P_0 → S_0 → 0.
-    // Ext¹(S_i, S_j) = #arrows i → j gives Ext¹(S_0, S_1) = Ext¹(S_1, S_2) = 1;
-    // Ext² is detected by the relation, on the ordered pair (source, target) of the
-    // forbidden path: Hom(P_2, S_2) = k sits in degree 2 of the resolution of S_0
-    // with zero δ on both sides, so Ext²(S_0, S_2) = 1. These values match the
-    // QPA-verified facts (Ext¹(S_0, S_1) = 1, Ext²(S_0, S_2) = 1) on the same
-    // ordered pairs, with no right-vs-left discrepancy.
+    // kA_3/(ab), right modules: pd S_0 = 2 via 0 -> P_2 -> P_1 -> P_0 -> S_0 -> 0.
+    // Counting arrows i -> j gives Ext^1(S_0, S_1) = Ext^1(S_1, S_2) = 1. The
+    // relation detects Ext^2 on the ordered pair (source, target) of the
+    // forbidden path: Hom(P_2, S_2) = k sits in degree 2 of the resolution of
+    // S_0 with zero delta on both sides, so Ext^2(S_0, S_2) = 1. These values
+    // match the QPA-verified facts (Ext^1(S_0, S_1) = 1, Ext^2(S_0, S_2) = 1)
+    // on the same ordered pairs, with no right-versus-left discrepancy.
     #[test]
     fn a3_mod_ab_ext_1_and_2_among_simples() {
         let field = f5();
@@ -1037,12 +1253,12 @@ mod tests {
                 assert_eq!(
                     ext_dim(&simples[i], &simples[j], 1).unwrap(),
                     ext1,
-                    "Ext¹(S_{i}, S_{j})"
+                    "Ext^1(S_{i}, S_{j})"
                 );
                 assert_eq!(
                     ext_dim(&simples[i], &simples[j], 2).unwrap(),
                     ext2,
-                    "Ext²(S_{i}, S_{j})"
+                    "Ext^2(S_{i}, S_{j})"
                 );
                 assert_eq!(ext_dim(&simples[i], &simples[j], 3).unwrap(), 0);
             }
@@ -1059,9 +1275,9 @@ mod tests {
         assert_eq!(global_dimension(&algebra, 6), Bounded::AtLeast(7));
     }
 
-    // k[x]/(x³) over F_3: the minimal resolution of S is Ω-periodic with period 2
-    // (Ω S = rad P has dimension 2, Ω² S = soc P ≅ S), every term is P, and
-    // Hom(P, S) = k with zero differentials throughout.
+    // k[x]/(x^3) over F_3: the minimal resolution of S has syzygy period 2
+    // (Omega S = rad P has dimension 2, Omega^2 S = soc P is isomorphic to S),
+    // every term is P, and Hom(P, S) = k with zero differentials throughout.
     #[test]
     fn truncated_poly_3_ext_table_of_the_simple_is_all_ones() {
         let field = PrimeField::new(3).unwrap();
@@ -1074,10 +1290,10 @@ mod tests {
         assert_eq!(ext_table(&s, &s, 4).unwrap(), vec![1, 1, 1, 1, 1]);
     }
 
-    // Cycle 0 → 1 → 2 → 0 with rad² = 0, right modules: rad P_i = S_{i+1}, so
-    // Ω S_i = S_{i+1} and the extension realized by the arrow i → i+1 gives
-    // Ext¹(S_i, S_{i+1}) = 1 while Ext¹(S_i, S_{i-1}) = 0: the pairing again runs
-    // from arrow source to arrow target.
+    // Cycle 0 -> 1 -> 2 -> 0 with rad^2 = 0, right modules: rad P_i = S_{i+1},
+    // so Omega S_i = S_{i+1} and the extension realized by the arrow i -> i+1
+    // gives Ext^1(S_i, S_{i+1}) = 1 while Ext^1(S_i, S_{i-1}) = 0. The pairing
+    // again runs from arrow source to arrow target.
     #[test]
     fn radical_square_zero_cycle_ext_1_follows_the_arrows() {
         let field = f5();
@@ -1089,7 +1305,7 @@ mod tests {
                 assert_eq!(
                     ext_dim(&simples[i], &simples[j], 1).unwrap(),
                     expected,
-                    "Ext¹(S_{i}, S_{j})"
+                    "Ext^1(S_{i}, S_{j})"
                 );
             }
         }
@@ -1138,7 +1354,7 @@ mod tests {
             assert_eq!(
                 ext_dim(&m, &n, 0).unwrap(),
                 hom_dim(&m, &n).unwrap(),
-                "Ext⁰ with dim m = {:?}, dim n = {:?}",
+                "Ext^0 with dim m = {:?}, dim n = {:?}",
                 m.dim_vector(),
                 n.dim_vector()
             );
@@ -1187,6 +1403,7 @@ mod ext_class_tests {
     use crate::decompose::add_morphisms;
     use crate::field::PrimeField;
     use crate::hom::{hom_dim, zero_morphism};
+    use crate::homspace::scale_morphism;
     use crate::module::direct_sum;
 
     fn f5() -> PrimeField {
@@ -1599,25 +1816,7 @@ mod ext_class_tests {
         // A Morphism is checked at construction, so the tamper scales one
         // lift: every nonzero entry changes and one lift identity breaks.
         assert!(!witness.lifts()[0].is_zero());
-        let nv = algebra.quiver().num_vertices();
-        let scaled_maps: Vec<DenseMat> = (0..nv)
-            .map(|v| {
-                let m = witness.lifts()[0].map_at(v);
-                let mut out = DenseMat::zero(m.rows(), m.cols());
-                for r in 0..m.rows() {
-                    for c in 0..m.cols() {
-                        out.set(r, c, field.mul(field.elem(2), m.get(r, c)));
-                    }
-                }
-                out
-            })
-            .collect();
-        let scaled = Morphism::new(
-            witness.lifts()[0].source(),
-            witness.lifts()[0].target(),
-            scaled_maps,
-        )
-        .unwrap();
+        let scaled = scale_morphism(&witness.lifts()[0], field.elem(2));
         let mut tampered_lifts = witness.lifts().to_vec();
         tampered_lifts[0] = scaled;
         let tampered = ProductWitness {
@@ -1685,6 +1884,7 @@ mod product_representative_tests {
     use crate::algebra::{an_with_relations, dual_numbers, truncated_poly};
     use crate::decompose::add_morphisms;
     use crate::field::PrimeField;
+    use crate::homspace::scale_morphism;
     use crate::radical::radical;
     use crate::sequence::ShortExactSequence;
 
@@ -1897,32 +2097,6 @@ mod product_representative_tests {
         );
     }
 
-    /// A copy of `space` whose stored complement and coboundary matrices
-    /// are replaced; the reduction paths consume exactly these fields.
-    fn space_with(space: &ExtSpace, complement: DenseMat, coboundaries: DenseMat) -> ExtSpace {
-        let inner = &space.0;
-        let lay = layout(&inner.term);
-        let reps = (0..complement.rows())
-            .map(|r| cochain_from_coordinates(&inner.term, &lay, &inner.target, complement.row(r)))
-            .collect();
-        ExtSpace(Arc::new(ExtSpaceInner {
-            source: inner.source.clone(),
-            target: inner.target.clone(),
-            degree: inner.degree,
-            resolution: ProjectiveResolution {
-                terms: inner.resolution.terms.clone(),
-                maps: inner.resolution.maps.clone(),
-                augmentation: inner.resolution.augmentation.clone(),
-                end: inner.resolution.end,
-            },
-            term: inner.term.clone(),
-            cocycles: inner.cocycles.clone(),
-            coboundaries,
-            complement,
-            reps,
-        }))
-    }
-
     fn rows_of(mat: &DenseMat) -> Vec<Vec<Fp>> {
         (0..mat.rows()).map(|r| mat.row(r).to_vec()).collect()
     }
@@ -1947,10 +2121,10 @@ mod product_representative_tests {
         );
         let mut rows = rows_of(&inner.complement);
         rows[0] = inner.coboundaries.row(0).to_vec();
-        let tampered = space_with(
-            product.space(),
-            DenseMat::from_rows(&rows),
+        let tampered = product.space().with_bases(
+            inner.cocycles.clone(),
             inner.coboundaries.clone(),
+            DenseMat::from_rows(&rows),
         );
         let bad = ExtClass {
             space: tampered,
@@ -1979,9 +2153,12 @@ mod product_representative_tests {
         );
         let mut rows = rows_of(&inner.coboundaries);
         rows.push(inner.complement.row(0).to_vec());
-        let grown = DenseMat::from_rows(&rows).row_space_basis(&field);
+        let grown = DenseMat::from_rows(&rows).into_row_space_basis(&field);
         assert_ne!(grown, inner.coboundaries);
-        let tampered = space_with(product.space(), inner.complement.clone(), grown);
+        let tampered =
+            product
+                .space()
+                .with_bases(inner.cocycles.clone(), grown, inner.complement.clone());
         let bad = ExtClass {
             space: tampered,
             coords: product.coordinates().to_vec(),
@@ -1992,5 +2169,103 @@ mod product_representative_tests {
             coords: vec![field.zero(); product.coordinates().len()],
         };
         assert!(!witness.verify(&alpha, &beta, &wrong_label));
+    }
+
+    // The space recheck of C1: a genuine space matches its recomputation, a
+    // space with any one stored matrix replaced does not.
+    #[test]
+    fn a_space_matches_its_recomputation_and_no_tampered_copy_does() {
+        let field = f5();
+        let algebra = truncated_poly(3, field).unwrap();
+        let s = Module::simple(&algebra, 0);
+        let space = ExtSpace::new(&s, &s, 2).unwrap();
+        assert!(space.matches_recomputation());
+        assert!(space.matches(&ExtSpace::new(&s, &s, 2).unwrap()));
+        assert!(!space.matches(&ExtSpace::new(&s, &s, 1).unwrap()));
+        let width = space.cocycle_basis().cols();
+        let tampered = [
+            space.with_bases(
+                DenseMat::zero(0, width),
+                space.coboundary_basis().clone(),
+                space.complement_basis().clone(),
+            ),
+            space.with_bases(
+                space.cocycle_basis().clone(),
+                space.complement_basis().clone(),
+                space.complement_basis().clone(),
+            ),
+            space.with_bases(
+                space.cocycle_basis().clone(),
+                space.coboundary_basis().clone(),
+                DenseMat::zero(0, width),
+            ),
+            space.with_representatives(
+                space
+                    .representatives()
+                    .iter()
+                    .map(|rep| scale_morphism(rep, field.elem(2)))
+                    .collect(),
+            ),
+        ];
+        for bad in &tampered {
+            assert!(!bad.matches_recomputation());
+            assert!(!space.matches(bad));
+        }
+    }
+
+    // then_in reuses the caller's space; the coordinates are the ones then
+    // returns, because recomputed compatible spaces carry identical bases.
+    #[test]
+    fn then_in_agrees_with_then_and_rejects_an_unrelated_space() {
+        let field = f5();
+        let algebra = truncated_poly(3, field).unwrap();
+        let s = Module::simple(&algebra, 0);
+        let alpha = basis_class(&ExtSpace::new(&s, &s, 1).unwrap(), 0);
+        let beta = basis_class(&ExtSpace::new(&s, &s, 2).unwrap(), 0);
+        let product_space = alpha.product_space(&beta).unwrap();
+        assert_eq!(product_space.degree(), 3);
+        let plain = alpha.then(&beta).unwrap();
+        let reused = alpha.then_in(&beta, &product_space).unwrap();
+        assert_eq!(reused.coordinates(), plain.coordinates());
+        assert!(reused.space().matches(plain.space()));
+        let (again, witness) = alpha.then_with_witness_in(&beta, &product_space).unwrap();
+        assert!(witness.verify(&alpha, &beta, &again));
+        assert!(witness.verify_against(&alpha, &beta, &again, &product_space));
+        let wrong_degree = ExtSpace::new(&s, &s, 2).unwrap();
+        assert_eq!(
+            alpha.then_in(&beta, &wrong_degree).unwrap_err(),
+            ExtClassError::IncompatibleSpaces
+        );
+        let other_target = Module::projective(&algebra, 0);
+        let wrong_target = ExtSpace::new(&s, &other_target, 3).unwrap();
+        assert_eq!(
+            alpha.then_in(&beta, &wrong_target).unwrap_err(),
+            ExtClassError::IncompatibleSpaces
+        );
+    }
+
+    // verify_against takes the recomputation from the caller, so it must
+    // reject one that is not a recomputation of the product space.
+    #[test]
+    fn verify_against_rejects_a_space_that_is_not_the_recomputation() {
+        let field = f5();
+        let algebra = truncated_poly(3, field).unwrap();
+        let s = Module::simple(&algebra, 0);
+        let alpha = basis_class(&ExtSpace::new(&s, &s, 1).unwrap(), 0);
+        let beta = basis_class(&ExtSpace::new(&s, &s, 1).unwrap(), 0);
+        let (product, witness) = alpha.then_with_witness(&beta).unwrap();
+        assert!(witness.verify(&alpha, &beta, &product));
+        let inner = product.space();
+        let grown = stack_rows(
+            &[inner.coboundary_basis(), inner.complement_basis()],
+            inner.complement_basis().cols(),
+        )
+        .into_row_space_basis(&field);
+        let forged = inner.with_bases(
+            inner.cocycle_basis().clone(),
+            grown,
+            inner.complement_basis().clone(),
+        );
+        assert!(!witness.verify_against(&alpha, &beta, &product, &forged));
     }
 }

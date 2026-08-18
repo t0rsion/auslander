@@ -1,0 +1,36 @@
+units=145712
+v0 dim=0,0,1|0,1,1|1,1,1 proj=- slots=e0,e1,e2 mod=e690c3fa2465aaff tau=84ca64e5ea0f6c14
+v1 dim=0,1,0|0,1,1|1,1,1 proj=- slots=e3,e4,f1:f83d5529d9430cd3 mod=86650db6e6e11444 tau=f384ace9c579c772
+v2 dim=0,0,1|1,0,0|1,1,1 proj=- slots=e5,e6,f1:e9b0389895101629 mod=e765483d110e7c5c tau=f5e6e860aa5173b1
+v3 dim=0,0,1|0,1,1 proj=0 slots=e7,e8 mod=55b017685e1fd181 tau=5161f03783aeae6f
+v4 dim=0,1,0|0,1,1 proj=0 slots=e9,f1:88a380a6582165a1 mod=5a6abe850c846914 tau=1958e71eada5afcd
+v5 dim=0,1,0|1,1,0|1,1,1 proj=- slots=e10,f2:be0598452590c48a,e11 mod=eefa49f573518518 tau=e41dc710c1feb288
+v6 dim=0,0,1|1,0,0 proj=1 slots=e12,e13 mod=be0b77d025c0a51d tau=f8ef290650064ced
+v7 dim=1,0,0|1,1,0|1,1,1 proj=- slots=e14,f1:5ea4210a7adb71cc,f2:8c787ff525080663 mod=ddec673ef88410cf tau=a9ddf83eb3c48a75
+v8 dim=0,0,1 proj=0,1 slots=e15 mod=e8b77e96a2bdfe5a tau=3cf554544b0bf923
+v9 dim=0,1,0 proj=0,2 slots=e16 mod=0d03321ef35193a9 tau=d66a742f330d87d5
+v10 dim=0,1,0|1,1,0 proj=2 slots=e17,e18 mod=bd693615c9952aaa tau=09d6028866b33e4e
+v11 dim=1,0,0 proj=1,2 slots=e19 mod=6c7ce23c5b95f773 tau=d3221076a5f5b0c0
+v12 dim=1,0,0|1,1,0 proj=2 slots=e20,f1:15433e5e67293cf3 mod=3c792e5ab535c1ca tau=80d001b8a7c444a5
+v13 dim=- proj=0,1,2 slots=- mod=437e6a5b037b36ba tau=e821190b8a2577ab
+e0 0:0->1 shape=module:1 exchanged=0,0,1 target=1,3,2 bij=1,0,2 seq=6697d1bc6da2890d iso=6e724d92120a1080 mut=d258612a0f8a6ce8 acp=e174bdef54178174 add=ec9c9b92778e0c39 approx=90d0dd3a672f5a81
+e1 0:1->2 shape=module:1 exchanged=0,1,1 target=2,1,2 bij=1,0,2 seq=63b111cfded7c157 iso=6cb2675ee9519ac9 mut=a523929cd93156bb acp=23cea9e216acff56 add=0498efc6bcb246e0 approx=9e03e2b492471ea8
+e2 0:2->3 shape=proj:0 exchanged=1,1,1 target=0,1,2 bij=1,0 seq=7c8e1299cb9edf39 iso=d8b360d24f08edf0 mut=7280d84303f876ec acp=0f8ac73943f6595a add=8ce362fb20667449 approx=657b3d9da1d87f92
+e3 1:0->4 shape=proj:0 exchanged=1,1,1 target=0,2,1 bij=0,1 seq=7c8e1299cb9edf39 iso=a1658b0c9a72495d mut=6339f335c364950f acp=be0442f3d5634bc1 add=fd8fd0e9e220bc03 approx=0c16a2eaf0dcd67a
+e4 1:1->5 shape=module:1 exchanged=0,1,1 target=2,3,1 bij=0,2,1 seq=f525ad6740df0b6a iso=45b35dc4e6217b23 mut=abe818346ee9a3c8 acp=deb4c21c1ef67bcf add=c68133a1a9545372 approx=d704f2f537427f9f
+e5 2:0->6 shape=proj:1 exchanged=1,1,1 target=1,0,1 bij=0,1 seq=55f4a83d0036c71c iso=e347c04b0b9b9a83 mut=279403dcfd3bf919 acp=689cc917934b0168 add=27b70c442f2e478f approx=2fdfac9938b4427b
+e6 2:1->7 shape=module:1 exchanged=0,0,1 target=3,2,1 bij=0,2,1 seq=58fbc34c6b87236f iso=b33c482e35f0b523 mut=eab184a9c430527c acp=7e89b718acb8be68 add=c87914bbd2017b0f approx=4d041bce756120ad
+e7 3:0->8 shape=proj:1 exchanged=0,1,1 target=0,0,1 bij=0 seq=49b0e85a0fda314a iso=67f01dbb69e56923 mut=52bcc999397f06b7 acp=72e1744088db6e4e add=bd0a2054dd535446 approx=5ff13dbeb8891341
+e8 3:1->4 shape=module:1 exchanged=0,0,1 target=0,2,1 bij=0,1 seq=6697d1bc6da2890d iso=a1658b0c9a72495d mut=c29202046272bb2f acp=377bcea51ee81e89 add=e9678d9e72ffddce approx=a4333f1129d90724
+e9 4:0->9 shape=proj:2 exchanged=0,1,1 target=0,1,0 bij=0 seq=6451f9174d64f6ff iso=5423e3e12016459f mut=690a4e6b2961ec46 acp=8f735614f6746c2f add=f98bc5494a2bcbc7 approx=8ffa7d69b845e9c1
+e10 5:0->10 shape=proj:2 exchanged=1,1,1 target=1,2,0 bij=1,0 seq=2677e09f66aa6530 iso=b5a59f9f1b3485d7 mut=f9ced4919d770f23 acp=5320aad7edf41cf6 add=ca9edefda466d973 approx=3aa6217f0a8f9f43
+e11 5:2->7 shape=module:1 exchanged=0,1,0 target=3,2,1 bij=0,1,2 seq=788200180c14a638 iso=29082b262012ef7b mut=8ebc783d67bc5004 acp=708554c321ce5efb add=80ba44fa7258dbd0 approx=d9e3efc4767ae971
+e12 6:0->11 shape=proj:2 exchanged=0,0,1 target=1,0,0 bij=0 seq=840bc929acc51707 iso=45c27c868d71c3df mut=8f630e11faa1c38f acp=becbb85adfec5099 add=88ed2911b8ebc3ec approx=11f932e276a31c75
+e13 6:1->8 shape=proj:0 exchanged=1,0,0 target=0,0,1 bij=0 seq=a78bd28fa86825ed iso=67f01dbb69e56923 mut=642da665c8780f38 acp=ecb9f6352051deea add=48a9b6b3de9bc478 approx=5ff13dbeb8891341
+e14 7:0->12 shape=proj:2 exchanged=1,1,1 target=2,1,0 bij=0,1 seq=03c1b0958943c715 iso=131dddc11e76585f mut=d564dc07dbbc866e acp=38ca822d1bd04db6 add=55b200479f041838 approx=237bfb85c6947f5a
+e15 8:0->13 shape=proj:2 exchanged=0,0,1 target=0,0,0 bij=- seq=840bc929acc51707 iso=c866877a933b7913 mut=b498cd25100b59c0 acp=e3cc78b0addc5548 add=61b06ffa1a3a10d5 approx=3936cc120463256b
+e16 9:0->13 shape=proj:1 exchanged=0,1,0 target=0,0,0 bij=- seq=2295707cec6ac618 iso=c866877a933b7913 mut=24009f3f9dea046c acp=e8c6d9c26bd1b4b8 add=9037bcc3359ad2c0 approx=3936cc120463256b
+e17 10:0->12 shape=module:1 exchanged=0,1,0 target=2,1,0 bij=0,1 seq=788200180c14a638 iso=9084e144bcd72f17 mut=801cbcce54ad5292 acp=f72a7626f3a20e40 add=9c9f89d37bff5fa4 approx=4c01e375e1c7f00d
+e18 10:1->9 shape=proj:0 exchanged=1,1,0 target=0,1,0 bij=0 seq=b05f7cd380e5a1bc iso=5423e3e12016459f mut=9b557a9a7087abb2 acp=a75d6c15a4c32c73 add=71c42c9b333d6dd6 approx=8bc38c0b75fdfb9e
+e19 11:0->13 shape=proj:0 exchanged=1,0,0 target=0,0,0 bij=- seq=a78bd28fa86825ed iso=c866877a933b7913 mut=ba87d6f17a7803fe acp=322217c043f6d08c add=cf5f3b85b8cb2bf8 approx=3936cc120463256b
+e20 12:0->11 shape=proj:1 exchanged=1,1,0 target=1,0,0 bij=0 seq=6adadb9d4800c0d2 iso=45c27c868d71c3df mut=274c7b2281068374 acp=8f45d668872104b9 add=30e102dc0a55d739 approx=99f61d0a93c5086e

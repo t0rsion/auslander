@@ -1,21 +1,22 @@
-//! Checked short exact sequences, their construction from `Ext^1` classes,
-//! class recovery, and split status with proof either way.
+//! Checked short exact sequences: construction from an `Ext^1` class, recovery
+//! of that class, and split status with a proof either way.
 //!
-//! [`ShortExactSequence::new`] verifies exactness per vertex: the inclusion is
-//! mono by rank, the projection is epi by rank, the composite is zero, and the
-//! dimensions add. Zero composite plus the dimension equality plus mono plus
-//! epi force image equals kernel, so no further computation is needed.
+//! [`ShortExactSequence::new`] checks exactness one vertex at a time. The
+//! inclusion is mono by rank, the projection is epi by rank, the composite is
+//! zero, and the dimensions add. Those four facts together force image equals
+//! kernel, so nothing else is computed.
 //!
-//! [`ShortExactSequence::split_status`] solves the retraction linear system in
-//! a fixed order: unknowns are the entries of `r: E -> N` vertex-major then
-//! row-major; equations are the commuting squares in (arrow, row, column)
-//! lexicographic order, then the `iota.then(r) = id` constraints vertex-major
-//! then row-major. A solution yields a [`SplitWitness`]. An inconsistent
-//! system yields a [`NonSplitWitness`] holding a dual vector `y` with
-//! `y A = 0` and `y b = 1`, read off the pivot row of the reduced row echelon
-//! form of the augmented system `[A | b | identity]`; that pivot row is
-//! normalized with leading entry 1 in the `b` column. Either witness rechecks
-//! by multiplication alone.
+//! [`ShortExactSequence::split_status`] solves the retraction system in a fixed
+//! order. The unknowns are the entries of `r: E -> N`, vertex-major then
+//! row-major. The equations are the commuting squares in (arrow, row, column)
+//! lexicographic order, then the `iota.then(r) = id` constraints, again
+//! vertex-major then row-major. A solution gives a [`SplitWitness`]. An
+//! inconsistent system gives a [`NonSplitWitness`] holding a dual vector `y`
+//! with `y A = 0` and `y b = 1`. That `y` is the identity block of the pivot
+//! row of the RREF of the augmented system `[A | b | I]`. The pivot of that row
+//! sits in the `b` column, and RREF makes it 1, so `y b = 1` holds and fixes
+//! the scale of `y`. No further normalization is needed. Either witness
+//! rechecks by multiplication alone.
 
 use std::fmt;
 
@@ -23,6 +24,7 @@ use crate::decompose::add_morphisms;
 use crate::ext::{ExtClass, ExtSpace, lift_through};
 use crate::field::{Fp, PrimeField};
 use crate::hom::{Morphism, cokernel, express_in_row_basis, identity, image, zero_morphism};
+use crate::homspace::scale_morphism;
 use crate::linalg::DenseMat;
 use crate::module::{Module, direct_sum};
 use crate::quiver::ArrowId;
@@ -90,28 +92,16 @@ impl std::error::Error for SequenceError {}
 /// The morphism with every entry negated.
 fn negate(f: &Morphism) -> Morphism {
     let field = f.source().field();
-    let nv = f.source().algebra().quiver().num_vertices();
-    let maps = (0..nv)
-        .map(|v| {
-            let m = f.map_at(v);
-            let mut out = DenseMat::zero(m.rows(), m.cols());
-            for r in 0..m.rows() {
-                for c in 0..m.cols() {
-                    out.set(r, c, field.neg(m.get(r, c)));
-                }
-            }
-            out
-        })
-        .collect();
-    Morphism::new(f.source(), f.target(), maps)
-        .expect("the negative of an A-linear map is A-linear")
+    scale_morphism(f, field.neg(field.one()))
 }
 
 /// The factorization `f: B -> C` with `epi.then(f) = map`, for `epi: A -> B`
-/// and `map: A -> C` where `map` kills the kernel of `epi`. Each column
-/// solves one linear system with free variables zeroed, so the result is
-/// deterministic; it is unique when the vertex matrices of `epi` have full
-/// column rank.
+/// and `map: A -> C` where `map` kills the kernel of `epi`. Every column
+/// solves with free variables zeroed, so the result is deterministic; it is
+/// unique when the vertex matrices of `epi` have full column rank.
+///
+/// One [`DenseMat::solve_many`] per vertex serves every column of `map`, where
+/// one `solve` per column repeats the elimination of the same `epi` matrix.
 ///
 /// # Panics
 /// Panics when a column of `map` lies outside the column space of the
@@ -122,19 +112,13 @@ fn factor_through_epi(epi: &Morphism, map: &Morphism) -> Morphism {
     let nv = epi.source().algebra().quiver().num_vertices();
     let maps = (0..nv)
         .map(|v| {
-            let e = epi.map_at(v);
-            let m = map.map_at(v);
-            let mt = m.transpose();
-            let mut out = DenseMat::zero(e.cols(), m.cols());
-            for j in 0..m.cols() {
-                let x = e
-                    .solve(mt.row(j), &field)
-                    .expect("factor_through_epi: the map kills the kernel of the epimorphism");
-                for (i, &val) in x.iter().enumerate() {
-                    out.set(i, j, val);
-                }
+            let (e, m) = (epi.map_at(v), map.map_at(v));
+            // With no right-hand side there is nothing to eliminate for.
+            if m.cols() == 0 {
+                return DenseMat::zero(e.cols(), 0);
             }
-            out
+            e.solve_many(m, &field)
+                .expect("factor_through_epi: the map kills the kernel of the epimorphism")
         })
         .collect();
     Morphism::new(epi.target(), map.target(), maps)
@@ -144,6 +128,9 @@ fn factor_through_epi(epi: &Morphism, map: &Morphism) -> Morphism {
 /// The factorization `f: A -> N` with `f.then(mono) = map`, for
 /// `mono: N -> B` and `map: A -> B` where `map` lands in the image of `mono`.
 /// The vertex matrices of `mono` have full row rank, so `f` is unique.
+///
+/// One [`DenseMat::solve_many`] per vertex serves every row of `map`, where a
+/// `solve` per row repeats the elimination of the same `mono` matrix.
 ///
 /// # Panics
 /// Panics when a row of `map` lies outside the row space of the matching
@@ -156,16 +143,12 @@ fn factor_through_mono(mono: &Morphism, map: &Morphism) -> Morphism {
         .map(|v| {
             let mo = mono.map_at(v).transpose();
             let m = map.map_at(v);
-            let mut out = DenseMat::zero(m.rows(), mono.map_at(v).rows());
-            for r in 0..m.rows() {
-                let x = mo
-                    .solve(m.row(r), &field)
-                    .expect("factor_through_mono: the map lands in the image of the mono");
-                for (c, &val) in x.iter().enumerate() {
-                    out.set(r, c, val);
-                }
+            if m.rows() == 0 {
+                return DenseMat::zero(0, mo.cols());
             }
-            out
+            mo.solve_many(&m.transpose(), &field)
+                .expect("factor_through_mono: the map lands in the image of the mono")
+                .transpose()
         })
         .collect();
     Morphism::new(map.source(), mono.source(), maps)
@@ -187,9 +170,15 @@ pub struct ShortExactSequence {
 }
 
 impl ShortExactSequence {
-    /// Builds the sequence after checking, per vertex: the inclusion is mono
-    /// by rank, the projection is epi by rank, the composite is zero, and
-    /// `dim middle = dim sub + dim quotient`. Together these force exactness.
+    /// Builds the sequence after checking, one vertex at a time: the inclusion
+    /// is mono by rank, the projection is epi by rank, the composite is zero,
+    /// and `dim middle = dim sub + dim quotient`. Together these force
+    /// exactness.
+    ///
+    /// # Errors
+    /// [`SequenceError::EndpointMismatch`] when the inclusion's target is not
+    /// the projection's source, otherwise the per-vertex variant naming the
+    /// first vertex that fails.
     pub fn new(
         inclusion: Morphism,
         projection: Morphism,
@@ -263,12 +252,17 @@ impl ShortExactSequence {
         &self.projection
     }
 
-    /// The extension realizing a class in `Ext^1(M, N)` by pushout: with
-    /// `K = im d_1`, `kappa: K -> P_0`, the surjection `s: P_1 -> K`, and the
-    /// representative cocycle `c` factored as `s.then(c_bar)`, the middle is
-    /// the cokernel of `(c_bar, -kappa): K -> N (+) P_0`. The zero class
-    /// yields the split sequence. The result passes through
-    /// [`ShortExactSequence::new`]. Errors when the class degree is not 1.
+    /// The extension realizing a class in `Ext^1(M, N)`, built as a pushout.
+    ///
+    /// Take `K = im d_1` with its inclusion `kappa: K -> P_0` and the
+    /// surjection `s: P_1 -> K`, then factor the representative cocycle as
+    /// `c = s.then(c_bar)`. The middle term is the cokernel of
+    /// `(c_bar, -kappa): K -> N (+) P_0`. The zero class gives the split
+    /// sequence. The result passes through [`ShortExactSequence::new`], so it
+    /// is exact by construction.
+    ///
+    /// # Errors
+    /// [`SequenceError::WrongDegree`] when the class degree is not 1.
     pub fn from_ext1(class: &ExtClass) -> Result<ShortExactSequence, SequenceError> {
         let space = class.space();
         if space.degree() != 1 {
@@ -296,9 +290,12 @@ impl ShortExactSequence {
                 (kappa, c_bar)
             }
             None => {
+                // A projective quotient has no d_1, so K is the zero module.
                 let k_mod = Module::zero(m.algebra());
-                let kappa = zero_morphism(&k_mod, p0).expect("shared algebra");
-                let c_bar = zero_morphism(&k_mod, n).expect("shared algebra");
+                let kappa =
+                    zero_morphism(&k_mod, p0).expect("the zero module is built over m's algebra");
+                let c_bar =
+                    zero_morphism(&k_mod, n).expect("the zero module is built over m's algebra");
                 (kappa, c_bar)
             }
         };
@@ -322,11 +319,17 @@ impl ShortExactSequence {
         ShortExactSequence::new(iota, pi)
     }
 
-    /// The class of this extension in `space = Ext^1(quotient, sub)`: lift
-    /// the augmentation through the projection, pull `d_1.then(lift)` back
-    /// through the inclusion, and reduce the resulting cocycle. Errors when
-    /// the space's degree is not 1 or its endpoints are not this sequence's
-    /// quotient and sub (by [`Module::ptr_eq`]).
+    /// The class of this extension in `space = Ext^1(quotient, sub)`.
+    ///
+    /// The recovery lifts the augmentation through the projection, pulls
+    /// `d_1.then(lift)` back through the inclusion, and reduces the resulting
+    /// cocycle.
+    ///
+    /// # Errors
+    /// [`SequenceError::WrongDegree`] when the space's degree is not 1, and
+    /// [`SequenceError::SpaceSourceMismatch`] or
+    /// [`SequenceError::SpaceTargetMismatch`] when the space's endpoints are
+    /// not this sequence's quotient and sub (by [`Module::ptr_eq`]).
     pub fn ext1_class(&self, space: &ExtSpace) -> Result<ExtClass, SequenceError> {
         if space.degree() != 1 {
             return Err(SequenceError::WrongDegree {
@@ -355,61 +358,96 @@ impl ShortExactSequence {
     }
 
     /// Solves the retraction system in the fixed order stated in the module
-    /// docs. Both outcomes carry their proof: a retraction and section that
+    /// docs. Both outcomes carry their proof: a retraction and a section that
     /// recheck by multiplication, or a dual vector proving the system
     /// inconsistent.
+    ///
+    /// A split sequence costs one reduction of `[A | b]`, a non-split one a
+    /// second of `[A | b | I]`. The crate-private `split_status_one_pass`
+    /// trades that around for callers that expect the non-split answer.
     pub fn split_status(&self) -> SplitStatus {
         let field = self.middle.field();
         let (a, b) = retraction_system(self);
         match a.solve(&b, &field) {
-            Some(x) => {
-                let retraction = self.retraction_from_solution(&x);
-                let e_idem = retraction
-                    .then(&self.inclusion)
-                    .expect("the retraction ends at the sub");
-                let nv = self.middle.algebra().quiver().num_vertices();
-                let p_maps = (0..nv)
-                    .map(|v| {
-                        let id = DenseMat::identity(self.middle.dim_at(v));
-                        let neg = e_idem.map_at(v);
-                        let mut out = DenseMat::zero(id.rows(), id.cols());
-                        for r in 0..id.rows() {
-                            for c in 0..id.cols() {
-                                out.set(r, c, field.sub(id.get(r, c), neg.get(r, c)));
-                            }
-                        }
-                        out
-                    })
-                    .collect();
-                let p = Morphism::new(&self.middle, &self.middle, p_maps)
-                    .expect("a difference of A-linear maps is A-linear");
-                let section = factor_through_epi(&self.projection, &p);
-                SplitStatus::Split(SplitWitness {
-                    retraction,
-                    section,
-                })
-            }
+            Some(x) => SplitStatus::Split(self.split_witness(&x)),
             None => {
-                let rows = a.rows();
+                let (reduced, pivots) = augmented_with_dual(&a, &b, &field);
                 let cols = a.cols();
-                let mut aug = DenseMat::zero(rows, cols + 1 + rows);
-                for (r, &rhs) in b.iter().enumerate() {
-                    for c in 0..cols {
-                        aug.set(r, c, a.get(r, c));
-                    }
-                    aug.set(r, cols, rhs);
-                    aug.set(r, cols + 1 + r, field.one());
-                }
-                let (reduced, pivots) = aug.rref(&field);
                 let pivot_row = pivots
                     .iter()
                     .position(|&c| c == cols)
                     .expect("an unsolvable system pivots in the right-side column");
-                let dual = (0..rows)
-                    .map(|r| reduced.get(pivot_row, cols + 1 + r))
-                    .collect();
-                SplitStatus::NonSplit(NonSplitWitness { dual })
+                SplitStatus::NonSplit(NonSplitWitness {
+                    dual: (0..a.rows())
+                        .map(|r| reduced.get(pivot_row, cols + 1 + r))
+                        .collect(),
+                })
             }
+        }
+    }
+
+    /// [`ShortExactSequence::split_status`] from one reduction of
+    /// `[A | b | I]`, which carries the dual vector along.
+    ///
+    /// The two routes return the same value. This one saves the second
+    /// elimination on a non-split sequence and pays for the identity block on
+    /// a split one, so the almost-split construction takes it and the general
+    /// entry point does not.
+    ///
+    /// Same value, because the identity block only adds pivots to the right of
+    /// column `cols`, and eliminating those touches rows already zero in the
+    /// first `cols + 1` columns. Pivots, entries, and the
+    /// free-variables-zeroed solution in those columns are therefore the ones
+    /// [`DenseMat::solve`] reads off `[A | b]`.
+    pub(crate) fn split_status_one_pass(&self) -> SplitStatus {
+        let field = self.middle.field();
+        let (a, b) = retraction_system(self);
+        let (rows, cols) = (a.rows(), a.cols());
+        let (reduced, pivots) = augmented_with_dual(&a, &b, &field);
+        if let Some(pivot_row) = pivots.iter().position(|&c| c == cols) {
+            return SplitStatus::NonSplit(NonSplitWitness {
+                dual: (0..rows)
+                    .map(|r| reduced.get(pivot_row, cols + 1 + r))
+                    .collect(),
+            });
+        }
+        let mut x = vec![Fp::ZERO; cols];
+        for (i, &pc) in pivots.iter().enumerate().filter(|&(_, &c)| c < cols) {
+            x[pc] = reduced.get(i, cols);
+        }
+        SplitStatus::Split(self.split_witness(&x))
+    }
+
+    /// The retraction of a solution vector and the section it induces.
+    fn split_witness(&self, x: &[Fp]) -> SplitWitness {
+        let field = self.middle.field();
+        let retraction = self.retraction_from_solution(x);
+        let e_idem = retraction
+            .then(&self.inclusion)
+            .expect("the retraction ends at the sub");
+        // For p = id - r.then(iota) the composite iota.then(p) is zero, so p
+        // kills ker pi and factors through pi. The factor s obeys
+        // pi.then(s.then(pi)) = p.then(pi) = pi, and pi is epi, so s.then(pi)
+        // is the identity: s is a section.
+        let nv = self.middle.algebra().quiver().num_vertices();
+        let p_maps = (0..nv)
+            .map(|v| {
+                let id = DenseMat::identity(self.middle.dim_at(v));
+                let neg = e_idem.map_at(v);
+                let mut out = DenseMat::zero(id.rows(), id.cols());
+                for r in 0..id.rows() {
+                    for c in 0..id.cols() {
+                        out.set(r, c, field.sub(id.get(r, c), neg.get(r, c)));
+                    }
+                }
+                out
+            })
+            .collect();
+        let p = Morphism::new(&self.middle, &self.middle, p_maps)
+            .expect("a difference of A-linear maps is A-linear");
+        SplitWitness {
+            section: factor_through_epi(&self.projection, &p),
+            retraction,
         }
     }
 
@@ -433,6 +471,22 @@ impl ShortExactSequence {
         Morphism::new(&self.middle, &self.sub, maps)
             .expect("the solved system contains every commuting square")
     }
+}
+
+/// The reduced row echelon form of `[A | b | I]` and its pivot columns. A
+/// pivot in column `A.cols()` proves the system inconsistent, and that row's
+/// identity tail is the dual vector `y` with `y A = 0` and `y b = 1`.
+fn augmented_with_dual(a: &DenseMat, b: &[Fp], field: &PrimeField) -> (DenseMat, Vec<usize>) {
+    let (rows, cols) = (a.rows(), a.cols());
+    let mut aug = DenseMat::zero(rows, cols + 1 + rows);
+    for (r, &rhs) in b.iter().enumerate() {
+        for c in 0..cols {
+            aug.set(r, c, a.get(r, c));
+        }
+        aug.set(r, cols, rhs);
+        aug.set(r, cols + 1 + r, field.one());
+    }
+    aug.into_rref(field)
 }
 
 /// The retraction system for `r: E -> N` in the fixed crate order: unknowns
@@ -502,7 +556,10 @@ fn retraction_system(sequence: &ShortExactSequence) -> (DenseMat, Vec<Fp>) {
 /// its proof.
 #[derive(Clone, Debug)]
 pub enum SplitStatus {
+    /// The sequence splits, with the retraction and section that prove it.
     Split(SplitWitness),
+    /// The sequence does not split, with the dual vector that proves the
+    /// retraction system inconsistent.
     NonSplit(NonSplitWitness),
 }
 
@@ -775,22 +832,7 @@ mod tests {
         let SplitStatus::Split(witness) = ses.split_status() else {
             panic!("a direct sum sequence splits");
         };
-        let scale = |f: &Morphism| {
-            let nv = f.source().algebra().quiver().num_vertices();
-            let maps = (0..nv)
-                .map(|v| {
-                    let m = f.map_at(v);
-                    let mut out = DenseMat::zero(m.rows(), m.cols());
-                    for r in 0..m.rows() {
-                        for c in 0..m.cols() {
-                            out.set(r, c, field.mul(field.elem(2), m.get(r, c)));
-                        }
-                    }
-                    out
-                })
-                .collect();
-            Morphism::new(f.source(), f.target(), maps).unwrap()
-        };
+        let scale = |f: &Morphism| scale_morphism(f, field.elem(2));
         let bad_retraction = SplitWitness {
             retraction: scale(witness.retraction()),
             section: witness.section().clone(),
@@ -932,5 +974,33 @@ mod tests {
             a.dual().iter().map(|c| c.raw()).collect::<Vec<_>>(),
             b.dual().iter().map(|c| c.raw()).collect::<Vec<_>>()
         );
+    }
+
+    // The one-pass route saves an elimination on a non-split sequence and must
+    // return exactly what the two-pass route returns, on both outcomes.
+    #[test]
+    fn the_one_pass_split_status_agrees_with_the_two_pass_one() {
+        let field = f5();
+        let algebra = truncated_poly(3, field).unwrap();
+        let s = Module::simple(&algebra, 0);
+        let p = Module::projective(&algebra, 0);
+        let (_, inclusions, projections) = direct_sum(&[&s, &p]);
+        let split = ShortExactSequence::new(inclusions[0].clone(), projections[1].clone()).unwrap();
+        let space = ExtSpace::new(&s, &s, 1).unwrap();
+        let nonsplit = ShortExactSequence::from_ext1(&one_class(&space)).unwrap();
+        for sequence in [&split, &nonsplit] {
+            match (sequence.split_status(), sequence.split_status_one_pass()) {
+                (SplitStatus::Split(a), SplitStatus::Split(b)) => {
+                    assert_eq!(a.retraction(), b.retraction());
+                    assert_eq!(a.section(), b.section());
+                    assert!(b.verify(sequence));
+                }
+                (SplitStatus::NonSplit(a), SplitStatus::NonSplit(b)) => {
+                    assert_eq!(a.dual(), b.dual());
+                    assert!(b.verify(sequence));
+                }
+                _ => panic!("the two routes disagree on the outcome"),
+            }
+        }
     }
 }

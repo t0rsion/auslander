@@ -1,12 +1,13 @@
 //! Finite-dimensional right modules over an [`Algebra`].
 //!
-//! A module assigns to each vertex `v` the row-vector space `k^{dims[v]}` and to each
-//! arrow `a` a `dims[source(a)] × dims[target(a)]` matrix; a path acts by the product
+//! A module assigns to each vertex `v` the row-vector space `k^{dims[v]}`, and to each
+//! arrow `a` a `dims[source(a)] × dims[target(a)]` matrix. A path acts by the product
 //! of its arrow matrices in word order, so `M(p·q) = M(p) M(q)` under the left-to-right
-//! convention of [`crate::quiver`]. The field comes from the algebra. Construction
-//! verifies that every relation of the reduced Groebner basis acts as zero; this
-//! suffices for the whole ideal, because the action of `u·r·v` factors through the
-//! matrix of `r`. A `Module` value is therefore always a genuine `kQ/I`-module.
+//! convention of [`crate::quiver`]. The field comes from the algebra.
+//!
+//! [`Module::new`] checks that every relation of the reduced Groebner basis acts as the
+//! zero matrix. That covers the whole ideal, because the action of `u·r·v` factors
+//! through the matrix of `r`. A `Module` value is therefore always a `kQ/I`-module.
 
 use std::fmt;
 use std::sync::Arc;
@@ -15,6 +16,7 @@ use crate::algebra::{Algebra, BasisIdx};
 use crate::field::{Fp, PrimeField};
 use crate::hom::Morphism;
 use crate::linalg::DenseMat;
+use crate::profile::{Site, hit};
 use crate::quiver::{ArrowId, PathWord, QuiverError};
 
 /// Rejected module construction input.
@@ -31,8 +33,8 @@ pub enum ModuleError {
         got: (usize, usize),
     },
     /// `maps[arrow]` holds an entry at `(row, col)` whose representative is not
-    /// canonical for the algebra's field (not below its modulus); the entry was
-    /// produced by a different field.
+    /// canonical for the algebra's field, meaning it is not below the modulus.
+    /// Such an entry comes from arithmetic over some other field.
     NonCanonicalEntry {
         arrow: ArrowId,
         row: usize,
@@ -77,11 +79,11 @@ impl std::error::Error for ModuleError {}
 
 /// A finite-dimensional right `kQ/I`-module, validated at construction.
 ///
-/// Identity is nominal, matching the algebra [`Arc`] policy: clones share the
-/// underlying representation and compare equal under [`Module::ptr_eq`], while
-/// two modules constructed separately are distinct even when entrywise
-/// identical. Morphism endpoints use this identity. There is no structural
-/// equality. Cloning is cheap (a reference count bump).
+/// Identity is nominal, matching the algebra [`Arc`] policy. Clones share the
+/// underlying representation and compare equal under [`Module::ptr_eq`]. Two
+/// modules constructed separately stay distinct even when entrywise identical.
+/// Morphism endpoints use this identity; there is no structural equality.
+/// Cloning is a reference count bump.
 #[derive(Clone, Debug)]
 pub struct Module(Arc<ModuleInner>);
 
@@ -105,6 +107,7 @@ impl Module {
         dims: Vec<usize>,
         maps: Vec<DenseMat>,
     ) -> Result<Module, ModuleError> {
+        hit(Site::ModuleNew);
         let field = algebra.field();
         let quiver = algebra.quiver();
         let num_vertices = quiver.num_vertices() as usize;
@@ -145,6 +148,7 @@ impl Module {
             }
         }
         for (index, relation) in algebra.relations().iter().enumerate() {
+            hit(Site::ModuleRelationCheck);
             let source = relation.source() as usize;
             let target = relation.target() as usize;
             let mut acc = DenseMat::zero(dims[source], dims[target]);
@@ -178,6 +182,19 @@ impl Module {
         Arc::ptr_eq(&self.0, &other.0)
     }
 
+    /// The address of the shared representation, as a hash key for nominal
+    /// identity.
+    ///
+    /// Equal addresses mean [`Module::ptr_eq`], and clones share one address.
+    /// Two modules built separately never share one, even when entrywise
+    /// identical. The address is only a key while a clone stays alive: a
+    /// dropped module frees it for the next allocation, so a map keyed by it
+    /// has to hold the module too.
+    #[inline]
+    pub(crate) fn addr(&self) -> usize {
+        Arc::as_ptr(&self.0) as usize
+    }
+
     /// The zero module.
     pub fn zero(algebra: &Arc<Algebra>) -> Module {
         let dims = vec![0; algebra.quiver().num_vertices() as usize];
@@ -185,8 +202,8 @@ impl Module {
         Module::new(algebra.clone(), dims, maps).expect("the zero module is a module")
     }
 
-    /// The simple module `S_v`: one-dimensional at `v`, zero elsewhere, all arrows
-    /// acting as zero.
+    /// The simple module `S_v`: one-dimensional at `v`, zero at every other vertex,
+    /// with every arrow acting as zero.
     ///
     /// # Panics
     /// Panics if `v` is not a vertex of the algebra's quiver.
@@ -215,6 +232,7 @@ impl Module {
     /// # Panics
     /// Panics if `v` is not a vertex of the algebra's quiver.
     pub fn projective(algebra: &Arc<Algebra>, v: u32) -> Module {
+        hit(Site::ModuleProjective);
         let quiver = algebra.quiver();
         assert!(
             v < quiver.num_vertices(),
@@ -256,6 +274,7 @@ impl Module {
     /// # Panics
     /// Panics if `v` is not a vertex of the algebra's quiver.
     pub fn injective(algebra: &Arc<Algebra>, v: u32) -> Module {
+        hit(Site::ModuleInjective);
         let quiver = algebra.quiver();
         assert!(
             v < quiver.num_vertices(),
@@ -286,6 +305,7 @@ impl Module {
         Module::new(algebra.clone(), dims, maps).expect("I_v is a module")
     }
 
+    /// The algebra the module lives over.
     #[inline]
     pub fn algebra(&self) -> &Arc<Algebra> {
         &self.0.algebra
@@ -303,7 +323,10 @@ impl Module {
         &self.0.dims
     }
 
-    /// `dim_k M_v`. Panics if `v` is out of range.
+    /// `dim_k M_v`.
+    ///
+    /// # Panics
+    /// Panics if `v` is not a vertex of the algebra's quiver.
     #[inline]
     pub fn dim_at(&self, v: u32) -> usize {
         self.0.dims[v as usize]
@@ -314,11 +337,14 @@ impl Module {
         self.0.dims.iter().sum()
     }
 
+    /// Whether every vertex dimension is zero.
     pub fn is_zero(&self) -> bool {
         self.0.dims.iter().all(|&d| d == 0)
     }
 
     /// The matrix of `a` acting on row vectors, `dims[source] × dims[target]`.
+    ///
+    /// # Panics
     /// Panics if `a` is not an arrow of the algebra's quiver.
     #[inline]
     pub fn map(&self, a: ArrowId) -> &DenseMat {
@@ -329,6 +355,7 @@ impl Module {
     /// otherwise the product of the arrow matrices in word order. Errors when
     /// `word` is not a path of this algebra's quiver (see [`PathWord::validate_in`]).
     pub fn word_action(&self, word: &PathWord) -> Result<DenseMat, QuiverError> {
+        hit(Site::WordAction);
         word.validate_in(self.0.algebra.quiver())?;
         let field = self.field();
         let mut acc = DenseMat::identity(self.0.dims[word.source() as usize]);
@@ -346,6 +373,7 @@ impl Module {
     /// Panics when `terms` is empty, names a basis index out of range, or
     /// mixes sources or targets.
     pub fn element_action(&self, terms: &[(BasisIdx, Fp)]) -> DenseMat {
+        hit(Site::ElementAction);
         assert!(!terms.is_empty(), "element_action: terms are empty");
         let basis = self.0.algebra.basis();
         let source = basis[terms[0].0].source();
@@ -380,6 +408,7 @@ impl Module {
 /// # Panics
 /// Panics on an empty slice or when the summands do not share one algebra.
 pub fn direct_sum(summands: &[&Module]) -> (Module, Vec<Morphism>, Vec<Morphism>) {
+    hit(Site::DirectSum);
     assert!(!summands.is_empty(), "direct_sum: needs a summand");
     let first = summands[0];
     for s in &summands[1..] {
@@ -432,8 +461,11 @@ pub fn direct_sum(summands: &[&Module]) -> (Module, Vec<Morphism>, Vec<Morphism>
             incl.push(inc);
             proj.push(prj);
         }
-        inclusions.push(Morphism::new(s, &sum, incl).expect("block inclusion commutes"));
-        projections.push(Morphism::new(&sum, s, proj).expect("block projection commutes"));
+        // The arrow matrices of the sum are block diagonal and these maps are
+        // block selections, so both squares hold by construction. See
+        // `Morphism::new_unchecked`.
+        inclusions.push(Morphism::new_unchecked(s, &sum, incl));
+        projections.push(Morphism::new_unchecked(&sum, s, proj));
     }
     (sum, inclusions, projections)
 }

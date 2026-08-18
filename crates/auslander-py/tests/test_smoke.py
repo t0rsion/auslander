@@ -240,7 +240,7 @@ def test_tau_of_a_projective_is_none_and_of_a_simple_is_a_module():
     A = auslander.MonomialAlgebra.linear_an(3)
     F = auslander.PrimeField(5)
     for v in range(3):
-        assert A.projective(F, v).tau() is None
+        assert all(d == 0 for d in A.projective(F, v).tau().dims)
     t0 = A.simple(F, 0).tau()
     assert t0.dims == [0, 1, 0]
     # The translate is a usable Module over the same algebra object.

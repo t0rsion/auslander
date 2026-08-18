@@ -1,6 +1,6 @@
 //! Differential harness against QPA. Design notes in `tests/qpa-oracle/README.md`.
 //!
-//! The oracle is `tests/qpa-oracle/qpa_expected.json` (schema v6). Only a real
+//! The oracle is `tests/qpa-oracle/qpa_expected.json` (schema v7). Only a real
 //! GAP+QPA run of `generate_fixtures.g` writes it. Every fixture carries its own
 //! prime field and its full presentation. The harness rebuilds each algebra from
 //! that presentation through `Relation`, `Presentation`, and `Algebra::new`, so
@@ -11,10 +11,17 @@
 //! `qpa_expected.json`. `QPA_ORACLE=1` invokes GAP itself and fails hard when
 //! GAP or QPA is unavailable, or when any value disagrees.
 //!
+//! Two schema strings are implemented and no others: `SCHEMA` for the oracle,
+//! and `SNAPSHOT_SCHEMA` for the snapshot, which is the v6 projection of our
+//! own values. The v7 support tau-tilting block holds `brute_agreement`, a
+//! GAP-internal cross-check with no library counterpart, so a snapshot at v7
+//! would have to invent one.
+//!
 //! The JSON layer is hand-rolled. The schema is small and fixed, so a writer
 //! built on `format!` and a strict recursive-descent reader replace a serde
 //! dependency. The reader rejects unknown keys, duplicate keys, missing fields,
-//! and malformed values.
+//! and malformed values, and cross-checks the v7 block against itself before
+//! any of it is compared.
 
 use std::collections::{BTreeMap, HashMap};
 use std::env;
@@ -30,12 +37,14 @@ use auslander::algebra::Algebra;
 use auslander::almost_split::{
     AlmostSplitOutcome, AlmostSplitWitness, almost_split, stable_hom as stable_hom_quotient,
 };
-use auslander::ar::{Tau, tau, tau_via_nakayama_kernel};
+use auslander::approx::left_approximation;
+use auslander::ar::{tau, tau_via_nakayama_kernel};
+use auslander::arquiver::{CatalogProvenance, IndecomposableCatalog};
 use auslander::completion::CompletionLimits;
 use auslander::decompose::{KrullSchmidtOutcome, krull_schmidt};
 use auslander::ext::{ExtClass, ExtSpace, ext_dim, ext_table};
 use auslander::field::{Fp, PrimeField};
-use auslander::hom::hom_dim;
+use auslander::hom::{cokernel, hom_dim, kernel};
 use auslander::indec::IndecomposableModule;
 use auslander::injective::injective_dimension;
 use auslander::iso::{IsoOutcome, is_isomorphic};
@@ -46,8 +55,21 @@ use auslander::quiver::{ArrowId, Quiver};
 use auslander::radical::{radical, socle};
 use auslander::relation::{Presentation, Relation};
 use auslander::resolution::{Bounded, projective_dimension};
+use auslander::supporttau::{SupportTauTiltingPair, enumerate_over_catalog};
+use auslander::taugraph::{
+    MutationGraphLimits, SupportTauTiltingGraphOutcome, support_tau_tilting_graph,
+};
+use auslander::taurigid::{TauRigidityOutcome, is_tau_rigid};
 
-const SCHEMA: &str = "auslander-qpa-oracle-v6";
+mod common;
+
+/// The oracle document `qpa_expected.json`, written only by GAP+QPA.
+const SCHEMA: &str = "auslander-qpa-oracle-v7";
+/// `native_snapshot.json`, this library's own drift snapshot. It is the v6
+/// projection of our values: every v6 field, and none of the v7 support
+/// tau-tilting block, because `brute_agreement` is a GAP-internal cross-check
+/// with no library counterpart and a snapshot must not invent one.
+const SNAPSHOT_SCHEMA: &str = "auslander-qpa-oracle-v6";
 const MAX_EXT_DEGREE: usize = 4;
 /// Projective and injective dimensions are recorded up to these bounds. A
 /// simple whose dimension exceeds the bound is stored as `{"at_least": bound
@@ -70,7 +92,7 @@ const ROOT_KEYS: [&str; 7] = [
     "fixtures",
 ];
 const PROVENANCE_KEYS: [&str; 3] = ["gap_version", "qpa_version", "command"];
-const FIXTURE_KEYS: [&str; 26] = [
+const FIXTURE_KEYS: [&str; 27] = [
     "family",
     "case",
     "field",
@@ -97,7 +119,46 @@ const FIXTURE_KEYS: [&str; 26] = [
     "tau_rigid",
     "rigid",
     "tau_period",
+    "support_tau_tilting",
 ];
+
+/// Keys of the v7 `support_tau_tilting` block on a fixture whose AR-quiver
+/// walk closed, and on one whose walk did not. The closure marker decides
+/// which set applies, so a document cannot carry a total without the marker
+/// that admits it.
+const STT_KEYS_CLOSED: [&str; 10] = [
+    "indecomposables",
+    "brute_agreement",
+    "tau_rigid_designated",
+    "total",
+    "histogram",
+    "pairs",
+    "approximation_slots",
+    "approximations",
+    // Read by no test. The committed document carries it from the GAP run
+    // that wrote it, so the key is still accepted; schema v8 drops it.
+    "one_tilting",
+    "exchange_graph_self_consistency",
+];
+const STT_KEYS_OPEN: [&str; 4] = [
+    "indecomposables",
+    "brute_agreement",
+    "tau_rigid_designated",
+    "not_computed",
+];
+
+/// How many (pair, module summand) slots the generator samples per fixture.
+const APPROX_SAMPLE: usize = 12;
+
+/// The last stdout line of a completed generator run, printed after the write.
+/// `gap -q -T` with closed stdin exits 0 after an uncaught error, so the exit
+/// code is no signal and this line is what a live run checks.
+const GENERATOR_SENTINEL: &str = "qpa-oracle-generator-ok";
+
+/// What `generate_fixtures.g` writes into its working directory. It is not the
+/// oracle's name, so an in-tree run cannot overwrite `qpa_expected.json`;
+/// promoting a run is a deliberate copy.
+const GENERATOR_OUTPUT: &str = "qpa_generated.json";
 
 /// Every fixture the oracle file must contain, as (family, case). A document
 /// that drops or renames a fixture fails the comparison.
@@ -455,6 +516,103 @@ enum TauPeriod {
     NoneUpTo(usize),
 }
 
+/// Whether GAP's AR-quiver walk closed. A closed walk certifies the
+/// indecomposable list, because a finite AR component over a connected
+/// algebra forces representation-finiteness. `NotClosed` records the budget it
+/// spent, which is no claim about the algebra.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Closure {
+    Closed { count: usize },
+    NotClosed { cap: usize },
+}
+
+/// GAP's own cross-check of the walk against `AllIndecModulesOfLengthAtMost`.
+/// It has no library counterpart, so the harness validates it and never
+/// compares it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum BruteAgreement {
+    Available { max_length: usize, agrees: bool },
+    Unavailable { reason: String },
+}
+
+/// A support tau-tilting pair as the schema stores it: the module summand
+/// dimension vectors, sorted, and the projective support as a sorted 0-based
+/// vertex subset.
+///
+/// This is a WEAK identity. Repetitions in `module_dimvecs` are preserved and
+/// are never multiplicity: `cyclic-nakayama-3-3-3` has three pairwise
+/// non-isomorphic projectives of dimension vector `[1, 1, 1]`. Two distinct
+/// pairs can share one record, so comparisons run over multisets of records
+/// and never key a lookup on one.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct PairRecord {
+    module_dimvecs: Vec<Vec<usize>>,
+    projective_support: Vec<u32>,
+}
+
+impl PairRecord {
+    fn summand_count(&self) -> usize {
+        self.module_dimvecs.len()
+    }
+}
+
+/// The invariants of `MinimalLeftApproximation(X, M/X)` at one (pair, module
+/// summand) slot. Invariants only: no mutated pair is claimed, because QPA
+/// realizes the exchange only when the approximation is injective with a
+/// nonzero cokernel.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ApproxRecord {
+    pair: PairRecord,
+    summand_dimvec: Vec<usize>,
+    invariants: ApproxInvariants,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ApproxInvariants {
+    source_dimvec: Vec<usize>,
+    target_dimvec: Vec<usize>,
+    rank: usize,
+    kernel_dimvec: Vec<usize>,
+    cokernel_dimvec: Vec<usize>,
+}
+
+/// Shape of the graph on the enumerated pairs, adjacent when they share
+/// `n - 1` of their `n` labels. Computed from the enumerated set on both
+/// sides, so it is a self-consistency check and never external truth.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExchangeShape {
+    degree_histogram: Vec<usize>,
+    edges: usize,
+    connected: bool,
+}
+
+/// The v7 `support_tau_tilting` block of one fixture.
+#[derive(Clone, Debug, PartialEq)]
+struct SupportTauTilting {
+    indecomposables: Closure,
+    brute: BruteAgreement,
+    tau_rigid_designated: Vec<bool>,
+    body: SttBody,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum SttBody {
+    /// Everything gated on the closure marker.
+    Enumerated(Box<SttValues>),
+    /// The typed refusal, with the reason the generator recorded.
+    NotComputed { reason: String },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SttValues {
+    total: usize,
+    histogram: Vec<usize>,
+    pairs: Vec<PairRecord>,
+    approximation_slots: usize,
+    approximations: Vec<ApproxRecord>,
+    exchange: ExchangeShape,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct ArrowSpec {
     name: String,
@@ -504,6 +662,8 @@ struct Fixture {
     tau_rigid: Vec<bool>,
     rigid: Vec<bool>,
     tau_period: Vec<TauPeriod>,
+    /// The v7 block, absent from the v6 snapshot projection.
+    stt: Option<SupportTauTilting>,
     /// The tau-orbit search bound the `tau_period` list was computed with,
     /// read back from its `none_up_to` entries. Derived, so it never widens
     /// document equality.
@@ -1281,13 +1441,355 @@ fn read_ext(value: &json::Value, n: usize, ctx: &str) -> Result<Vec<Vec<Vec<usiz
     Ok(ext)
 }
 
-fn read_fixture(value: &json::Value, index: usize) -> Result<Fixture, String> {
+fn read_bool(pairs: &[(String, json::Value)], key: &str, ctx: &str) -> Result<bool, String> {
+    match get(pairs, key, ctx)? {
+        json::Value::Bool(b) => Ok(*b),
+        other => Err(format!("{ctx}: {key} is {other:?}, expected a boolean")),
+    }
+}
+
+/// Dimension vectors sorted ascending, repetitions preserved. Merging them
+/// would erase the `cyclic-nakayama-3-3-3` witness, where two entries
+/// `[1, 1, 1]` are two non-isomorphic projectives.
+fn read_dimvec_list(value: &json::Value, n: usize, ctx: &str) -> Result<Vec<Vec<usize>>, String> {
+    let items = as_array(value, ctx)?;
+    let mut out: Vec<Vec<usize>> = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let dimvec = usize_row(item, n, &format!("{ctx} entry {i}"))?;
+        if dimvec.iter().all(|&d| d == 0) {
+            return Err(format!("{ctx}: entry {i} is the zero dimension vector"));
+        }
+        if out.last().is_some_and(|prev| *prev > dimvec) {
+            return Err(format!("{ctx}: entries are not sorted ascending at {i}"));
+        }
+        out.push(dimvec);
+    }
+    Ok(out)
+}
+
+/// A 0-based vertex subset, strictly ascending and inside the quiver.
+fn read_vertex_subset(value: &json::Value, n: usize, ctx: &str) -> Result<Vec<u32>, String> {
+    let items = as_array(value, ctx)?;
+    let mut out: Vec<u32> = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let v = usize_value(item, ctx)?;
+        if v >= n {
+            return Err(format!("{ctx}: vertex {v} is not below {n}"));
+        }
+        if out.last().is_some_and(|&prev| prev as usize >= v) {
+            return Err(format!("{ctx}: vertices are not strictly ascending at {i}"));
+        }
+        out.push(v as u32);
+    }
+    Ok(out)
+}
+
+/// The pair labels of an entry that carries them, checked against `|M| + |P| =
+/// n`, the defining count of a basic support tau-tilting pair.
+fn read_pair_record(
+    pairs: &[(String, json::Value)],
+    n: usize,
+    ctx: &str,
+) -> Result<PairRecord, String> {
+    let module_dimvecs = read_dimvec_list(
+        get(pairs, "module_dimvecs", ctx)?,
+        n,
+        &format!("{ctx}: module_dimvecs"),
+    )?;
+    let projective_support = read_vertex_subset(
+        get(pairs, "projective_support", ctx)?,
+        n,
+        &format!("{ctx}: projective_support"),
+    )?;
+    if module_dimvecs.len() + projective_support.len() != n {
+        return Err(format!(
+            "{ctx}: {} module summands and {} projective vertices do not add to {n}",
+            module_dimvecs.len(),
+            projective_support.len()
+        ));
+    }
+    Ok(PairRecord {
+        module_dimvecs,
+        projective_support,
+    })
+}
+
+fn read_closure(value: &json::Value, ctx: &str) -> Result<Closure, String> {
+    let pairs = as_object(value, ctx)?;
+    if read_bool(pairs, "closed", ctx)? {
+        check_keys(pairs, &["closed", "count"], ctx)?;
+        let count = read_usize(pairs, "count", ctx)?;
+        if count == 0 {
+            return Err(format!("{ctx}: a closed walk found no indecomposables"));
+        }
+        Ok(Closure::Closed { count })
+    } else {
+        check_keys(pairs, &["closed", "cap"], ctx)?;
+        Ok(Closure::NotClosed {
+            cap: read_usize(pairs, "cap", ctx)?,
+        })
+    }
+}
+
+fn read_brute_agreement(value: &json::Value, ctx: &str) -> Result<BruteAgreement, String> {
+    let pairs = as_object(value, ctx)?;
+    if read_bool(pairs, "available", ctx)? {
+        check_keys(pairs, &["available", "max_length", "agrees"], ctx)?;
+        Ok(BruteAgreement::Available {
+            max_length: read_usize(pairs, "max_length", ctx)?,
+            agrees: read_bool(pairs, "agrees", ctx)?,
+        })
+    } else {
+        check_keys(pairs, &["available", "reason"], ctx)?;
+        Ok(BruteAgreement::Unavailable {
+            reason: read_str(pairs, "reason", ctx)?,
+        })
+    }
+}
+
+/// One approximation slot. The invariants are cross-checked against each
+/// other before they are compared: `Source(f)` is the summand, the rank is
+/// `dim Source - dim Kernel`, and the image is `Source - Kernel` componentwise
+/// so the cokernel is `Target - Source + Kernel`.
+fn read_approximations(
+    value: &json::Value,
+    n: usize,
+    ctx: &str,
+) -> Result<Vec<ApproxRecord>, String> {
+    let items = as_array(value, ctx)?;
+    let mut out = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let actx = format!("{ctx} entry {i}");
+        let pairs = as_object(item, &actx)?;
+        check_keys(
+            pairs,
+            &[
+                "module_dimvecs",
+                "projective_support",
+                "summand_dimvec",
+                "source_dimvec",
+                "target_dimvec",
+                "rank",
+                "kernel_dimvec",
+                "cokernel_dimvec",
+            ],
+            &actx,
+        )?;
+        let pair = read_pair_record(pairs, n, &actx)?;
+        let row = |key: &str| usize_row(get(pairs, key, &actx)?, n, &format!("{actx}: {key}"));
+        let summand_dimvec = row("summand_dimvec")?;
+        let invariants = ApproxInvariants {
+            source_dimvec: row("source_dimvec")?,
+            target_dimvec: row("target_dimvec")?,
+            rank: read_usize(pairs, "rank", &actx)?,
+            kernel_dimvec: row("kernel_dimvec")?,
+            cokernel_dimvec: row("cokernel_dimvec")?,
+        };
+        if !pair.module_dimvecs.contains(&summand_dimvec) {
+            return Err(format!(
+                "{actx}: summand_dimvec {summand_dimvec:?} is not one of the pair's summands"
+            ));
+        }
+        if invariants.source_dimvec != summand_dimvec {
+            return Err(format!(
+                "{actx}: source_dimvec {:?} is not the summand {summand_dimvec:?}",
+                invariants.source_dimvec
+            ));
+        }
+        let total = |row: &[usize]| row.iter().sum::<usize>();
+        if invariants.rank + total(&invariants.kernel_dimvec) != total(&invariants.source_dimvec) {
+            return Err(format!("{actx}: rank and kernel do not add to the source"));
+        }
+        for v in 0..n {
+            let image = invariants.source_dimvec[v] - invariants.kernel_dimvec[v];
+            if invariants.kernel_dimvec[v] > invariants.source_dimvec[v]
+                || image + invariants.cokernel_dimvec[v] != invariants.target_dimvec[v]
+            {
+                return Err(format!(
+                    "{actx}: image and cokernel do not add to the target at vertex {v}"
+                ));
+            }
+        }
+        out.push(ApproxRecord {
+            pair,
+            summand_dimvec,
+            invariants,
+        });
+    }
+    Ok(out)
+}
+
+fn read_exchange(
+    value: &json::Value,
+    n: usize,
+    total: usize,
+    ctx: &str,
+) -> Result<ExchangeShape, String> {
+    let pairs = as_object(value, ctx)?;
+    check_keys(pairs, &["degree_histogram", "edges", "connected"], ctx)?;
+    let degree_histogram = usize_row(
+        get(pairs, "degree_histogram", ctx)?,
+        n + 2,
+        &format!("{ctx}: degree_histogram"),
+    )?;
+    let edges = read_usize(pairs, "edges", ctx)?;
+    if degree_histogram.iter().sum::<usize>() != total {
+        return Err(format!(
+            "{ctx}: degree_histogram does not cover {total} pairs"
+        ));
+    }
+    let ends: usize = degree_histogram
+        .iter()
+        .enumerate()
+        .map(|(d, count)| d * count)
+        .sum();
+    if ends != 2 * edges {
+        return Err(format!("{ctx}: {ends} edge ends against {edges} edges"));
+    }
+    Ok(ExchangeShape {
+        degree_histogram,
+        edges,
+        connected: read_bool(pairs, "connected", ctx)?,
+    })
+}
+
+/// The v7 `support_tau_tilting` block.
+///
+/// Everything gated on the closure marker is present exactly when the marker
+/// says the walk closed. The totals, the histogram, the pair list, the slot
+/// count and the graph shape are cross-checked against each other before any
+/// of them is compared.
+fn read_support_tau_tilting(
+    value: &json::Value,
+    n: usize,
+    tau_rigid: &[bool],
+    ctx: &str,
+) -> Result<SupportTauTilting, String> {
+    let sctx = format!("{ctx}: support_tau_tilting");
+    let pairs = as_object(value, &sctx)?;
+    let indecomposables = read_closure(get(pairs, "indecomposables", &sctx)?, &sctx)?;
+    let closed = matches!(indecomposables, Closure::Closed { .. });
+    check_keys(
+        pairs,
+        if closed {
+            &STT_KEYS_CLOSED[..]
+        } else {
+            &STT_KEYS_OPEN[..]
+        },
+        &sctx,
+    )?;
+    let brute = read_brute_agreement(get(pairs, "brute_agreement", &sctx)?, &sctx)?;
+    let tau_rigid_designated = read_bool_list(
+        get(pairs, "tau_rigid_designated", &sctx)?,
+        tau_rigid.len(),
+        "tau_rigid_designated",
+        &sctx,
+    )?;
+    if tau_rigid_designated != tau_rigid {
+        return Err(format!(
+            "{sctx}: tau_rigid_designated disagrees with the v6 tau_rigid list"
+        ));
+    }
+    if !closed {
+        let nctx = format!("{sctx}: not_computed");
+        let npairs = as_object(get(pairs, "not_computed", &sctx)?, &nctx)?;
+        check_keys(npairs, &["reason"], &nctx)?;
+        return Ok(SupportTauTilting {
+            indecomposables,
+            brute,
+            tau_rigid_designated,
+            body: SttBody::NotComputed {
+                reason: read_str(npairs, "reason", &nctx)?,
+            },
+        });
+    }
+    let total = read_usize(pairs, "total", &sctx)?;
+    let histogram = usize_row(
+        get(pairs, "histogram", &sctx)?,
+        n + 1,
+        &format!("{sctx}: histogram"),
+    )?;
+    if histogram.iter().sum::<usize>() != total {
+        return Err(format!("{sctx}: histogram does not add to total {total}"));
+    }
+    let pctx = format!("{sctx}: pairs");
+    let items = as_array(get(pairs, "pairs", &sctx)?, &pctx)?;
+    if items.len() != total {
+        return Err(format!(
+            "{pctx} has {} entries, expected total {total}",
+            items.len()
+        ));
+    }
+    let mut pair_records = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let ictx = format!("{pctx} entry {i}");
+        let ipairs = as_object(item, &ictx)?;
+        check_keys(ipairs, &["module_dimvecs", "projective_support"], &ictx)?;
+        pair_records.push(read_pair_record(ipairs, n, &ictx)?);
+    }
+    for (m, count) in histogram.iter().enumerate() {
+        let seen = pair_records
+            .iter()
+            .filter(|p| p.summand_count() == m)
+            .count();
+        if seen != *count {
+            return Err(format!(
+                "{sctx}: histogram claims {count} pairs with {m} summands, the list has {seen}"
+            ));
+        }
+    }
+    let approximation_slots = read_usize(pairs, "approximation_slots", &sctx)?;
+    let slots: usize = pair_records.iter().map(PairRecord::summand_count).sum();
+    if approximation_slots != slots {
+        return Err(format!(
+            "{sctx}: approximation_slots is {approximation_slots}, the pair list has {slots}"
+        ));
+    }
+    let approximations = read_approximations(
+        get(pairs, "approximations", &sctx)?,
+        n,
+        &format!("{sctx}: approximations"),
+    )?;
+    if approximations.len() != approximation_slots.min(APPROX_SAMPLE) {
+        return Err(format!(
+            "{sctx}: {} approximation entries, expected {}",
+            approximations.len(),
+            approximation_slots.min(APPROX_SAMPLE)
+        ));
+    }
+    let exchange = read_exchange(
+        get(pairs, "exchange_graph_self_consistency", &sctx)?,
+        n,
+        total,
+        &format!("{sctx}: exchange_graph_self_consistency"),
+    )?;
+    Ok(SupportTauTilting {
+        indecomposables,
+        brute,
+        tau_rigid_designated,
+        body: SttBody::Enumerated(Box::new(SttValues {
+            total,
+            histogram,
+            pairs: pair_records,
+            approximation_slots,
+            approximations,
+            exchange,
+        })),
+    })
+}
+
+fn read_fixture(value: &json::Value, index: usize, v7: bool) -> Result<Fixture, String> {
     let fallback = format!("fixture {index}");
     let pairs = as_object(value, &fallback)?;
     let family = read_str(pairs, "family", &fallback)?;
     let case = read_str(pairs, "case", &fallback)?;
     let ctx = format!("{family}/{case}");
-    check_keys(pairs, &FIXTURE_KEYS, &ctx)?;
+    let keys = if v7 {
+        &FIXTURE_KEYS[..]
+    } else {
+        &FIXTURE_KEYS[..FIXTURE_KEYS.len() - 1]
+    };
+    check_keys(pairs, keys, &ctx)?;
     let field = read_usize(pairs, "field", &ctx)? as u64;
     PrimeField::new(field).map_err(|e| format!("{ctx}: field {field} rejected: {e}"))?;
     if case != format!("f{field}") {
@@ -1306,9 +1808,21 @@ fn read_fixture(value: &json::Value, index: usize) -> Result<Fixture, String> {
     let width = designated.len();
     let (tau_period, tau_period_bound) =
         read_tau_period(get(pairs, "tau_period", &ctx)?, width, &ctx)?;
+    let cartan = read_matrix(get(pairs, "cartan", &ctx)?, n, n, "cartan", &ctx)?;
+    let tau_rigid = read_bool_list(get(pairs, "tau_rigid", &ctx)?, width, "tau_rigid", &ctx)?;
+    let stt = v7
+        .then(|| {
+            read_support_tau_tilting(
+                get(pairs, "support_tau_tilting", &ctx)?,
+                n,
+                &tau_rigid,
+                &ctx,
+            )
+        })
+        .transpose()?;
     Ok(Fixture {
         dim: read_usize(pairs, "dim", &ctx)?,
-        cartan: read_matrix(get(pairs, "cartan", &ctx)?, n, n, "cartan", &ctx)?,
+        cartan,
         injectives: read_matrix(get(pairs, "injectives", &ctx)?, n, n, "injectives", &ctx)?,
         projdim: read_outcomes(
             get(pairs, "projdim", &ctx)?,
@@ -1343,9 +1857,10 @@ fn read_fixture(value: &json::Value, index: usize) -> Result<Fixture, String> {
             "stable_hom",
             &ctx,
         )?,
-        tau_rigid: read_bool_list(get(pairs, "tau_rigid", &ctx)?, width, "tau_rigid", &ctx)?,
+        tau_rigid,
         rigid: read_bool_list(get(pairs, "rigid", &ctx)?, width, "rigid", &ctx)?,
         tau_period,
+        stt,
         tau_period_bound,
         designated,
         family,
@@ -1382,19 +1897,25 @@ fn check_presentation_ids(fixtures: &[Fixture]) -> Result<(), String> {
     Ok(())
 }
 
-/// Parses and validates a v5 oracle document. Every structural defect is an
-/// error: wrong schema string, unknown or missing keys, wrong pinned bounds,
-/// malformed presentations, malformed typed outcomes, unsorted or unmerged
-/// decomposition summands, duplicate fixtures, inconsistent presentation ids.
-fn parse_document(text: &str) -> Result<Document, String> {
+/// Parses and validates a document against exactly one schema string, `SCHEMA`
+/// for the oracle and `SNAPSHOT_SCHEMA` for the native snapshot. Every
+/// structural defect is an error: wrong schema string, unknown or missing
+/// keys, wrong pinned bounds, malformed presentations, malformed typed
+/// outcomes, unsorted or unmerged decomposition summands, duplicate fixtures,
+/// inconsistent presentation ids, and every cross-check inside the v7 block.
+/// A stale document fails loudly instead of silently skipping checks.
+fn parse_document(text: &str, expected: &str) -> Result<Document, String> {
     let root = json::parse(text)?;
     let ctx = "document";
     let pairs = as_object(&root, ctx)?;
     check_keys(pairs, &ROOT_KEYS, ctx)?;
     let schema = read_str(pairs, "schema", ctx)?;
-    if schema != SCHEMA {
-        return Err(format!("{ctx}: schema is {schema:?}, expected {SCHEMA:?}"));
+    if schema != expected {
+        return Err(format!(
+            "{ctx}: schema is {schema:?}, expected {expected:?}"
+        ));
     }
+    let v7 = expected == SCHEMA;
     let left_convention = match read_str(pairs, "convention", ctx)?.as_str() {
         "right" => false,
         "left" => true,
@@ -1425,7 +1946,7 @@ fn parse_document(text: &str) -> Result<Document, String> {
     let fixtures = items
         .iter()
         .enumerate()
-        .map(|(i, item)| read_fixture(item, i))
+        .map(|(i, item)| read_fixture(item, i, v7))
         .collect::<Result<Vec<_>, String>>()?;
     for (i, fx) in fixtures.iter().enumerate() {
         if fixtures[..i]
@@ -1512,12 +2033,14 @@ fn dim_outcome(bounded: Bounded<usize>) -> DimOutcome {
     }
 }
 
-/// `Tau::Zero` marks a projective input; the schema stores that as
+/// A zero translate marks a projective input; the schema stores that as
 /// `{"projective": true}` and a dimension vector otherwise.
 fn tau_outcome(m: &Module) -> TauOutcome {
-    match tau(m).expect("τ routes agree on fixtures") {
-        Tau::Zero => TauOutcome::Projective,
-        Tau::Module(t) => TauOutcome::Dimvec(t.dim_vector().to_vec()),
+    let t = tau(m).expect("τ routes agree on fixtures");
+    if t.is_zero() {
+        TauOutcome::Projective
+    } else {
+        TauOutcome::Dimvec(t.dim_vector().to_vec())
     }
 }
 
@@ -1877,12 +2400,11 @@ fn compute(algebra: &Arc<Algebra>, tau_period_bound: usize) -> Result<Computed, 
     let mut tau_period = Vec::with_capacity(modules.len());
     for (r, m) in designated.iter().zip(&modules) {
         let ctx = |e: String| format!("{}: {e}", r.label());
-        tau_rigid.push(match tau(m).map_err(|e| ctx(format!("tau failed: {e}")))? {
-            Tau::Zero => true,
-            Tau::Module(t) => {
-                hom_dim(m, &t).map_err(|e| ctx(format!("Hom(M, tau M) failed: {e}")))? == 0
-            }
-        });
+        let t = tau(m).map_err(|e| ctx(format!("tau failed: {e}")))?;
+        tau_rigid.push(
+            t.is_zero()
+                || hom_dim(m, &t).map_err(|e| ctx(format!("Hom(M, tau M) failed: {e}")))? == 0,
+        );
         rigid.push(ext_dim(m, m, 1).map_err(|e| ctx(format!("Ext^1(M, M) failed: {e}")))? == 0);
         tau_period.push(tau_period_of(m, tau_period_bound).map_err(ctx)?);
     }
@@ -1933,6 +2455,258 @@ fn compute(algebra: &Arc<Algebra>, tau_period_bound: usize) -> Result<Computed, 
     })
 }
 
+/// The budget the mutation-graph route runs under when the oracle carries a
+/// pair list to compare against.
+///
+/// A budget is a resource bound and never a claim. A walk that exhausts it
+/// returns `Incomplete`, and the harness then claims no completeness either.
+/// The ceiling clears the largest fixture that closes here, `inhomogeneous` at
+/// 152 vertices, with room to spare.
+///
+/// This budget does not stop a tau-tilting infinite algebra in reasonable
+/// time. The cost of failing grows steeply with the vertex ceiling, because
+/// the modules on the preprojective ray grow without bound. The figures that
+/// once stood here measured a work-unit rate this code no longer uses and are
+/// not restated. So the harness walks the graph only where the oracle's
+/// closure marker says GAP enumerated a pair list, and the Kronecker rejection
+/// runs under the design's own 16-vertex ceiling in
+/// [`kronecker_2_truncates_on_both_sides`].
+fn graph_limits() -> MutationGraphLimits {
+    MutationGraphLimits {
+        max_vertices: 512,
+        ..MutationGraphLimits::default()
+    }
+}
+
+/// One of the `n` labels of a support tau-tilting pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Label {
+    /// The isomorphism class of a module summand, as an id local to the
+    /// fixture.
+    Summand(usize),
+    /// A vertex of the projective support.
+    Projective(u32),
+}
+
+/// One enumerated pair: the schema's weak record, the module summands
+/// themselves, and the pair's `n` labels.
+struct OurPair {
+    record: PairRecord,
+    summands: Vec<Module>,
+    labels: Vec<Label>,
+}
+
+/// Isomorphism-class ids for the module summands across one pair list.
+///
+/// Dimension vectors are the prefilter and `is_isomorphic` decides inside a
+/// class of equal dimension vectors, so the ids are isomorphism classes and
+/// not dimension vectors. That is what keeps `cyclic-nakayama-3-3-3` honest:
+/// its three pairwise non-isomorphic projectives all have dimension vector
+/// `[1, 1, 1]` and get three ids.
+#[derive(Default)]
+struct SummandIds {
+    classes: Vec<Module>,
+    by_dimvec: HashMap<Vec<usize>, Vec<usize>>,
+}
+
+impl SummandIds {
+    fn id_of(&mut self, m: &Module) -> Result<usize, String> {
+        let key = m.dim_vector().to_vec();
+        for candidate in self.by_dimvec.get(&key).cloned().unwrap_or_default() {
+            match is_isomorphic(m, &self.classes[candidate]) {
+                Ok(IsoOutcome::Isomorphic(_)) => return Ok(candidate),
+                Ok(IsoOutcome::NotIsomorphic(_)) => {}
+                Ok(IsoOutcome::Unknown { reason }) => {
+                    return Err(format!("summand identity undetermined: {reason}"));
+                }
+                Err(e) => return Err(format!("summand identity failed: {e}")),
+            }
+        }
+        let id = self.classes.len();
+        self.classes.push(m.clone());
+        self.by_dimvec.entry(key).or_default().push(id);
+        Ok(id)
+    }
+}
+
+fn our_pairs<'a>(
+    pairs: impl Iterator<Item = &'a SupportTauTiltingPair>,
+) -> Result<Vec<OurPair>, String> {
+    let mut ids = SummandIds::default();
+    let mut out = Vec::new();
+    for pair in pairs {
+        let summands: Vec<Module> = pair
+            .module()
+            .summands()
+            .iter()
+            .map(|s| s.module().clone())
+            .collect();
+        let projective_support = pair.projective().vertices().to_vec();
+        let mut labels = Vec::with_capacity(summands.len() + projective_support.len());
+        for m in &summands {
+            labels.push(Label::Summand(ids.id_of(m)?));
+        }
+        labels.extend(projective_support.iter().map(|&v| Label::Projective(v)));
+        labels.sort_unstable();
+        out.push(OurPair {
+            record: PairRecord {
+                module_dimvecs: pair.module().dim_vectors(),
+                projective_support,
+            },
+            summands,
+            labels,
+        });
+    }
+    Ok(out)
+}
+
+/// Which route reached the library's pair list, or why none did.
+///
+/// The two routes are independent. `Catalog` is the definition alone over an
+/// exhaustive classification, and `Graph` is the mutation-graph certificate;
+/// neither restates the other.
+enum OurStt {
+    Catalog {
+        provenance: CatalogProvenance,
+        catalog_len: usize,
+        pairs: Vec<OurPair>,
+    },
+    Graph {
+        pairs: Vec<OurPair>,
+    },
+    /// The mutation graph exhausted its budget, so the list is not complete
+    /// and nothing gated on completeness may be compared.
+    Truncated {
+        reason: String,
+    },
+    /// The oracle carries no pair list for this fixture, so none was built.
+    /// The catalog constructors still ran, because their verdict is compared
+    /// against the closure marker.
+    NotRequested,
+}
+
+impl OurStt {
+    fn pairs(&self) -> Option<&[OurPair]> {
+        match self {
+            OurStt::Catalog { pairs, .. } | OurStt::Graph { pairs } => Some(pairs),
+            OurStt::Truncated { .. } | OurStt::NotRequested => None,
+        }
+    }
+
+    fn route(&self) -> String {
+        match self {
+            OurStt::Catalog { provenance, .. } => format!("the {provenance} catalog"),
+            OurStt::Graph { .. } => "the closed mutation graph".to_string(),
+            OurStt::Truncated { reason } => format!("a truncated mutation graph ({reason})"),
+            OurStt::NotRequested => "no enumeration".to_string(),
+        }
+    }
+}
+
+/// The library's support tau-tilting pairs, by the catalog route where an
+/// exhaustive catalog exists and by the mutation graph otherwise.
+///
+/// `enumerate` is the oracle's closure marker. Where GAP enumerated no pair
+/// list there is nothing to compare, and the mutation graph is not walked: on
+/// a tau-tilting infinite algebra its truncation costs more the larger the
+/// budget, so that case has its own test with its own ceiling.
+fn our_support_tau_tilting(algebra: &Arc<Algebra>, enumerate: bool) -> Result<OurStt, String> {
+    let catalog = IndecomposableCatalog::nakayama(algebra)
+        .ok()
+        .or_else(|| IndecomposableCatalog::dynkin(algebra).ok());
+    if let Some(catalog) = catalog {
+        let enumeration = enumerate_over_catalog(&catalog)
+            .map_err(|e| format!("the catalog enumeration failed: {e}"))?;
+        return Ok(OurStt::Catalog {
+            provenance: catalog.provenance(),
+            catalog_len: catalog.len(),
+            pairs: our_pairs(enumeration.pairs().iter())?,
+        });
+    }
+    if !enumerate {
+        return Ok(OurStt::NotRequested);
+    }
+    match support_tau_tilting_graph(algebra, &graph_limits())
+        .map_err(|e| format!("the mutation graph rejected the algebra: {e}"))?
+    {
+        SupportTauTiltingGraphOutcome::Closed(graph) => Ok(OurStt::Graph {
+            pairs: our_pairs(graph.pairs())?,
+        }),
+        SupportTauTiltingGraphOutcome::Incomplete(graph) => Ok(OurStt::Truncated {
+            reason: graph.reason().to_string(),
+        }),
+    }
+}
+
+/// The invariants of the minimal left `add(M/X)`-approximation of `X`.
+///
+/// Invariants only. No mutated pair is built from them: QPA realizes the
+/// exchange only when the approximation is injective with a nonzero cokernel,
+/// and the other branch gives the wrong partner half the time.
+fn approximation_invariants(x: &Module, rest: &[Module]) -> Result<ApproxInvariants, String> {
+    let approximation = left_approximation(x, rest)
+        .map_err(|e| format!("the minimal left approximation failed: {e}"))?;
+    let f = approximation.map();
+    let (kernel_module, _) = kernel(f);
+    let (cokernel_module, _) = cokernel(f);
+    let kernel_dimvec = kernel_module.dim_vector().to_vec();
+    let source_dimvec = f.source().dim_vector().to_vec();
+    Ok(ApproxInvariants {
+        rank: source_dimvec.iter().sum::<usize>() - kernel_dimvec.iter().sum::<usize>(),
+        target_dimvec: f.target().dim_vector().to_vec(),
+        cokernel_dimvec: cokernel_module.dim_vector().to_vec(),
+        source_dimvec,
+        kernel_dimvec,
+    })
+}
+
+/// The shape of the graph on our own pairs, adjacent when they share `n - 1`
+/// of their `n` labels.
+///
+/// This is a self-consistency check of the enumeration against itself, not
+/// external truth: both sides compute it from a pair list they already have.
+fn our_exchange_shape(pairs: &[OurPair], n: usize) -> ExchangeShape {
+    let adjacency: Vec<Vec<usize>> = pairs
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            pairs
+                .iter()
+                .enumerate()
+                .filter(|(j, q)| {
+                    *j != i && p.labels.iter().filter(|l| q.labels.contains(l)).count() == n - 1
+                })
+                .map(|(j, _)| j)
+                .collect()
+        })
+        .collect();
+    let mut degree_histogram = vec![0; n + 2];
+    for row in &adjacency {
+        if let Some(slot) = degree_histogram.get_mut(row.len()) {
+            *slot += 1;
+        }
+    }
+    let mut seen = vec![false; pairs.len()];
+    let mut queue: Vec<usize> = Vec::new();
+    if !pairs.is_empty() {
+        seen[0] = true;
+        queue.push(0);
+    }
+    while let Some(i) = queue.pop() {
+        for &j in &adjacency[i] {
+            if !seen[j] {
+                seen[j] = true;
+                queue.push(j);
+            }
+        }
+    }
+    ExchangeShape {
+        degree_histogram,
+        edges: adjacency.iter().map(Vec::len).sum::<usize>() / 2,
+        connected: seen.iter().all(|&s| s),
+    }
+}
+
 /// A left-convention document stores values for left modules. Left modules
 /// over `A` are right modules over `A^op`, so every value is computed over
 /// the opposite algebra and compared index for index.
@@ -1953,8 +2727,8 @@ type ComputedSlot = Arc<Mutex<Option<Result<Arc<Computed>, String>>>>;
 type ComputedCache = Mutex<HashMap<String, ComputedSlot>>;
 
 /// Fixtures repeat across tests and corrupted documents keep their
-/// presentations, so results are cached by field, presentation, side, and
-/// the tau-orbit search bound, which is the one recorded value that changes
+/// presentations, so results are cached by field, presentation, side, and the
+/// tau-orbit search bound. That bound is the one recorded value that changes
 /// what the library computes.
 ///
 /// Tests run in parallel, so each key gets its own lock and is computed once.
@@ -1975,6 +2749,249 @@ fn computed_for(fx: &Fixture, left: bool) -> Result<Arc<Computed>, String> {
     let result = build_and_compute(fx, left).map(Arc::new);
     *entry = Some(result.clone());
     result
+}
+
+/// The library's whole v7 layer for one fixture.
+struct OurSupportTauTilting {
+    /// `is_tau_rigid` over the designated modules. An independent route to the
+    /// v6 `tau_rigid` list, which the reader already pins to the v7 copy.
+    tau_rigid_designated: Vec<bool>,
+    enumeration: OurStt,
+}
+
+fn build_stt(fx: &Fixture, enumerate: bool) -> Result<OurSupportTauTilting, String> {
+    let algebra = build_algebra(fx)?;
+    let mut tau_rigid_designated = Vec::new();
+    for (r, m) in designated_refs(algebra.quiver().num_vertices() as usize)
+        .iter()
+        .zip(designated_modules(&algebra))
+    {
+        match is_tau_rigid(&m) {
+            Ok(TauRigidityOutcome::TauRigid(_)) => tau_rigid_designated.push(true),
+            Ok(TauRigidityOutcome::NotTauRigid(_)) => tau_rigid_designated.push(false),
+            Err(e) => return Err(format!("{}: tau-rigidity failed: {e}", r.label())),
+        }
+    }
+    Ok(OurSupportTauTilting {
+        enumeration: our_support_tau_tilting(&algebra, enumerate)?,
+        tau_rigid_designated,
+    })
+}
+
+type SttSlot = Arc<Mutex<Option<Result<Arc<OurSupportTauTilting>, String>>>>;
+
+/// The v7 layer, cached by presentation exactly as [`computed_for`] caches the
+/// v6 layer. Corrupted documents keep their presentations, so the enumeration
+/// runs once per algebra across the whole binary.
+fn stt_for(fx: &Fixture, enumerate: bool) -> Result<Arc<OurSupportTauTilting>, String> {
+    static CACHE: OnceLock<Mutex<HashMap<String, SttSlot>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = format!(
+        "{enumerate}|{}|{:?}|{:?}",
+        fx.field, fx.quiver, fx.relations
+    );
+    let slot = cache.lock().unwrap().entry(key).or_default().clone();
+    let mut entry = slot.lock().unwrap();
+    if let Some(hit) = entry.as_ref() {
+        return hit.clone();
+    }
+    let result = build_stt(fx, enumerate).map(Arc::new);
+    *entry = Some(result.clone());
+    result
+}
+
+/// How much of the v7 block one pass compares.
+///
+/// `Shape` is the closure marker, tau-rigidity, the pair list, the histogram
+/// and the exchange graph shape, all of which read a pair list the fixture's
+/// cache already holds. `Slots` adds the per-slot layer, one minimal left
+/// approximation per sampled slot. That layer is recomputed on every call, so
+/// the two oracle tests run at `Slots` and the corruption tests, which run the
+/// comparison dozens of times, run at `Shape`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SttDepth {
+    Shape,
+    Slots,
+}
+
+/// The first index where two lists differ, for a readable message on a long
+/// list.
+fn first_difference<T: PartialEq>(theirs: &[T], ours: &[T]) -> Option<usize> {
+    (0..theirs.len().max(ours.len())).find(|&i| theirs.get(i) != ours.get(i))
+}
+
+/// The schema v7 support tau-tilting layer.
+///
+/// Everything gated on the closure marker is compared only where the marker
+/// admits it, and against a route that certifies completeness: the catalog
+/// enumeration where an exhaustive catalog exists, otherwise a closed mutation
+/// graph. Where the oracle carries a pair list and neither route reaches one,
+/// the route is named in a mismatch, never passed silently. Where the oracle
+/// carries none, there is nothing to compare and nothing is claimed.
+fn compare_stt(
+    mismatches: &mut Vec<String>,
+    ctx: &str,
+    fx: &Fixture,
+    ours: &OurSupportTauTilting,
+    depth: SttDepth,
+) {
+    let Some(theirs) = &fx.stt else {
+        return;
+    };
+    let n = fx.quiver.num_vertices as usize;
+    for (t, (theirs, our)) in theirs
+        .tau_rigid_designated
+        .iter()
+        .zip(&ours.tau_rigid_designated)
+        .enumerate()
+    {
+        if theirs != our {
+            mismatches.push(format!(
+                "{ctx}: {} is tau-rigid {theirs}, ours is {our}",
+                fx.designated[t].label()
+            ));
+        }
+    }
+    match (theirs.indecomposables, &ours.enumeration) {
+        (Closure::Closed { count }, OurStt::Catalog { catalog_len, .. })
+            if count != *catalog_len =>
+        {
+            mismatches.push(format!(
+                "{ctx}: the closed walk found {count} indecomposables, our catalog has {catalog_len}"
+            ));
+        }
+        (Closure::NotClosed { cap }, OurStt::Catalog { catalog_len, .. }) => {
+            mismatches.push(format!(
+                "{ctx}: the walk did not close inside {cap}, yet our catalog lists {catalog_len} indecomposables"
+            ));
+        }
+        _ => {}
+    }
+    match &theirs.body {
+        // GAP enumerated no pairs, so the oracle holds no total, no histogram
+        // and no pair list, and nothing gated on completeness is compared.
+        // The closure marker itself is compared above, and the truncation
+        // cross-check on `kronecker-2` is
+        // `kronecker_2_truncates_on_both_sides`.
+        SttBody::NotComputed { .. } => {}
+        SttBody::Enumerated(values) => {
+            let Some(pairs) = ours.enumeration.pairs() else {
+                mismatches.push(format!(
+                    "{ctx}: GAP enumerated {} pairs, ours came from {}",
+                    values.total,
+                    ours.enumeration.route()
+                ));
+                return;
+            };
+            compare_stt_values(mismatches, ctx, values, ours, pairs, n, depth);
+        }
+    }
+}
+
+fn compare_stt_values(
+    mismatches: &mut Vec<String>,
+    ctx: &str,
+    theirs: &SttValues,
+    ours: &OurSupportTauTilting,
+    pairs: &[OurPair],
+    n: usize,
+    depth: SttDepth,
+) {
+    if theirs.total != pairs.len() {
+        mismatches.push(format!(
+            "{ctx}: {} support tau-tilting pairs, ours has {} from {}",
+            theirs.total,
+            pairs.len(),
+            ours.enumeration.route()
+        ));
+    }
+    let mut histogram = vec![0usize; n + 1];
+    for pair in pairs {
+        if let Some(slot) = histogram.get_mut(pair.record.summand_count()) {
+            *slot += 1;
+        }
+    }
+    if theirs.histogram != histogram {
+        mismatches.push(format!(
+            "{ctx}: the pair histogram is {:?}, ours is {histogram:?}",
+            theirs.histogram
+        ));
+    }
+    let mut our_records: Vec<PairRecord> = pairs.iter().map(|p| p.record.clone()).collect();
+    our_records.sort();
+    let mut their_records = theirs.pairs.clone();
+    their_records.sort();
+    if let Some(i) = first_difference(&their_records, &our_records) {
+        mismatches.push(format!(
+            "{ctx}: the pair lists first differ at entry {i}: {:?} against ours {:?}",
+            their_records.get(i),
+            our_records.get(i)
+        ));
+    }
+    let slots: usize = pairs.iter().map(|p| p.record.summand_count()).sum();
+    if theirs.approximation_slots != slots {
+        mismatches.push(format!(
+            "{ctx}: {} approximation slots, ours has {slots}",
+            theirs.approximation_slots
+        ));
+    }
+    let exchange = our_exchange_shape(pairs, n);
+    if theirs.exchange != exchange {
+        mismatches.push(format!(
+            "{ctx}: the exchange graph self-consistency shape is {:?}, ours is {exchange:?}",
+            theirs.exchange
+        ));
+    }
+    if depth == SttDepth::Shape {
+        return;
+    }
+    compare_stt_slots(mismatches, ctx, theirs, pairs);
+}
+
+/// The per-slot layer: the sampled approximations.
+///
+/// A pair record is a weak identity, so a recorded slot is matched against
+/// every slot of ours that carries the same record and summand dimension
+/// vector, and the recorded invariants must occur among theirs. On
+/// `cyclic-nakayama-3-3-3` that set has more than one element by construction.
+fn compare_stt_slots(
+    mismatches: &mut Vec<String>,
+    ctx: &str,
+    theirs: &SttValues,
+    pairs: &[OurPair],
+) {
+    for entry in &theirs.approximations {
+        let mut candidates = Vec::new();
+        for pair in pairs.iter().filter(|p| p.record == entry.pair) {
+            for (i, x) in pair.summands.iter().enumerate() {
+                if x.dim_vector() != entry.summand_dimvec {
+                    continue;
+                }
+                let rest: Vec<Module> = pair
+                    .summands
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != i)
+                    .map(|(_, m)| m.clone())
+                    .collect();
+                match approximation_invariants(x, &rest) {
+                    Ok(invariants) => candidates.push(invariants),
+                    Err(e) => mismatches.push(format!("{ctx}: {e}")),
+                }
+            }
+        }
+        if candidates.is_empty() {
+            mismatches.push(format!(
+                "{ctx}: no slot of ours carries the pair {:?} with summand {:?}",
+                entry.pair, entry.summand_dimvec
+            ));
+        } else if !candidates.contains(&entry.invariants) {
+            mismatches.push(format!(
+                "{ctx}: the approximation at {:?} summand {:?} is {:?}, ours are {candidates:?}",
+                entry.pair, entry.summand_dimvec, entry.invariants
+            ));
+        }
+    }
 }
 
 fn compare_fixture(mismatches: &mut Vec<String>, ctx: &str, fx: &Fixture, ours: &Computed) {
@@ -2159,6 +3176,10 @@ fn compare_ar_layer(mismatches: &mut Vec<String>, ctx: &str, fx: &Fixture, ours:
 /// presentation; a construction failure is a mismatch, not a skip. The
 /// fixture set itself is pinned by `FIXTURE_MANIFEST`.
 fn compare(doc: &Document) -> Vec<String> {
+    compare_at(doc, SttDepth::Shape)
+}
+
+fn compare_at(doc: &Document, depth: SttDepth) -> Vec<String> {
     let mut mismatches = Vec::new();
     for (family, case) in FIXTURE_MANIFEST {
         if !doc
@@ -2181,6 +3202,17 @@ fn compare(doc: &Document) -> Vec<String> {
             Ok(ours) => compare_fixture(&mut mismatches, &ctx, fx, &ours),
             Err(e) => mismatches.push(format!("{ctx}: {e}")),
         }
+        // The v7 block is stored in the right convention only. A
+        // left-convention document carries no support tau-tilting values.
+        if let Some(stt) = &fx.stt
+            && !doc.left_convention
+        {
+            let enumerate = matches!(stt.indecomposables, Closure::Closed { .. });
+            match stt_for(fx, enumerate) {
+                Ok(ours) => compare_stt(&mut mismatches, &ctx, fx, &ours, depth),
+                Err(e) => mismatches.push(format!("{ctx}: {e}")),
+            }
+        }
     }
     mismatches
 }
@@ -2195,7 +3227,8 @@ fn committed_text() -> String {
 }
 
 fn committed_doc() -> Document {
-    parse_document(&committed_text()).unwrap_or_else(|e| panic!("qpa_expected.json rejected: {e}"))
+    parse_document(&committed_text(), SCHEMA)
+        .unwrap_or_else(|e| panic!("qpa_expected.json rejected: {e}"))
 }
 
 fn int_row(row: &[usize]) -> String {
@@ -2359,7 +3392,7 @@ fn relation_json(terms: &[TermSpec]) -> String {
 fn render_document(fixtures: &[(&Fixture, &Computed)], convention: &str) -> String {
     let mut out = String::new();
     out.push_str("{\n");
-    out.push_str(&format!("  \"schema\": \"{SCHEMA}\",\n"));
+    out.push_str(&format!("  \"schema\": \"{SNAPSHOT_SCHEMA}\",\n"));
     out.push_str(&format!("  \"convention\": \"{convention}\",\n"));
     out.push_str(&format!("  \"max_ext_degree\": {MAX_EXT_DEGREE},\n"));
     out.push_str(&format!("  \"projdim_bound\": {PROJDIM_BOUND},\n"));
@@ -2478,15 +3511,15 @@ fn render_document(fixtures: &[(&Fixture, &Computed)], convention: &str) -> Stri
     out
 }
 
-/// Renders the document with library-computed values for every fixture of
-/// `doc`, over the algebra itself or its opposite per `left`.
-fn rendered_from_computed(doc: &Document, left: bool, convention: &str) -> String {
+/// Renders the document with this library's right-module values for every
+/// fixture of `doc`.
+fn rendered_from_computed(doc: &Document) -> String {
     let computed: Vec<(&Fixture, Arc<Computed>)> = doc
         .fixtures
         .iter()
         .map(|fx| {
-            let value =
-                computed_for(fx, left).unwrap_or_else(|e| panic!("{}/{}: {e}", fx.family, fx.case));
+            let value = computed_for(fx, false)
+                .unwrap_or_else(|e| panic!("{}/{}: {e}", fx.family, fx.case));
             (fx, value)
         })
         .collect();
@@ -2494,7 +3527,7 @@ fn rendered_from_computed(doc: &Document, left: bool, convention: &str) -> Strin
         .iter()
         .map(|(fx, value)| (*fx, value.as_ref()))
         .collect();
-    render_document(&refs, convention)
+    render_document(&refs, "right")
 }
 
 /// The committed independent truth: `qpa_expected.json` was produced by a real
@@ -2502,7 +3535,7 @@ fn rendered_from_computed(doc: &Document, left: bool, convention: &str) -> Strin
 /// and is regenerated only by that path, never by this library.
 #[test]
 fn library_matches_the_committed_qpa_truth() {
-    let mismatches = compare(&committed_doc());
+    let mismatches = compare_at(&committed_doc(), SttDepth::Slots);
     assert!(
         mismatches.is_empty(),
         "library disagrees with the committed QPA truth:\n{}",
@@ -2518,10 +3551,8 @@ fn library_matches_the_committed_qpa_truth() {
 #[test]
 fn library_matches_its_native_snapshot() {
     let path = oracle_dir().join("native_snapshot.json");
-    let rendered = rendered_from_computed(&committed_doc(), false, "right");
-    if env::var("QPA_ORACLE_WRITE").as_deref() == Ok("1") {
-        fs::write(&path, rendered)
-            .unwrap_or_else(|e| panic!("cannot write {}: {e}", path.display()));
+    let rendered = rendered_from_computed(&committed_doc());
+    if common::rewrite_golden("QPA_ORACLE_WRITE", &path, rendered.as_bytes()) {
         println!("wrote {}", path.display());
         return;
     }
@@ -2538,19 +3569,92 @@ fn library_matches_its_native_snapshot() {
 /// snapshot cannot go stale against the reader.
 #[test]
 fn native_render_round_trips_through_the_reader() {
-    let rendered = rendered_from_computed(&committed_doc(), false, "right");
-    let parsed = parse_document(&rendered).expect("writer output parses");
+    let rendered = rendered_from_computed(&committed_doc());
+    let parsed = parse_document(&rendered, SNAPSHOT_SCHEMA).expect("writer output parses");
     assert!(!parsed.left_convention);
-    assert_eq!(compare(&parsed), Vec::<String>::new());
 }
 
-/// A left-convention document must compare clean against values computed
-/// over the opposite algebra. The check runs on a rendered copy of our own
-/// opposite-side data, the same code path a left-module GAP build would take.
+/// The fixture over the opposite presentation: every arrow swaps source and
+/// target and every relation term reverses its path. Vertex ids and the arrow
+/// order are kept, so an `ArrowId` still names the same arrow, and reversal is
+/// injective, so two presentations stay distinct exactly when they were.
+/// Relation uniformity and the length-at-least-2 requirement survive it.
+fn opposed_presentation(fx: &Fixture) -> Fixture {
+    let arrows = fx
+        .quiver
+        .arrows
+        .iter()
+        .map(|a| ArrowSpec {
+            name: a.name.clone(),
+            source: a.target,
+            target: a.source,
+        })
+        .collect();
+    let relations = fx
+        .relations
+        .iter()
+        .map(|terms| {
+            terms
+                .iter()
+                .map(|term| TermSpec {
+                    coeff: term.coeff,
+                    path: term.path.iter().rev().copied().collect(),
+                })
+                .collect()
+        })
+        .collect();
+    Fixture {
+        quiver: QuiverSpec {
+            num_vertices: fx.quiver.num_vertices,
+            arrows,
+        },
+        relations,
+        ..fx.clone()
+    }
+}
+
+/// The committed values in the shape the writer takes, so a rendered document
+/// carries QPA's numbers rather than this library's.
+fn committed_values(fx: &Fixture) -> Computed {
+    Computed {
+        dim: fx.dim,
+        cartan: fx.cartan.clone(),
+        injectives: fx.injectives.clone(),
+        projdim: fx.projdim.clone(),
+        injdim: fx.injdim.clone(),
+        tau: fx.tau.clone(),
+        tau_injectives: fx.tau_injectives.clone(),
+        decomposition: fx.decomposition.clone(),
+        ext: fx.ext.clone(),
+        designated: fx.designated.clone(),
+        ar_sequences: fx.ar_sequences.clone(),
+        irreducible_maps: fx.irreducible_maps.clone(),
+        ext_algebra: fx.ext_algebra.clone(),
+        yoneda_products: fx.yoneda_products.clone(),
+        stable_hom: fx.stable_hom.clone(),
+        tau_rigid: fx.tau_rigid.clone(),
+        rigid: fx.rigid.clone(),
+        tau_period: fx.tau_period.clone(),
+    }
+}
+
+/// The left branch against the committed QPA truth, not against itself.
+///
+/// A left-convention document over `kQ^op/I^op` asserts values for left modules
+/// there. Left modules over `kQ^op/I^op` are right modules over
+/// `(kQ^op/I^op)^op = kQ/I`, the algebra QPA measured, so every committed value
+/// transfers to the opposed presentation unchanged. The harness takes that
+/// second opposite itself in `build_and_compute`, so `compare` runs the whole
+/// left path and checks it against independent truth.
 #[test]
 fn left_convention_documents_compare_over_the_opposite_algebra() {
-    let rendered = rendered_from_computed(&committed_doc(), true, "left");
-    let parsed = parse_document(&rendered).expect("left-convention document parses");
+    let doc = committed_doc();
+    let opposed: Vec<Fixture> = doc.fixtures.iter().map(opposed_presentation).collect();
+    let values: Vec<Computed> = doc.fixtures.iter().map(committed_values).collect();
+    let refs: Vec<(&Fixture, &Computed)> = opposed.iter().zip(&values).collect();
+    let rendered = render_document(&refs, "left");
+    let parsed =
+        parse_document(&rendered, SNAPSHOT_SCHEMA).expect("left-convention document parses");
     assert!(parsed.left_convention);
     assert_eq!(compare(&parsed), Vec::<String>::new());
 }
@@ -2597,8 +3701,11 @@ fn fixtures_sharing_an_ideal_and_field_agree() {
 
 /// Metamorphic: the characteristic-sensitive pair keeps one presentation
 /// while the ideal degenerates over F_2. The library must reproduce the
-/// recorded agreement (dim, cartan, injectives, projdim, injdim, ext) and the
-/// recorded differences (tau of S_1, tau of I_2 and I_3, the decomposition).
+/// recorded agreement (dim, cartan, injectives, projdim, injdim, ext,
+/// ext_algebra, rigid) and the recorded differences (tau of S_1, tau of I_2
+/// and I_3, the decomposition, the AR sequences, the irreducible maps, stable
+/// Hom, one Yoneda product rank, the tau period of S_1, and tau-rigidity of
+/// I_3).
 #[test]
 fn characteristic_sensitive_pair_differs_as_recorded() {
     let doc = committed_doc();
@@ -2675,6 +3782,46 @@ fn committed_truth_carries_the_pinned_schema() {
     assert!(committed_text().contains(&format!("\"schema\": \"{SCHEMA}\"")));
 }
 
+/// `kronecker-2` is tau-tilting infinite, and the oracle records that GAP's
+/// AR-quiver walk did not close on it. Ours must not close either: both
+/// catalog constructors reject the algebra, and a bounded mutation-graph walk
+/// returns a typed truncation instead of a pair list. That is our own
+/// truncation cross-checked against GAP's, not a restatement of it.
+///
+/// The ceiling is the design's 16 vertices. The cost of failing grows steeply
+/// with that ceiling, since the preprojective ray carries ever larger modules.
+/// The earlier figures measured a work-unit rate this code no longer uses and
+/// are not restated.
+#[test]
+fn kronecker_2_truncates_on_both_sides() {
+    let doc = committed_doc();
+    let fx = doc
+        .fixtures
+        .iter()
+        .find(|fx| fx.family == "kronecker-2")
+        .expect("the oracle carries kronecker-2");
+    let stt = fx.stt.as_ref().expect("the oracle is at schema v7");
+    assert!(
+        matches!(stt.indecomposables, Closure::NotClosed { .. }),
+        "the oracle must record that GAP's walk did not close on kronecker-2"
+    );
+    let algebra = build_algebra(fx).expect("kronecker-2 builds");
+    assert!(IndecomposableCatalog::nakayama(&algebra).is_err());
+    assert!(IndecomposableCatalog::dynkin(&algebra).is_err());
+    let limits = MutationGraphLimits {
+        max_vertices: 16,
+        ..MutationGraphLimits::default()
+    };
+    let outcome = support_tau_tilting_graph(&algebra, &limits).expect("the walk runs");
+    let incomplete = outcome
+        .incomplete()
+        .expect("a tau-tilting infinite algebra must not close");
+    assert!(
+        incomplete.verify_parts(),
+        "the certified part of the truncated walk must recheck"
+    );
+}
+
 /// Locates GAP and a loadable QPA, in the order the README documents. GAP launches
 /// plainly when `~/.gap/pkg/qpa` exists, because GAP auto-loads packages from
 /// `~/.gap`. Otherwise the test builds a temporary GAP root whose `pkg/qpa` symlinks
@@ -2686,7 +3833,9 @@ fn committed_truth_carries_the_pinned_schema() {
 fn gap_command(workdir: &Path) -> Command {
     let gap_bin = env::var("GAP_BIN").unwrap_or_else(|_| "gap".to_string());
     let mut cmd = Command::new(gap_bin);
-    // -q quiet, -T no break loop: any GAP error exits nonzero instead of hanging.
+    // -q quiet, -T no break loop: a GAP error quits the run instead of waiting
+    // for input. The exit code still carries nothing, so the live test reads
+    // the sentinel and the output file instead.
     // -m 1g asks for a large initial workspace. GAP 4.16dev segfaults on the v6
     // workload without it, and the flag changes no output value.
     cmd.arg("-q").arg("-T").arg("-m").arg("1g");
@@ -2709,7 +3858,8 @@ fn gap_command(workdir: &Path) -> Command {
             std::os::unix::fs::symlink(&gbnp_dir, root.join("pkg/gbnp"))
                 .unwrap_or_else(|e| panic!("cannot symlink {gbnp_dir} into the GAP root: {e}"));
         }
-        // ";" prepends to the default roots, so stdlib still resolves.
+        // A leading ";" appends the root to the defaults, so stdlib still
+        // resolves.
         cmd.arg("-l").arg(format!(";{}", root.display()));
     }
     cmd.current_dir(workdir).stdin(Stdio::null());
@@ -2741,12 +3891,18 @@ fn live_gap_run_agrees_with_library_and_committed_truth() {
         .unwrap_or_else(|e| panic!("cannot launch GAP (set GAP_BIN to the binary): {e}"));
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "GAP exited with {}; stdout:\n{stdout}\nstderr:\n{stderr}",
-        output.status
+    // The exit code carries nothing: `gap -q -T` with closed stdin exits 0
+    // after an uncaught error, measured for a division by zero, an unbound
+    // variable and a QPA "no method found". The two signals that do carry are
+    // the sentinel, printed as the last stdout line after the write, and the
+    // output file, written in one final statement.
+    assert_eq!(
+        stdout.lines().next_back(),
+        Some(GENERATOR_SENTINEL),
+        "GAP did not print {GENERATOR_SENTINEL} as its last stdout line, so the run \
+         aborted; stdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    let fresh_path = workdir.join("fixtures_qpa.json");
+    let fresh_path = workdir.join(GENERATOR_OUTPUT);
     assert!(
         fresh_path.exists(),
         "GAP ran but wrote no {}; QPA probably failed to load; stdout:\n{stdout}\nstderr:\n{stderr}",
@@ -2754,22 +3910,45 @@ fn live_gap_run_agrees_with_library_and_committed_truth() {
     );
     let fresh_text = fs::read_to_string(&fresh_path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", fresh_path.display()));
-    let fresh = parse_document(&fresh_text)
+    let fresh = parse_document(&fresh_text, SCHEMA)
         .unwrap_or_else(|e| panic!("fresh GAP output {} rejected: {e}", fresh_path.display()));
-    let mismatches = compare(&fresh);
+    let mismatches = compare_at(&fresh, SttDepth::Slots);
     assert!(
         mismatches.is_empty(),
         "fresh QPA run disagrees with the library:\n{}",
         mismatches.join("\n")
     );
+    // The check above is the one that carries the mathematics: a real GAP,
+    // whatever its version, recomputed these values and agrees with us. It runs
+    // unconditionally.
+    //
+    // The document comparison below is a different claim, reproducibility of
+    // the committed FILE, and it holds only within one GAP version. GAP 4.16dev
+    // and the Ubuntu distro package produce documents that differ while both
+    // agree with the library, so comparing them byte for byte would fail on a
+    // true result. The committed document records the version it came from, so
+    // compare only when the fresh run matches it.
+    let fresh_gap = provenance_of(&fresh, "gap_version");
+    let committed = committed_doc();
+    let committed_gap = provenance_of(&committed, "gap_version");
+    if fresh_gap != committed_gap {
+        eprintln!(
+            "live oracle: GAP {fresh_gap} agrees with the library, and the committed document \
+             was generated on GAP {committed_gap}. Document comparison skipped: it is defined \
+             only within one GAP version. To make this environment the reference, regenerate \
+             per tests/qpa-oracle/README.md."
+        );
+        fs::remove_dir_all(&workdir).ok();
+        return;
+    }
     assert_eq!(
-        fresh,
-        committed_doc(),
-        "fresh QPA run disagrees with the committed qpa_expected.json; \
+        fresh, committed,
+        "fresh QPA run disagrees with the committed qpa_expected.json on the same GAP version; \
          if QPA itself changed, regenerate per tests/qpa-oracle/README.md"
     );
-    // The value comparison above gives readable diagnostics. The documented
-    // guarantee is byte-for-byte reproducibility, so check that as well.
+    // The value comparison above gives readable diagnostics. The guarantee is
+    // byte-for-byte reproducibility on the recorded GAP version, so check that
+    // as well.
     assert_eq!(
         fresh_text,
         committed_text(),
@@ -2777,6 +3956,16 @@ fn live_gap_run_agrees_with_library_and_committed_truth() {
          regenerate per tests/qpa-oracle/README.md"
     );
     fs::remove_dir_all(&workdir).ok();
+}
+
+/// The provenance value `key` records, or `"unrecorded"` when the document
+/// carries no such key. Used to compare the GAP version a document came from.
+fn provenance_of(doc: &Document, key: &str) -> String {
+    doc.provenance
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.clone())
+        .unwrap_or_else(|| "unrecorded".to_string())
 }
 
 /// Corruption regressions: each mutation of the committed truth must be
@@ -2795,14 +3984,35 @@ mod corruption {
 
     /// The corrupted document must fail the strict reader.
     fn read_error(from: &str, to: &str) -> String {
-        parse_document(&corrupted(from, to)).expect_err("the corrupted document must be rejected")
+        parse_document(&corrupted(from, to), SCHEMA)
+            .expect_err("the corrupted document must be rejected")
+    }
+
+    /// Two corruptions in one document, for a value the schema stores twice.
+    fn corrupted_pair(first: (&str, &str), second: (&str, &str)) -> String {
+        let text = corrupted(first.0, first.1);
+        let replaced = text.replacen(second.0, second.1, 1);
+        assert_ne!(text, replaced, "corruption target {:?} not found", second.0);
+        replaced
     }
 
     /// The corrupted document still reads; the comparator must flag it.
-    fn corrupted_mismatches(from: &str, to: &str) -> Vec<String> {
-        let doc = parse_document(&corrupted(from, to))
+    fn mismatches_of(text: String) -> Vec<String> {
+        let doc = parse_document(&text, SCHEMA)
             .unwrap_or_else(|e| panic!("the corrupted document must still read: {e}"));
         compare(&doc)
+    }
+
+    fn corrupted_mismatches(from: &str, to: &str) -> Vec<String> {
+        mismatches_of(corrupted(from, to))
+    }
+
+    /// The slot layer is not part of the shape comparison, so a corruption of
+    /// an approximation is checked at that depth.
+    fn corrupted_slot_mismatches(from: &str, to: &str) -> Vec<String> {
+        let doc = parse_document(&corrupted(from, to), SCHEMA)
+            .unwrap_or_else(|e| panic!("the corrupted document must still read: {e}"));
+        compare_at(&doc, SttDepth::Slots)
     }
 
     #[test]
@@ -2827,8 +4037,8 @@ mod corruption {
     #[test]
     fn reader_rejects_the_previous_schema_version() {
         let from = format!("\"schema\": \"{SCHEMA}\"");
-        let to = from.replace("-v6", "-v5");
-        assert_ne!(from, to, "the pinned schema must carry the v6 marker");
+        let to = from.replace("-v7", "-v6");
+        assert_ne!(from, to, "the pinned schema must carry the v7 marker");
         let err = read_error(&from, &to);
         assert!(err.contains("schema"), "{err}");
     }
@@ -3115,8 +4325,10 @@ mod corruption {
 
     #[test]
     fn compare_rejects_a_wrong_cartan_value() {
+        // kronecker-2. No reader check pins a Cartan row, so the comparator
+        // is what catches this.
         let mismatches = corrupted_mismatches(
-            "\"cartan\": [[1, 1], [0, 1]],",
+            "\"cartan\": [[1, 2], [0, 1]],",
             "\"cartan\": [[1, 5], [0, 1]],",
         );
         assert!(
@@ -3411,14 +4623,31 @@ mod corruption {
 
     #[test]
     fn compare_rejects_a_wrong_tau_rigid_flag() {
-        let mismatches = corrupted_mismatches(
-            "\"tau_rigid\": [true, true, true, true, true, true]",
-            "\"tau_rigid\": [false, true, true, true, true, true]",
-        );
+        let mismatches = mismatches_of(corrupted_pair(
+            (
+                "\"tau_rigid\": [true, true, true, true, true, true]",
+                "\"tau_rigid\": [false, true, true, true, true, true]",
+            ),
+            (
+                "\"tau_rigid_designated\": [true, true, true, true, true, true]",
+                "\"tau_rigid_designated\": [false, true, true, true, true, true]",
+            ),
+        ));
         assert!(
             mismatches.iter().any(|m| m.contains("is tau-rigid false")),
             "{mismatches:?}"
         );
+    }
+
+    /// The v7 block repeats the v6 tau-rigidity list, so the reader requires
+    /// the two to agree and a document that changes one alone is rejected.
+    #[test]
+    fn reader_rejects_tau_rigid_lists_that_disagree() {
+        let err = read_error(
+            "\"tau_rigid\": [true, true, true, true, true, true]",
+            "\"tau_rigid\": [false, true, true, true, true, true]",
+        );
+        assert!(err.contains("tau_rigid_designated disagrees"), "{err}");
     }
 
     #[test]
@@ -3451,11 +4680,151 @@ mod corruption {
     /// the same ideal, so the comparison stays clean.
     #[test]
     fn congruent_coefficients_build_the_same_ideal() {
-        let doc = parse_document(&corrupted(
-            "{\"coeff\": 1, \"path\": [0, 0]}",
-            "{\"coeff\": 6, \"path\": [0, 0]}",
-        ))
+        let doc = parse_document(
+            &corrupted(
+                "{\"coeff\": 1, \"path\": [0, 0]}",
+                "{\"coeff\": 6, \"path\": [0, 0]}",
+            ),
+            SCHEMA,
+        )
         .expect("a congruent coefficient still reads");
         assert_eq!(compare(&doc), Vec::<String>::new());
+    }
+
+    /// Everything gated on the closure marker is absent when the walk did not
+    /// close, so a total there is an unknown key.
+    #[test]
+    fn reader_rejects_a_total_on_a_walk_that_did_not_close() {
+        let err = read_error(
+            "\"not_computed\": {\"reason\": \"walk-not-closed\"}",
+            "\"total\": 5, \"not_computed\": {\"reason\": \"walk-not-closed\"}",
+        );
+        assert!(err.contains("unknown key \"total\""), "{err}");
+    }
+
+    #[test]
+    fn reader_rejects_a_histogram_that_misses_a_pair() {
+        let err = read_error("\"histogram\": [1, 2, 2],", "\"histogram\": [1, 2, 1],");
+        assert!(err.contains("histogram does not add to total"), "{err}");
+    }
+
+    /// `|M| + |P| = n` is what makes a pair basic, and the reader checks it
+    /// on every entry that carries the labels.
+    #[test]
+    fn reader_rejects_a_pair_whose_labels_do_not_add_up() {
+        let err = read_error(
+            "{\"module_dimvecs\": [[0, 1]], \"projective_support\": [0]},",
+            "{\"module_dimvecs\": [[0, 1]], \"projective_support\": []},",
+        );
+        assert!(err.contains("do not add to 2"), "{err}");
+    }
+
+    #[test]
+    fn reader_rejects_unsorted_pair_dimvecs() {
+        let err = read_error(
+            "{\"module_dimvecs\": [[0, 1], [1, 1]], \"projective_support\": []},",
+            "{\"module_dimvecs\": [[1, 1], [0, 1]], \"projective_support\": []},",
+        );
+        assert!(err.contains("not sorted ascending"), "{err}");
+    }
+
+    /// `cyclic-nakayama-3-3-3` is the witness that a repeated dimension vector
+    /// is two non-isomorphic summands: its three projectives all have
+    /// dimension vector `[1, 1, 1]`. Merging the repetition drops a summand,
+    /// and the label count catches it.
+    #[test]
+    fn reader_rejects_a_merged_pair_repetition() {
+        let err = read_error(
+            "{\"module_dimvecs\": [[0, 0, 1], [1, 1, 1], [1, 1, 1]], \"projective_support\": []},",
+            "{\"module_dimvecs\": [[0, 0, 1], [1, 1, 1]], \"projective_support\": []},",
+        );
+        assert!(err.contains("do not add to 3"), "{err}");
+    }
+
+    #[test]
+    fn reader_rejects_an_approximation_whose_cokernel_does_not_add_up() {
+        let err = read_error(
+            "\"target_dimvec\": [1, 1], \"rank\": 1, \"kernel_dimvec\": [0, 0], \
+             \"cokernel_dimvec\": [1, 0]",
+            "\"target_dimvec\": [1, 1], \"rank\": 1, \"kernel_dimvec\": [0, 0], \
+             \"cokernel_dimvec\": [0, 0]",
+        );
+        assert!(
+            err.contains("image and cokernel do not add to the target"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn reader_rejects_an_edge_count_off_the_degree_histogram() {
+        let err = read_error(
+            "\"degree_histogram\": [0, 0, 5, 0], \"edges\": 5, \"connected\": true",
+            "\"degree_histogram\": [0, 0, 5, 0], \"edges\": 6, \"connected\": true",
+        );
+        assert!(err.contains("edge ends against 6 edges"), "{err}");
+    }
+
+    /// A closed walk certifies the indecomposable list, so its count must be
+    /// the size of the exhaustive catalog where one exists.
+    #[test]
+    fn compare_rejects_a_wrong_indecomposable_count() {
+        let mismatches = corrupted_mismatches(
+            "\"indecomposables\": {\"closed\": true, \"count\": 3},",
+            "\"indecomposables\": {\"closed\": true, \"count\": 4},",
+        );
+        assert!(
+            mismatches.iter().any(|m| m.contains("our catalog has 3")),
+            "{mismatches:?}"
+        );
+    }
+
+    /// The same witness at the comparator: replacing one of the two repeated
+    /// `[1, 1, 1]` entries changes which modules the pair holds, and the pair
+    /// lists then differ.
+    #[test]
+    fn compare_rejects_a_changed_pair_repetition() {
+        let mismatches = corrupted_mismatches(
+            "{\"module_dimvecs\": [[0, 0, 1], [1, 1, 1], [1, 1, 1]], \"projective_support\": []},",
+            "{\"module_dimvecs\": [[0, 0, 1], [1, 1, 0], [1, 1, 1]], \"projective_support\": []},",
+        );
+        assert!(
+            mismatches
+                .iter()
+                .any(|m| m.contains("the pair lists first differ")),
+            "{mismatches:?}"
+        );
+    }
+
+    #[test]
+    fn compare_rejects_a_wrong_approximation_target() {
+        let mismatches = corrupted_slot_mismatches(
+            "\"target_dimvec\": [1, 1], \"rank\": 1, \"kernel_dimvec\": [0, 0], \
+             \"cokernel_dimvec\": [1, 0]",
+            "\"target_dimvec\": [1, 2], \"rank\": 1, \"kernel_dimvec\": [0, 0], \
+             \"cokernel_dimvec\": [1, 1]",
+        );
+        assert!(
+            mismatches
+                .iter()
+                .any(|m| m.contains("the approximation at")),
+            "{mismatches:?}"
+        );
+    }
+
+    /// The exchange graph shape is a self-consistency check on our own
+    /// enumerated set, and a corrupted shape that still passes the reader's
+    /// internal arithmetic must still fail the comparison.
+    #[test]
+    fn compare_rejects_a_wrong_exchange_graph_shape() {
+        let mismatches = corrupted_mismatches(
+            "\"degree_histogram\": [0, 0, 5, 0], \"edges\": 5, \"connected\": true",
+            "\"degree_histogram\": [0, 1, 3, 1], \"edges\": 5, \"connected\": true",
+        );
+        assert!(
+            mismatches
+                .iter()
+                .any(|m| m.contains("exchange graph self-consistency")),
+            "{mismatches:?}"
+        );
     }
 }

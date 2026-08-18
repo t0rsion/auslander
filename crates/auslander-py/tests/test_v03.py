@@ -1,10 +1,10 @@
 """Tests for the v0.3 general-relation surface of the auslander Python module.
 
-Pinned facts come from the QPA oracle fixtures (tests/qpa-oracle, schema v5):
+Pinned facts come from the QPA oracle fixtures (tests/qpa-oracle, schema v6):
 the commutative square with ab - cd has dim 9 over every field, Cartan matrix
 [[1,1,1,1],[0,1,0,1],[0,0,1,1],[0,0,0,1]], tau S_0 = [1,1,1,0],
 tau S_1 = [0,0,1,1], tau S_2 = [0,1,0,1], S_3 projective, and pd S_0 = 2; the
-preprojective algebra of A3 has dim 10. The certificate workflow round-trips
+preprojective algebra of A_3 has dim 10. The certificate workflow round-trips
 through canonical JSON, and every tampered certificate is rejected.
 """
 
@@ -84,7 +84,7 @@ def test_tau_over_the_square_matches_the_oracle():
     assert A.simple(F, 0).tau().dims == [1, 1, 1, 0]
     assert A.simple(F, 1).tau().dims == [0, 0, 1, 1]
     assert A.simple(F, 2).tau().dims == [0, 1, 0, 1]
-    assert A.simple(F, 3).tau() is None
+    assert A.simple(F, 3).tau().dims == [0, 0, 0, 0]
 
 
 def test_projective_resolution_of_s0_over_the_square():
@@ -167,7 +167,7 @@ def test_monomial_certificate_needs_a_field_and_round_trips():
 
 
 def preprojective_a3_relations():
-    # Double quiver of A3: a: 0 -> 1 (arrow 0), b: 1 -> 2 (1), abar: 1 -> 0
+    # Double quiver of A_3: a: 0 -> 1 (arrow 0), b: 1 -> 2 (1), abar: 1 -> 0
     # (2), bbar: 2 -> 1 (3); relations a·abar, abar·a - b·bbar, bbar·b.
     Q = auslander.Quiver(3, [(0, 1), (1, 2), (1, 0), (2, 1)])
     return Q, [[(1, [0, 2])], [(1, [2, 0]), (-1, [1, 3])], [(1, [3, 1])]]
@@ -201,6 +201,8 @@ def test_completion_limits_property_on_both_kinds():
         "max_basis": 4096,
         "max_word_len": 129,
         "max_steps": 1_000_000,
+        "max_origin_terms": 4096,
+        "max_ambiguities": 65_536,
     }
     # A general-relation algebra reports its stored limits, the defaults here.
     A = square(auslander.PrimeField(5))
@@ -208,18 +210,27 @@ def test_completion_limits_property_on_both_kinds():
         "max_basis": 4096,
         "max_word_len": 64,
         "max_steps": 1_000_000,
+        "max_origin_terms": 4096,
+        "max_ambiguities": 65_536,
     }
 
 
 def test_from_certificate_limit_kwargs_propagate():
     js = square(auslander.PrimeField(5)).certificate_json()
     B = auslander.Algebra.from_certificate(
-        js, max_basis=8192, max_word_len=96, max_steps=2_000_000
+        js,
+        max_basis=8192,
+        max_word_len=96,
+        max_steps=2_000_000,
+        max_origin_terms=8192,
+        max_ambiguities=1024,
     )
     assert B.completion_limits == {
         "max_basis": 8192,
         "max_word_len": 96,
         "max_steps": 2_000_000,
+        "max_origin_terms": 8192,
+        "max_ambiguities": 1024,
     }
     # Without keywords the reload keeps the defaults: certificate bytes never
     # carry or select budgets.
@@ -228,6 +239,8 @@ def test_from_certificate_limit_kwargs_propagate():
         "max_basis": 4096,
         "max_word_len": 64,
         "max_steps": 1_000_000,
+        "max_origin_terms": 4096,
+        "max_ambiguities": 65_536,
     }
 
 

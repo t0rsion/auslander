@@ -1,10 +1,12 @@
 //! Indecomposable enumeration for Nakayama algebras.
 //!
 //! An algebra here is Nakayama exactly when every vertex of its quiver has at
-//! most one incoming and at most one outgoing arrow (linear or cyclic Kupisch
-//! series). Its indecomposables are precisely the uniserial quotients
-//! `P_i / rad^l P_i` for `1 ≤ l ≤ c_i`, where `c_i = dim_k P_i` is the Kupisch
-//! entry. Their number is `Σ_i c_i = dim_k A`.
+//! most one incoming and at most one outgoing arrow (a linear or cyclic Kupisch
+//! series). The classification of these algebras makes the list below complete:
+//! every indecomposable is uniserial, and the uniserials are precisely the
+//! quotients `P_i / rad^l P_i` for `1 ≤ l ≤ c_i`, where `c_i = dim_k P_i` is the
+//! Kupisch entry. Distinct pairs `(i, l)` give non-isomorphic modules, so the
+//! count is `Σ_i c_i = dim_k A`.
 
 use std::fmt;
 use std::sync::Arc;
@@ -46,12 +48,14 @@ impl fmt::Display for EnumerateError {
 
 impl std::error::Error for EnumerateError {}
 
-/// Every indecomposable right module of a Nakayama algebra: `P_i / rad^l P_i`
-/// for `1 ≤ l ≤ c_i`, ordered by vertex then by length `l`. Each quotient is
-/// the cokernel of the composed inclusion `rad^l P_i ↪ P_i`. Each comes with the
-/// certificate from [`decompose`], always [`Certificate::Indecomposable`]. The
-/// exact local-endomorphism computation must certify a uniserial module, so any
-/// other outcome is an upstream bug.
+/// Every indecomposable right module of a Nakayama algebra: `P_i / rad^l P_i` for
+/// `1 ≤ l ≤ c_i`, ordered by vertex and then by increasing length `l`.
+///
+/// Each quotient is the cokernel of the composed inclusion `rad^l P_i ↪ P_i`, and
+/// each comes with the certificate [`decompose`] produced for it, always
+/// [`Certificate::Indecomposable`]. The endomorphism algebra of a uniserial module
+/// is local, and the local test is exact, so any other certificate is an upstream
+/// bug and this function panics on it.
 pub fn nakayama_indecomposables(
     algebra: &Arc<Algebra>,
 ) -> Result<Vec<(Module, Certificate)>, EnumerateError> {

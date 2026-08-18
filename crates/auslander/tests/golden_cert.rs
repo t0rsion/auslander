@@ -8,8 +8,6 @@
 //! them only after a deliberate certificate format change:
 //! `GOLDEN_CERT_WRITE=1 cargo test --test golden_cert`.
 
-use std::env;
-use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -18,6 +16,8 @@ use auslander::completion::CompletionLimits;
 use auslander::field::PrimeField;
 use auslander::quiver::{ArrowId, Quiver};
 use auslander::relation::{Presentation, Relation};
+
+mod common;
 
 fn field(p: u64) -> PrimeField {
     PrimeField::new(p).unwrap()
@@ -61,23 +61,6 @@ fn commutative_square_f5() -> Arc<Algebra> {
     commutative_square(field(5))
 }
 
-/// The preprojective algebra of A_3 over F_2: the `preprojective-a3`
-/// oracle family. Arrows `a: 0 -> 1` (0), `b: 1 -> 2` (1), `abar: 1 -> 0`
-/// (2), `bbar: 2 -> 1` (3); relations `a·abar`, `abar·a - b·bbar`,
-/// `bbar·b`.
-fn preprojective_a3_f2() -> Arc<Algebra> {
-    general(
-        3,
-        &[(0, 1), (1, 2), (1, 0), (2, 1)],
-        2,
-        &[
-            &[(1, &[0, 2])],
-            &[(1, &[2, 0]), (-1, &[1, 3])],
-            &[(1, &[3, 1])],
-        ],
-    )
-}
-
 /// One vertex with loops `x` (0) and `y` (1) over F_2, relations
 /// `xx - yy`, `xy`, `yx`: the `self-overlap` oracle family.
 fn self_overlap_f2() -> Arc<Algebra> {
@@ -95,11 +78,10 @@ fn self_overlap_f2() -> Arc<Algebra> {
 
 fn check(name: &str, committed: &[u8], algebra: &Arc<Algebra>) {
     let bytes = algebra.certificate().to_canonical_json();
-    if env::var("GOLDEN_CERT_WRITE").is_ok() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/golden-certificates")
-            .join(name);
-        fs::write(&path, bytes.as_bytes()).unwrap();
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden-certificates")
+        .join(name);
+    if common::rewrite_golden("GOLDEN_CERT_WRITE", &path, bytes.as_bytes()) {
         return;
     }
     assert_eq!(
@@ -132,7 +114,7 @@ fn preprojective_a3_f2_matches_the_golden_bytes() {
     check(
         "preprojective-a3-f2.json",
         include_bytes!("golden-certificates/preprojective-a3-f2.json"),
-        &preprojective_a3_f2(),
+        &common::preprojective_a3(),
     );
 }
 

@@ -278,15 +278,21 @@ fn cyclic_nakayama_2_2_3_coresolves_p0_in_three_steps() {
             vec![vec![1, 1, 1], vec![0, 1, 1], vec![1, 1, 1], vec![1, 0, 1]]
         );
         assert_eq!(injective_dimension(&p0, 6).unwrap(), Bounded::Exact(3));
-        // P_1 = I_2 and P_2 ≅ I_1, so only P_0 fails to be injective.
-        assert_eq!(
-            injective_dimension(&Module::projective(&algebra, 1), 6).unwrap(),
-            Bounded::Exact(0)
-        );
-        assert_eq!(
-            injective_dimension(&Module::projective(&algebra, 2), 6).unwrap(),
-            Bounded::Exact(0)
-        );
+        // Only P_0 fails to be injective, and `Bounded::Exact(0)` alone does
+        // not say which injective the other two are. P_1 = (0,1,1) = I_2 on the
+        // nose: both are the uniserial with top S_1 and socle S_2, built on the
+        // same normal-word basis. P_2 = (1,1,1) and I_1 = (1,1,1) are the two
+        // length-3 uniserials with socle S_1, so they agree up to isomorphism
+        // but not entry for entry.
+        let p1 = Module::projective(&algebra, 1);
+        let p2 = Module::projective(&algebra, 2);
+        assert_eq!(injective_dimension(&p1, 6).unwrap(), Bounded::Exact(0));
+        assert_eq!(injective_dimension(&p2, 6).unwrap(), Bounded::Exact(0));
+        assert!(entrywise_equal(&p1, &Module::injective(&algebra, 2)));
+        assert!(matches!(
+            is_isomorphic(&p2, &Module::injective(&algebra, 1)).unwrap(),
+            IsoOutcome::Isomorphic(_)
+        ));
     }
 }
 

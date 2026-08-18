@@ -1,25 +1,28 @@
 //! Direct-sum decomposition: verified splits, idempotent splitting, and
 //! certificates.
 //!
-//! A [`Split`] checks its identities at construction, so holding one is proof
-//! of a direct-sum decomposition. [`decompose`] splits until every summand
-//! either has a local endomorphism algebra (certificate
-//! [`Certificate::Indecomposable`], exact via [`EndoAlgebra`]) or has
-//! exhausted every splitting route (certificate
-//! [`Certificate::Undetermined`]). Splitting tries three routes in order: a
-//! lifted central idempotent of the semisimple quotient, a constructed
-//! non-unit non-nilpotent element, and seeded-random Fitting elements
-//! `M = ker(φⁿ) ⊕ im(φⁿ)` with a bounded retry count.
+//! A [`Split`] checks its identities at construction, so holding one is proof of a
+//! direct-sum decomposition. [`decompose`] splits until each summand reaches one
+//! of two states. In the first, the summand's endomorphism algebra is local, which
+//! [`EndoAlgebra`] decides exactly, so the summand is indecomposable
+//! ([`Certificate::Indecomposable`]). In the second, every splitting route has run
+//! out and nothing is claimed either way ([`Certificate::Undetermined`]).
 //!
-//! `Undetermined` is reachable. Every route is bounded, and the constructed
-//! route needs a drawn minimal polynomial that is squarefree and reducible,
-//! which is likely but not guaranteed.
+//! Splitting tries three routes in order: a lifted central idempotent of the
+//! semisimple quotient, a constructed non-unit non-nilpotent element, and
+//! seeded-random Fitting elements `M = ker(φⁿ) ⊕ im(φⁿ)` with a bounded retry
+//! count.
+//!
+//! `Undetermined` is reachable, not a formality. Every route is bounded, and the
+//! constructed route needs a drawn minimal polynomial that is squarefree and
+//! reducible, which is likely but not guaranteed.
 
 use std::fmt;
 
 use crate::endo::{EndoAlgebra, SplitMix64};
 use crate::field::{Fp, PrimeField};
 use crate::hom::{Morphism, identity, submodule_with_inclusion, zero_morphism};
+use crate::iso::Fingerprint;
 use crate::linalg::DenseMat;
 use crate::module::Module;
 
@@ -75,36 +78,32 @@ pub struct Split {
 
 /// The sum of parallel morphisms.
 ///
+/// The sum is built with [`Morphism::new_unchecked`]. Both inputs are A-linear
+/// for the same `M` and `N`, so at every arrow `a`
+/// `(f + g)_{s(a)} · N(a) = f_{s(a)} · N(a) + g_{s(a)} · N(a)`, which is
+/// `M(a) · f_{t(a)} + M(a) · g_{t(a)} = M(a) · (f + g)_{t(a)}`: matrix
+/// multiplication distributes over addition. The shapes match because the two
+/// morphisms share their endpoints, and [`DenseMat::add`] returns canonical
+/// entries.
+///
 /// # Panics
 /// Panics unless all endpoints agree in the sense of [`Module::ptr_eq`].
-pub(crate) fn add_morphisms(a: &Morphism, b: &Morphism) -> Morphism {
+pub(crate) fn add_morphisms(f: &Morphism, g: &Morphism) -> Morphism {
     assert!(
-        a.source().ptr_eq(b.source()) && a.target().ptr_eq(b.target()),
+        f.source().ptr_eq(g.source()) && f.target().ptr_eq(g.target()),
         "add_morphisms: endpoints differ"
     );
-    let field = a.source().field();
-    let maps = (0..a.source().algebra().quiver().num_vertices())
-        .map(|v| a.map_at(v).add(b.map_at(v), &field))
+    let field = f.source().field();
+    let maps = (0..f.source().algebra().quiver().num_vertices())
+        .map(|v| f.map_at(v).add(g.map_at(v), &field))
         .collect();
-    Morphism::new(a.source(), a.target(), maps).expect("a sum of A-linear maps is A-linear")
+    Morphism::new_unchecked(f.source(), f.target(), maps)
 }
 
-/// The inverse of a square matrix, or `None` when singular.
+/// [`DenseMat::inverse`] for callers that hand over a matrix of unknown shape:
+/// `None` where that one panics.
 pub(crate) fn matrix_inverse(a: &DenseMat, field: &PrimeField) -> Option<DenseMat> {
-    if a.rows() != a.cols() || a.rank(field) < a.rows() {
-        return None;
-    }
-    let n = a.rows();
-    let mut inv = DenseMat::zero(n, n);
-    for j in 0..n {
-        let mut unit = vec![Fp::ZERO; n];
-        unit[j] = Fp::ONE;
-        let col = a.solve(&unit, field)?;
-        for (i, &v) in col.iter().enumerate() {
-            inv.set(i, j, v);
-        }
-    }
-    Some(inv)
+    (a.rows() == a.cols()).then(|| a.inverse(field))?
 }
 
 impl Split {
@@ -192,18 +191,19 @@ pub enum Certificate {
     Indecomposable,
     /// No splitting route succeeded: the deterministic idempotent route and the
     /// constructed non-unit route found nothing, and `attempts` seeded Fitting
-    /// elements all failed to split. `attempts` is the Fitting retry budget
-    /// alone; it does not count the retries inside the other two routes.
-    /// The summand may or may not be indecomposable.
+    /// elements all failed to split. `attempts` counts the Fitting retries alone,
+    /// not the retries inside the other two routes. Whether the summand is
+    /// indecomposable is not known.
     Undetermined { attempts: u32 },
 }
 
 /// A full decomposition: a verified [`Split`] of the input plus one
-/// [`Certificate`] per summand.
+/// [`Certificate`] and one [`EndoAlgebra`] per summand.
 #[derive(Clone, Debug)]
 pub struct Decomposition {
     split: Split,
     certificates: Vec<Certificate>,
+    endos: Vec<EndoAlgebra>,
 }
 
 impl Decomposition {
@@ -224,6 +224,16 @@ impl Decomposition {
     pub fn summands(&self) -> &[Module] {
         self.split.summands()
     }
+
+    /// `End(S_k)` for each summand, in summand order, as the split produced it.
+    /// Entry `k` is built from `summands()[k]` itself, so it is the algebra
+    /// [`crate::indec::IndecomposableModule::from_endo`] and the radical
+    /// criterion want; rebuilding it with [`EndoAlgebra::new`] gives the same
+    /// value at the cost of a second radical computation.
+    #[inline]
+    pub fn endos(&self) -> &[EndoAlgebra] {
+        &self.endos
+    }
 }
 
 /// One isomorphism class of certified-indecomposable summands.
@@ -231,6 +241,8 @@ impl Decomposition {
 pub struct IsoClass {
     /// The first summand found in the class.
     pub representative: Module,
+    /// `End(representative)`, carried over from the split that found it.
+    pub endo: EndoAlgebra,
     /// How many summands are isomorphic to the representative.
     pub multiplicity: usize,
 }
@@ -239,7 +251,7 @@ pub struct IsoClass {
 #[derive(Clone, Debug)]
 pub enum KrullSchmidtOutcome {
     /// Every summand certified indecomposable, grouped into isomorphism
-    /// classes; by Krull–Schmidt the multiset of classes is unique.
+    /// classes; by Krull-Schmidt the multiset of classes is unique.
     Classes(Vec<IsoClass>),
     /// A summand stayed undetermined, so no grouping is claimed.
     Unknown {
@@ -250,29 +262,40 @@ pub enum KrullSchmidtOutcome {
 
 /// Decomposes `m` and groups the summands into isomorphism classes with
 /// multiplicities, using the radical criterion between certified
-/// indecomposables.
+/// indecomposables. One undetermined summand makes the whole grouping
+/// [`KrullSchmidtOutcome::Unknown`].
+///
+/// Each class keeps the isomorphism invariants of its representative (the
+/// dimension vector, the radical and socle series, `dim End`, and the residue
+/// degree), so a summand reaches the radical criterion only against classes
+/// those leave open. Every summand's `End` comes from
+/// [`Decomposition::endos`]; nothing is rebuilt here.
 pub fn krull_schmidt(m: &Module) -> KrullSchmidtOutcome {
     let d = decompose(m);
-    let mut classes: Vec<(Module, EndoAlgebra, usize)> = Vec::new();
-    for (summand, certificate) in d.summands().iter().zip(d.certificates()) {
+    let mut classes: Vec<(usize, Fingerprint, usize)> = Vec::new();
+    for (k, certificate) in d.certificates().iter().enumerate() {
         if let Certificate::Undetermined { attempts } = certificate {
             return KrullSchmidtOutcome::Unknown {
                 reason: format!("a summand stayed undetermined after {attempts} split attempts"),
             };
         }
-        match classes
-            .iter_mut()
-            .find(|(rep, endo, _)| crate::iso::indecomposable_iso(rep, summand, endo).is_some())
-        {
+        let summand = &d.summands()[k];
+        let print = Fingerprint::of(summand, &d.endos()[k]);
+        match classes.iter_mut().find(|(rep, rep_print, _)| {
+            *rep_print == print
+                && crate::iso::indecomposable_iso(&d.summands()[*rep], summand, &d.endos()[*rep])
+                    .is_some()
+        }) {
             Some((_, _, multiplicity)) => *multiplicity += 1,
-            None => classes.push((summand.clone(), EndoAlgebra::new(summand), 1)),
+            None => classes.push((k, print, 1)),
         }
     }
     KrullSchmidtOutcome::Classes(
         classes
             .into_iter()
-            .map(|(representative, _, multiplicity)| IsoClass {
-                representative,
+            .map(|(rep, _, multiplicity)| IsoClass {
+                representative: d.summands()[rep].clone(),
+                endo: d.endos()[rep].clone(),
                 multiplicity,
             })
             .collect(),
@@ -287,63 +310,102 @@ const DECOMPOSE_SEED: u64 = 0x000a_0512_a11d_e12b;
 pub fn decompose(m: &Module) -> Decomposition {
     let mut rng = SplitMix64(DECOMPOSE_SEED);
     let mut parts = Vec::new();
-    split_recursively(m, identity(m), identity(m), &mut rng, &mut parts);
+    if !m.is_zero() {
+        let endo = EndoAlgebra::new(m);
+        split_recursively(m, endo, identity(m), identity(m), &mut rng, &mut parts);
+    }
     let mut summands = Vec::with_capacity(parts.len());
     let mut inclusions = Vec::with_capacity(parts.len());
     let mut projections = Vec::with_capacity(parts.len());
     let mut certificates = Vec::with_capacity(parts.len());
-    for (summand, incl, proj, certificate) in parts {
-        summands.push(summand);
-        inclusions.push(incl);
-        projections.push(proj);
-        certificates.push(certificate);
+    let mut endos = Vec::with_capacity(parts.len());
+    for part in parts {
+        summands.push(part.summand);
+        inclusions.push(part.include);
+        projections.push(part.project);
+        certificates.push(part.certificate);
+        endos.push(part.endo);
     }
     let split = Split::new(m, summands, inclusions, projections)
         .expect("recursive splits compose to a verified split");
     Decomposition {
         split,
         certificates,
+        endos,
     }
 }
 
-type Part = (Module, Morphism, Morphism, Certificate);
+struct Part {
+    summand: Module,
+    endo: EndoAlgebra,
+    include: Morphism,
+    project: Morphism,
+    certificate: Certificate,
+}
 
 // `include: m → total`, `project: total → m` accumulate the position of `m`
-// inside the original module across the recursion.
+// inside the original module across the recursion. `endo` is `End(m)`: the root
+// builds it, and each part inherits its radical from the endomorphism algebra
+// of the node it was split off, which is what makes one decomposition cost one
+// radical chain instead of one per node.
 fn split_recursively(
     m: &Module,
+    endo: EndoAlgebra,
     include: Morphism,
     project: Morphism,
     rng: &mut SplitMix64,
     out: &mut Vec<Part>,
 ) {
-    if m.is_zero() {
-        return;
-    }
-    let endo = EndoAlgebra::new(m);
     if endo.is_local() {
-        out.push((m.clone(), include, project, Certificate::Indecomposable));
+        out.push(Part {
+            summand: m.clone(),
+            endo,
+            include,
+            project,
+            certificate: Certificate::Indecomposable,
+        });
         return;
     }
     let split = deterministic_split(m, &endo, rng)
         .or_else(|| singular_split(m, &endo, rng))
         .or_else(|| fitting_split(m, &endo, rng));
     let Some(split) = split else {
-        let certificate = Certificate::Undetermined {
-            attempts: FITTING_ATTEMPTS,
-        };
-        out.push((m.clone(), include, project, certificate));
+        out.push(Part {
+            summand: m.clone(),
+            endo,
+            include,
+            project,
+            certificate: Certificate::Undetermined {
+                attempts: FITTING_ATTEMPTS,
+            },
+        });
         return;
     };
     for k in 0..split.summands().len() {
-        let part = &split.summands()[k];
-        let part_include = split.inclusions()[k]
+        let summand = &split.summands()[k];
+        if summand.is_zero() {
+            continue;
+        }
+        let summand_endo = EndoAlgebra::from_summand(
+            summand,
+            &endo,
+            &split.inclusions()[k],
+            &split.projections()[k],
+        );
+        let summand_include = split.inclusions()[k]
             .then(&include)
             .expect("inclusion chains compose");
-        let part_project = project
+        let summand_project = project
             .then(&split.projections()[k])
             .expect("projection chains compose");
-        split_recursively(part, part_include, part_project, rng, out);
+        split_recursively(
+            summand,
+            summand_endo,
+            summand_include,
+            summand_project,
+            rng,
+            out,
+        );
     }
 }
 
@@ -392,8 +454,8 @@ fn fitting_split(m: &Module, endo: &EndoAlgebra, rng: &mut SplitMix64) -> Option
     None
 }
 
-// The Fitting decomposition along one endomorphism, or None when φⁿ is either
-// injective or zero and the split would be trivial.
+// The Fitting decomposition along one endomorphism, n = dim_k M. None when the
+// split would be trivial: φⁿ injective leaves no kernel, φⁿ zero leaves no image.
 fn fitting_split_along(m: &Module, phi: &Morphism) -> Option<Split> {
     let field = m.field();
     let psi = morphism_power(m, phi, m.total_dim());
@@ -401,7 +463,7 @@ fn fitting_split_along(m: &Module, phi: &Morphism) -> Option<Split> {
     let mut kernel = Vec::with_capacity(n as usize);
     let mut image = Vec::with_capacity(n as usize);
     for v in 0..n {
-        kernel.push(psi.map_at(v).transpose().kernel_basis(&field));
+        kernel.push(psi.map_at(v).left_kernel_basis(&field));
         image.push(psi.map_at(v).row_space_basis(&field));
     }
     if kernel.iter().all(|b| b.rows() == 0) || image.iter().all(|b| b.rows() == 0) {
@@ -423,8 +485,28 @@ fn morphism_power(m: &Module, phi: &Morphism, mut exp: usize) -> Morphism {
     acc
 }
 
-// A verified two-summand split from per-vertex row bases of two invariant
-// subspace families, or `None` when they are not complementary.
+/// A verified two-summand split from per-vertex row bases of two invariant
+/// subspace families, or `None` when they are not complementary.
+///
+/// Both families must be A-invariant. All three routes into this function pass
+/// the image or the kernel of an endomorphism of `m`, so both are submodules.
+/// [`submodule_with_inclusion`] would panic on a family that is not.
+///
+/// The two projections are built with [`Morphism::new_unchecked`]. The loop below
+/// returns `None` unless the stacked bases at each vertex are square and
+/// invertible, so at that point `M_v` is the vector-space direct sum of the two
+/// row spaces `U_v` and `W_v`, and `x · proj_first[v]` reads off the coordinates
+/// of the `U_v` part of `x` over `first[v]`. With `U` and `W` both submodules,
+/// that projection is A-linear: write `x = u + w` at `s(a)`, then
+/// `x M(a) = u M(a) + w M(a)` with `u M(a)` in `U_{t(a)}` and `w M(a)` in
+/// `W_{t(a)}`, so projecting after acting and acting after projecting give the
+/// same element. In matrices that is the square
+/// `proj_first[s(a)] · S(a) = M(a) · proj_first[t(a)]` for the induced `S(a)` of
+/// the submodule. The shapes are right because `proj_first[v]` is
+/// `dim M_v x k1` and `k1` is `sub1.dim_at(v)`, and the entries come from
+/// [`DenseMat::inverse`] over the module's own field. Nothing is claimed on the
+/// strength of that argument alone: [`Split::new`] still rechecks every
+/// split identity on the returned maps, and returns `None` here if one fails.
 fn split_from_bases(m: &Module, first: Vec<DenseMat>, second: Vec<DenseMat>) -> Option<Split> {
     let field = m.field();
     let n = m.algebra().quiver().num_vertices() as usize;
@@ -447,7 +529,9 @@ fn split_from_bases(m: &Module, first: Vec<DenseMat>, second: Vec<DenseMat>) -> 
                 stacked.set(k1 + r, c, second[v].get(r, c));
             }
         }
-        let inverse = matrix_inverse(&stacked, &field)?;
+        // The two row counts add up to the vertex dimension, checked above,
+        // so the stack is square.
+        let inverse = stacked.inverse(&field)?;
         let mut p1 = DenseMat::zero(inverse.rows(), k1);
         let mut p2 = DenseMat::zero(inverse.rows(), k2);
         for r in 0..inverse.rows() {
@@ -463,8 +547,8 @@ fn split_from_bases(m: &Module, first: Vec<DenseMat>, second: Vec<DenseMat>) -> 
     }
     let (sub1, incl1) = submodule_with_inclusion(m, first);
     let (sub2, incl2) = submodule_with_inclusion(m, second);
-    let proj1 = Morphism::new(m, &sub1, proj_first).ok()?;
-    let proj2 = Morphism::new(m, &sub2, proj_second).ok()?;
+    let proj1 = Morphism::new_unchecked(m, &sub1, proj_first);
+    let proj2 = Morphism::new_unchecked(m, &sub2, proj_second);
     Split::new(m, vec![sub1, sub2], vec![incl1, incl2], vec![proj1, proj2]).ok()
 }
 
@@ -771,6 +855,65 @@ mod tests {
         let a = linear_an(3, PrimeField::new(2).unwrap());
         let z = Module::zero(&a);
         assert!(classes_of(&z).is_empty());
+    }
+
+    // The corner-ring inheritance must land on the same matrix the radical
+    // chain lands on, entry for entry: every consumer of radical coordinates
+    // compares them for equality.
+    #[test]
+    fn inherited_radicals_are_the_freshly_computed_ones() {
+        for field in [PrimeField::new(2).unwrap(), PrimeField::new(5).unwrap()] {
+            let a3 = linear_an(3, field);
+            let dn = dual_numbers(field);
+            let tp = truncated_poly(3, field).unwrap();
+            let p0 = Module::projective(&a3, 0);
+            let s0 = Module::simple(&a3, 0);
+            let s2 = Module::simple(&a3, 2);
+            let dual = Module::projective(&dn, 0);
+            let trunc = Module::projective(&tp, 0);
+            let (a, _, _) = direct_sum(&[&p0, &s0, &s2, &p0]);
+            let (b, _, _) = direct_sum(&[&dual, &dual, &Module::simple(&dn, 0)]);
+            let (c, _, _) = direct_sum(&[&trunc, &trunc, &trunc]);
+            for m in [a, b, c] {
+                let d = decompose(&m);
+                assert_eq!(d.endos().len(), d.summands().len());
+                for (k, summand) in d.summands().iter().enumerate() {
+                    let fresh = EndoAlgebra::new(summand);
+                    let inherited = &d.endos()[k];
+                    assert_eq!(inherited.dim(), fresh.dim(), "summand {k}");
+                    assert_eq!(
+                        inherited.radical_basis(),
+                        fresh.radical_basis(),
+                        "summand {k} over F_{}",
+                        field.modulus()
+                    );
+                    assert_eq!(inherited.quotient_dim(), fresh.quotient_dim());
+                    assert_eq!(inherited.is_local(), fresh.is_local());
+                    assert_eq!(
+                        inherited.semisimple_factor_count(),
+                        fresh.semisimple_factor_count()
+                    );
+                    assert!(inherited.module().ptr_eq(summand), "summand {k}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn iso_classes_carry_the_endomorphism_algebra_of_their_representative() {
+        let field = PrimeField::new(5).unwrap();
+        let a = linear_an(3, field);
+        let p0 = Module::projective(&a, 0);
+        let s2 = Module::simple(&a, 2);
+        let (sum, _, _) = direct_sum(&[&p0, &s2, &p0]);
+        for class in classes_of(&sum) {
+            assert!(class.endo.module().ptr_eq(&class.representative));
+            assert!(class.endo.is_local());
+            assert_eq!(
+                class.endo.radical_basis(),
+                EndoAlgebra::new(&class.representative).radical_basis()
+            );
+        }
     }
 
     #[test]

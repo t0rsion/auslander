@@ -1,12 +1,16 @@
 # Migrating to 0.3
 
 Every breaking change, ordered by how often you will hit it. The `after`
-snippets compile against the current crate.
+snippets compile against 0.3, not against the current crate. Two moves since
+then affect them: `MonomialPresentation` and the monomial constructors now live
+in the `monomial` module and analyze only, and `Algebra::from_monomial` is gone,
+so a monomial ideal reaches `Algebra` as an ordinary `Presentation`. Read this
+file as the 0.3 record it is, and take current signatures from the API docs.
 
 The one structural change behind all of them: `MonomialAlgebra` is gone.
 `Algebra` is now the only runtime algebra type, it owns its prime field, and it
 exists only after the completion certificate has been verified. Wherever a field
-travelled beside an algebra, it now comes from the algebra.
+traveled beside an algebra, it now comes from the algebra.
 
 ## 1. Named constructors take a field
 
@@ -239,7 +243,7 @@ let normal = algebra.nf_word(&cd).unwrap();
 assert_eq!(normal.len(), 1);
 ```
 
-Radical powers follow the same rule. `radical_power_component` iterates row
+Radical powers follow the same rule. `radical_power_matrix` iterates row
 spaces; word length decides nothing, because an inhomogeneous relation can put a
 short normal word into a deep radical power.
 
@@ -418,10 +422,15 @@ assert_eq!(rebuilt.dim(), algebra.dim());
 carry or select downstream budgets. `Algebra::from_verified_with_limits`
 preserves raised budgets across a reload.
 
-Budgets. `CompletionLimits::default()` allows 4096 basis elements, words of at
-most 64 arrows, and 1,000,000 work units (each reduction step and each emitted
-normal word costs one). Tighten them when you want a run to stop early; an
-exhausted budget gives
+Budgets. `CompletionLimits::default()` sets three:
+
+| field | default | counts |
+| --- | --- | --- |
+| `max_basis` | 4096 | elements of the working basis |
+| `max_word_len` | 64 | arrows in one word |
+| `max_steps` | 1,000,000 | work units: one per reduction step and per emitted normal word |
+
+Tighten them when you want a run to stop early. An exhausted budget gives
 `AlgebraBuildError::Truncated(TruncationDiagnostics)` with the basis size, the
 pending ambiguity count, the steps used, and which budget ran out.
 
@@ -449,9 +458,9 @@ let limits = CompletionLimits {
   other field raises `ValueError`.
 - `algebra.certificate_json()` returns the canonical certificate bytes, and
   `Algebra.from_certificate(json)` verifies untrusted bytes and rebuilds. A
-  monomial algebra is field-free and a certificate is not, so there
-  `certificate_json(field)` requires the field, and the reloaded algebra is
-  always field-bound.
+  monomial algebra is field-free and a certificate is not, so a monomial
+  algebra must pass the field as `certificate_json(field)`. The reloaded
+  algebra is always field-bound.
 - An exhausted completion budget raises `TruncationError`, a `RuntimeError` with
   `basis_len`, `pending_ambiguities`, `steps_used`, and `reason` attributes. The
   `max_basis`, `max_word_len`, and `max_steps` keywords of `from_relations` set

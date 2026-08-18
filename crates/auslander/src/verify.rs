@@ -1,9 +1,19 @@
 //! Independent verification of completion certificates.
 //!
-//! The verifier trusts nothing but the certificate bytes. It shares the
-//! field, quiver, path, order, and certificate types with the engine and
-//! nothing else. This module writes every replay routine, the ambiguity
-//! enumeration, and the normal-word automaton from the definitions.
+//! The verifier accepts a certificate only when it reproduces every claim
+//! itself, from the certificate and nothing else. It reuses four modules:
+//! [`crate::field`] arithmetic, [`crate::quiver`] paths, the sealed
+//! comparison of [`crate::order`], and the [`crate::certificate`] data
+//! model. Every replay routine, the ambiguity enumeration, and the
+//! normal-word automaton are written here from the definitions, so a
+//! defect in the completion engine cannot make a bad certificate pass.
+//!
+//! Two entry points, one verifier. [`verify`] takes untrusted bytes and
+//! parses them strictly before anything else. [`verify_certificate`] takes
+//! a parsed [`Certificate`] and runs every check listed on it. The engine
+//! calls the typed one, so building an algebra does not serialize and
+//! reparse its own certificate. Transport is the only difference: the
+//! checks are the same function on the same data either way.
 //!
 //! Conventions this module fixes:
 //!
@@ -16,8 +26,8 @@
 //!   the tail of `leading(g_j)` past the shared part. The composition of
 //!   an inclusion `(i, j, offset)` is `g_i - u·g_j·v` with
 //!   `leading(g_i) = u·leading(g_j)·v`. A trace start must equal the
-//!   composition or its negation. The verifier accepts both signs
-//!   because the engine chooses the orientation freely.
+//!   composition or its negation. Accepting both signs keeps the check
+//!   free of any producer's sign convention.
 //! - A composition that is exactly zero takes the empty trace: empty
 //!   start, no steps.
 //! - The ambiguity list must equal the enumeration of `(i, j, kind,
@@ -53,7 +63,7 @@ use crate::quiver::{ArrowId, PathWord, Quiver, QuiverError};
 
 /// A witness for an infinite-dimensional quotient: `prefix` reaches a
 /// state on a cycle of the normal-word automaton and `cycle` returns to
-/// that state. Every word `prefix·cycle^k` is irreducible.
+/// that state. Every word `prefix·cycle^k` is a normal word.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CycleWitness {
     pub prefix: Vec<u32>,
@@ -335,7 +345,7 @@ pub enum VerifyError {
         expected: Option<Vec<u32>>,
         found: Option<Vec<u32>>,
     },
-    /// The set of irreducible words is infinite. The witness is the
+    /// The set of normal words is infinite. The witness is the
     /// certificate's own, fully verified.
     InfiniteDimensional { witness: CycleWitness },
 }
@@ -557,8 +567,10 @@ impl std::error::Error for VerifyError {
     }
 }
 
-/// A certificate that passed every check. Only [`verify`] builds one.
-/// The fields stay private so the type works as a trust token.
+/// A certificate that passed every check. Only [`verify`] builds one, and
+/// the fields stay private, so holding the value is proof the bytes
+/// verified. Every constructor of [`crate::algebra::Algebra`] consumes
+/// one, so verification is the only route to an algebra.
 #[derive(Clone, Debug)]
 pub struct VerifiedCompletion {
     certificate: Certificate,
@@ -989,8 +1001,9 @@ impl<'a> AmbiguityKeyGen<'a> {
     }
 }
 
-/// Whether `(i, j, kind, offset)` names an ambiguity of `leads`, checked
-/// directly against the two leading words.
+/// Whether `(i, j, kind, offset)` names an ambiguity of `leads`. The test
+/// reads the two leading words directly, so it stays independent of the
+/// enumeration order that [`AmbiguityKeyGen`] follows.
 fn is_ambiguity(leads: &[&Vec<u32>], key: AmbKey) -> bool {
     let (i, j, kind, offset) = key;
     let (Some(lead_i), Some(lead_j)) = (leads.get(i), leads.get(j)) else {
@@ -1058,10 +1071,12 @@ fn composition(
 }
 
 /// Lockstep comparison of the listed keys against the lazy canonical
-/// enumeration. Position `index` matching all keys below `expected` means
-/// a genuine key smaller than `expected` was already listed, so it is a
-/// duplicate; a genuine key larger than `expected` skips `expected`, so
-/// the list is missing a key or out of order.
+/// enumeration. A listed key that differs from the expected one splits
+/// three ways. A key that is not an ambiguity of the basis is extra. A
+/// genuine key above the expected one skips it, so the list is out of
+/// order. A genuine key below the expected one was already consumed in
+/// lockstep, so it is a duplicate. Keys the list never reaches are
+/// missing.
 fn check_ambiguity_keys(certificate: &Certificate) -> Result<(), VerifyError> {
     let leads: Vec<&Vec<u32>> = certificate.basis.iter().map(|g| &g[0].1).collect();
     let mut generator = AmbiguityKeyGen::new(&leads);
@@ -1156,8 +1171,9 @@ fn check_ambiguities(
 
 /// The normal-word automaton. State `v < starts` is the start state at
 /// vertex `v`. Every other state is a proper nonempty prefix of a basis
-/// leading word, sorted lexicographically: the longest suffix of the word
-/// read so far that can still grow into a leading word.
+/// leading word, and those states are sorted lexicographically. After
+/// reading a word the automaton sits in the state of that word's longest
+/// suffix that is still a proper prefix of a leading word.
 struct Automaton {
     /// The word of each state; empty for the start states.
     words: Vec<Vec<u32>>,
@@ -1247,9 +1263,9 @@ fn check_automaton(own: &Automaton, certificate: &Certificate) -> Result<(), Ver
     Ok(())
 }
 
-/// Whether the reachable part of the automaton has a cycle: Kahn removal
-/// of states without outgoing edges leaves exactly the states that start
-/// an infinite walk.
+/// Whether the reachable part of the automaton has a cycle. Repeatedly
+/// removing states with no outgoing edge leaves exactly the states that
+/// start an infinite walk, so a survivor means a cycle.
 fn automaton_has_cycle(automaton: &Automaton) -> bool {
     let n = automaton.edges.len();
     let mut reachable = vec![false; n];
@@ -1308,7 +1324,7 @@ fn replay_word(automaton: &Automaton, start: usize, word: &[u32]) -> Result<usiz
 /// nonempty, `prefix·cycle·cycle` is a path free of every leading word,
 /// the prefix reads to a state `s`, and one cycle from `s` returns to
 /// exactly `s`. State return proves arbitrary repetition, so every
-/// `prefix·cycle^k` is an irreducible word.
+/// `prefix·cycle^k` is a normal word.
 fn check_witness(
     quiver: &Quiver,
     automaton: &Automaton,
@@ -1382,9 +1398,10 @@ fn longest_walks(automaton: &Automaton) -> Vec<usize> {
 }
 
 /// Yields the normal words in the fixed basis order without materializing
-/// the list: trivial words in vertex order, then for each length, source
-/// vertex, and lexicographic arrow word a depth-first walk pruned by
-/// `longest`. Memory stays bounded by the automaton size.
+/// the list: trivial words in vertex order, then words by length, then by
+/// source vertex, then in lexicographic arrow order. Each length comes
+/// from a depth-first walk that `longest` prunes, so memory stays bounded
+/// by the automaton size.
 struct NormalWordGen<'a> {
     automaton: &'a Automaton,
     longest: Vec<usize>,
@@ -1541,11 +1558,27 @@ fn check_finiteness_and_normal_words(
     }
 }
 
-/// Verifies certificate bytes and returns the trust token.
+/// Parses certificate bytes and verifies the parsed certificate.
+///
+/// This is the entry point for untrusted bytes. Parsing is strict:
+/// [`Certificate::from_json`] rejects an unknown field, a missing field,
+/// a wrong JSON type, and trailing input, each as [`VerifyError::Parse`].
+/// Everything after the parse is [`verify_certificate`], which is where
+/// the mathematics lives.
+pub fn verify(bytes: &str) -> Result<VerifiedCompletion, VerifyError> {
+    verify_certificate(Certificate::from_json(bytes).map_err(VerifyError::Parse)?)
+}
+
+/// Verifies a parsed certificate and returns the trust token.
+///
+/// The checks read `certificate` and nothing else, so a caller that
+/// already holds a typed certificate skips the serialization round trip
+/// without weakening anything. Byte-level input goes through [`verify`],
+/// which adds the strict parse.
 ///
 /// Checks run in this order. The first failure returns its typed error:
 ///
-/// 1. Parse, schema, order, field.
+/// 1. Schema, order, field.
 /// 2. The automaton declares at least one state per vertex. This binds
 ///    the declared vertex count to serialized data before the quiver is
 ///    built, so allocation stays proportional to the certificate size.
@@ -1564,8 +1597,7 @@ fn check_finiteness_and_normal_words(
 ///     verified witness and an empty normal-word list, and returns
 ///     [`VerifyError::InfiniteDimensional`] with the certificate's
 ///     witness.
-pub fn verify(bytes: &str) -> Result<VerifiedCompletion, VerifyError> {
-    let certificate = Certificate::from_json(bytes).map_err(VerifyError::Parse)?;
+pub fn verify_certificate(certificate: Certificate) -> Result<VerifiedCompletion, VerifyError> {
     if certificate.schema != CERT_SCHEMA {
         return Err(VerifyError::Schema {
             found: certificate.schema,
@@ -1763,7 +1795,7 @@ mod tests {
         }
     }
 
-    /// One loop, no relations: the irreducible language is infinite.
+    /// One loop, no relations: the normal-word language is infinite.
     fn loop_certificate() -> Certificate {
         Certificate {
             schema: CERT_SCHEMA.to_string(),
@@ -1844,6 +1876,24 @@ mod tests {
             verify("not a certificate"),
             Err(VerifyError::Parse(_))
         ));
+    }
+
+    /// The two entry points differ only in transport. The byte path adds the
+    /// strict parse and nothing else, so it accepts and rejects exactly what
+    /// the typed path does.
+    #[test]
+    fn the_typed_entry_and_the_byte_entry_agree() {
+        for certificate in [x3_certificate(), square_certificate()] {
+            let bytes = certificate.to_canonical_json();
+            let typed = verify_certificate(certificate.clone()).expect("the certificate verifies");
+            assert_eq!(verify(&bytes).unwrap().normal_words(), typed.normal_words());
+            let mut tampered = certificate;
+            tampered.order = "wrong".to_string();
+            assert_eq!(
+                verify(&tampered.to_canonical_json()).unwrap_err(),
+                verify_certificate(tampered).unwrap_err()
+            );
+        }
     }
 
     #[test]
@@ -2236,7 +2286,7 @@ mod tests {
     }
 
     /// Two loops x = 0 and y = 1 over F_2 with the single relation y².
-    /// The irreducible language is infinite; the automaton has the vertex
+    /// The normal-word language is infinite; the automaton has the vertex
     /// state and the prefix state [1], and the witness loops on x.
     fn two_loop_certificate() -> Certificate {
         Certificate {

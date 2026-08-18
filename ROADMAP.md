@@ -44,15 +44,15 @@ capability, not the engine.
   contained in the input ideal), zero-remainder division traces for every
   input relation (input ideal contained in the output), the full overlap and
   inclusion ambiguity inventory with reduction traces in strict order
-  descent, the irreducible-word automaton, and the finiteness witness.
+  descent, the normal-word automaton, and the finiteness witness.
 - An independent verifier checks the certificate from untrusted bytes. It
-  shares no completion, critical-pair enumeration, or reduction code with
-  the engine. It re-enumerates every ambiguity itself.
+  shares no completion, ambiguity enumeration, or reduction code with the
+  engine. It re-enumerates every ambiguity itself.
 - `Algebra` is constructible only from a `VerifiedCompletion` produced by
   the verifier. There is no unchecked constructor. Even the engine's own
   output passes the verifier first.
 - Infinite dimension is a typed construction error that carries the complete
-  certificate and a cyclic irreducible-word witness. No infinite-dimensional
+  certificate and a cyclic normal-word witness. No infinite-dimensional
   algebra value exists.
 - A tamper corpus (modified coefficients, missing ambiguities, wrong
   contexts, non-descending reductions, false automaton edges, false
@@ -77,10 +77,10 @@ QPA oracle schema v5, one schema bump: an explicit prime field per fixture,
 coefficient-bearing relations, an admissible-order identifier, decomposition
 multiplicities, fixture family identifiers, presentation identity separate
 from ideal identity, GAP and QPA version provenance, and typed outcomes.
-Fixtures include the commutative diamond, preprojective A3, crafted
+Fixtures include the commutative square, preprojective A_3, crafted
 self-overlap and inclusion ambiguities, an admissible inhomogeneous
 presentation, redundant and permuted presentations of one ideal, and a
-characteristic-sensitive family. Gröbner certificates stay out of the QPA
+characteristic-sensitive family. Groebner certificates stay out of the QPA
 schema; golden certificate artifacts are committed beside it.
 
 ### Python
@@ -95,8 +95,8 @@ languages, a migration guide, and a capability matrix.
 
 Ext representatives and Yoneda products, the category radical, almost-split
 sequences, AR component exploration, chain complexes and Hochschild
-cohomology, tilting and tau-tilting, module Gröbner resolution backends,
-user-defined orders, one-sided Gröbner bases, infinite-dimensional
+cohomology, tilting and tau-tilting, module Groebner resolution backends,
+user-defined orders, one-sided Groebner bases, infinite-dimensional
 quotients, string and gentle enumeration, characteristic zero.
 
 ## v0.4: the Auslander-Reiten layer, witnessed
@@ -126,13 +126,41 @@ valued AR quivers. The binding specification is `docs/v0.4-design.md`.
   a capability spike; the acceptance matrix split honestly between the
   general tier and the catalog tier.
 
-## v0.5 and later
+## v0.5: support tau-tilting, witnessed
 
-- v0.5: witnessed tilting and support tau-tilting. Candidate verification
-  is general; enumeration claims require a certified closed mutation graph
-  or a tau-tilting-finite domain.
+One theme, end to end: enumeration stops being a list and becomes a
+certificate. Candidate verification is general; a completeness claim requires
+a closed mutation graph. The binding specification is `docs/v0.5-design.md`.
+
+- `TauRigidModule` and `TauRigidityOutcome`, witnessed both ways. A vanishing
+  claim stores no witness data, because it has none to store: private
+  construction is the proof token and verification recomputes.
+- `SupportTauTiltingPair` and `AlmostCompletePair`. The projective part is
+  forced, not searched: with `r` summands and support size `s`, a pair exists
+  exactly when `r = s`, and then `P` is the support complement.
+- Minimal left add-approximations with minimality witnesses, and
+  multiplicities counted over the residue division ring `End(N_i)/rad`, not
+  over the base field.
+- Left mutation with `MutationWitness`, and `FacWitness` for a slot with no
+  left mutation.
+- The closed mutation graph. `ClosedSupportTauTiltingGraph` exists only past
+  `ClosureWitness::verify()`; a failure is a defect, not an outcome. A
+  truncated walk is typed `Incomplete` and unlocks nothing.
+- Completeness rests on AIR Theorem 2.18 and Theorem 2.35(b), over an
+  arbitrary field. It needs neither an algebraically closed base field nor
+  residue division rings equal to the base field, and it needs neither
+  connectivity nor n-regularity.
+- Gates: budgets charged by size and not by call, so a tau-tilting infinite
+  walk truncates; hand-derived pair counts for the semisimple cube, A_2, A_3,
+  D_4 and truncated Kronecker; a QPA oracle at schema v7; fresh-process
+  determinism.
+
+## v0.6 and later
+
 - v0.6: checked chain complexes and bar Hochschild cohomology with a real
-  budget model.
+  budget model. Classical tilting returns there, since the generation axiom
+  for `n` above one needs a checked exact complex `0 -> A -> T^0 -> ... ->
+  T^n -> 0`.
 - Later: derived equivalence certificates, Ext algebras, A-infinity
   minimal models, each only with the same witness discipline.
 

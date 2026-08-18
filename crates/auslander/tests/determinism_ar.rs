@@ -18,26 +18,19 @@
 
 use std::env;
 use std::fmt::Write as _;
-use std::fs;
-use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use auslander::algebra::{commutative_square, linear_an, truncated_poly};
 use auslander::almost_split::{AlmostSplitOutcome, almost_split};
 use auslander::arquiver::{ArQuiver, ar_quiver};
 use auslander::ext::ExtSpace;
-use auslander::field::PrimeField;
 use auslander::indec::IndecomposableModule;
 use auslander::module::Module;
 
-fn f5() -> PrimeField {
-    PrimeField::new(5).unwrap()
-}
+mod common;
 
-fn f2() -> PrimeField {
-    PrimeField::new(2).unwrap()
-}
+use common::{f2, f5};
 
 fn normalized_rendering(quiver: &ArQuiver) -> String {
     let mut out = String::new();
@@ -129,26 +122,14 @@ fn fingerprint_payload() -> String {
     out
 }
 
-/// FNV-1a, 64 bit, written out so the fingerprint does not depend on any
-/// hasher with unspecified cross-process behavior.
-fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for &byte in bytes {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
-}
-
 const CHILD_ENV: &str = "AUSLANDER_AR_DETERMINISM_CHILD";
 const MARKER: &str = "ar-fingerprint:";
+/// The child builds two AR quivers, which takes under a second here. The bound
+/// exists to turn a hang into a test failure.
+const CHILD_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn fingerprint(payload: &str) -> String {
-    format!(
-        "{MARKER}{:016x}:len:{}",
-        fnv1a(payload.as_bytes()),
-        payload.len()
-    )
+    common::fingerprint(MARKER, payload)
 }
 
 #[test]
@@ -208,36 +189,12 @@ fn ar_determinism_child_prints_fingerprint() {
 /// Spawns the current test binary on the child test alone and returns the
 /// fingerprint line it printed.
 fn child_fingerprint() -> String {
-    let exe = env::current_exe().expect("path of the running test binary");
-    let mut child = Command::new(exe)
-        .args([
-            "--exact",
-            "ar_determinism_child_prints_fingerprint",
-            "--nocapture",
-        ])
-        .env(CHILD_ENV, "1")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn the child test process");
-    let mut stdout = String::new();
-    child
-        .stdout
-        .take()
-        .expect("stdout was piped")
-        .read_to_string(&mut stdout)
-        .expect("read child output");
-    let status = child.wait().expect("wait for the child test process");
-    assert!(status.success(), "child test failed:\n{stdout}");
-    assert!(
-        stdout.contains("1 passed"),
-        "child ran zero tests; was ar_determinism_child_prints_fingerprint renamed?\n{stdout}"
+    let stdout = common::child_test_stdout(
+        "ar_determinism_child_prints_fingerprint",
+        CHILD_ENV,
+        CHILD_TIMEOUT,
     );
-    stdout
-        .lines()
-        .find(|line| line.starts_with(MARKER))
-        .unwrap_or_else(|| panic!("child printed no fingerprint line:\n{stdout}"))
-        .to_string()
+    common::marked_line(&stdout, MARKER)
 }
 
 #[test]
@@ -253,11 +210,10 @@ fn ar_fingerprint_identical_across_two_fresh_processes() {
 }
 
 fn check_golden(name: &str, committed: &[u8], rendering: &str) {
-    if env::var("GOLDEN_AR_WRITE").is_ok() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/golden-ar")
-            .join(name);
-        fs::write(&path, rendering.as_bytes()).unwrap();
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden-ar")
+        .join(name);
+    if common::rewrite_golden("GOLDEN_AR_WRITE", &path, rendering.as_bytes()) {
         return;
     }
     assert_eq!(

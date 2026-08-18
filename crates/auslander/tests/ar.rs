@@ -10,11 +10,10 @@
 use std::sync::Arc;
 
 use auslander::algebra::{
-    Algebra, MonomialPresentation, an_with_relations, commutative_square, cyclic_nakayama,
-    dual_numbers, kronecker, linear_an, linear_nakayama, radical_square_zero_cycle, truncated_poly,
+    Algebra, an_with_relations, commutative_square, cyclic_nakayama, dual_numbers, kronecker,
+    linear_an, linear_nakayama, path_algebra, radical_square_zero_cycle, truncated_poly,
 };
-use auslander::ar::{Tau, tau, tau_via_nakayama_kernel, tau_via_transpose_dual};
-use auslander::completion::CompletionLimits;
+use auslander::ar::{tau, tau_via_nakayama_kernel, tau_via_transpose_dual};
 use auslander::decompose::{Certificate, KrullSchmidtOutcome, decompose, krull_schmidt};
 use auslander::enumerate::nakayama_indecomposables;
 use auslander::field::PrimeField;
@@ -31,8 +30,7 @@ fn fields() -> [PrimeField; 2] {
 /// the vertex order is topological, so the Cartan matrix is upper unitriangular.
 fn d4(field: PrimeField) -> Arc<Algebra> {
     let quiver = Quiver::new(4, &[(0, 1), (0, 2), (0, 3)]).unwrap();
-    let presentation = MonomialPresentation::new(quiver, Vec::new()).unwrap();
-    Algebra::from_monomial(field, &presentation, &CompletionLimits::default()).unwrap()
+    path_algebra(quiver, field).unwrap()
 }
 
 fn fixtures(field: PrimeField) -> Vec<Arc<Algebra>> {
@@ -55,10 +53,13 @@ fn isomorphic(m: &Module, n: &Module) -> bool {
 }
 
 fn tau_module(m: &Module) -> Module {
-    match tau(m).unwrap() {
-        Tau::Module(t) => t,
-        Tau::Zero => panic!("expected a non-projective module, dim {:?}", m.dim_vector()),
-    }
+    let t = tau(m).unwrap();
+    assert!(
+        !t.is_zero(),
+        "expected a non-projective module, dim {:?}",
+        m.dim_vector()
+    );
+    t
 }
 
 /// Whether the indecomposable `m` is projective, decided independently of τ:
@@ -84,7 +85,7 @@ fn tau_of_every_indecomposable_projective_is_zero() {
             for v in 0..algebra.quiver().num_vertices() {
                 let p = Module::projective(&algebra, v);
                 assert!(
-                    matches!(tau(&p).unwrap(), Tau::Zero),
+                    tau(&p).unwrap().is_zero(),
                     "τ P_{v} over F_{}",
                     field.modulus()
                 );
@@ -236,23 +237,13 @@ fn tau_is_zero_exactly_on_the_projective_samples() {
         for algebra in fixtures(field) {
             for m in indecomposable_samples(&algebra) {
                 let projective = is_projective_indecomposable(&m);
-                match tau(&m).unwrap() {
-                    Tau::Zero => assert!(
-                        projective,
-                        "τ = 0 on non-projective dim {:?} over F_{}",
-                        m.dim_vector(),
-                        field.modulus()
-                    ),
-                    Tau::Module(t) => {
-                        assert!(
-                            !projective,
-                            "τ ≠ 0 on projective dim {:?} over F_{}",
-                            m.dim_vector(),
-                            field.modulus()
-                        );
-                        assert!(!t.is_zero());
-                    }
-                }
+                assert_eq!(
+                    tau(&m).unwrap().is_zero(),
+                    projective,
+                    "τ = 0 and projectivity disagree on dim {:?} over F_{}",
+                    m.dim_vector(),
+                    field.modulus()
+                );
             }
         }
     }
@@ -361,7 +352,7 @@ fn tau_shifts_the_nonprojective_uniserials_of_the_linear_nakayama_algebra() {
         }
         for (i, l) in [(0usize, 3usize), (1, 2), (2, 1)] {
             let m = &modules[enumerated_index(&kupisch, i, l)];
-            assert!(matches!(tau(m).unwrap(), Tau::Zero), "P_{i}/rad^{l}");
+            assert!(tau(m).unwrap().is_zero(), "P_{i}/rad^{l}");
         }
     }
 }

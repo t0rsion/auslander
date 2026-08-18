@@ -1,12 +1,14 @@
 //! Projective covers and minimal projective resolutions with explicit status.
 //!
-//! The cover of `M` is `⊕_v P_v^{dim (top M)_v}`. Every syzygy inclusion therefore
-//! lands in the radical of its cover, so the resolution computed by [`resolve`] is
-//! minimal by construction: the differentials induce zero maps on tops. A computed
-//! prefix always states how it ends. [`ResolutionEnd::Finite`] means the resolution
-//! reaches zero. [`ResolutionEnd::Cut`] means the step budget runs out. Partial
-//! homological invariants are reported through [`Bounded`], never as silently
-//! truncated numbers.
+//! The cover of `M` is `⊕_v P_v^{dim (top M)_v}`, so every syzygy inclusion lands
+//! in the radical of its cover. The resolution [`resolve`] computes is therefore
+//! minimal by construction: each differential induces the zero map on tops.
+//!
+//! A computed prefix always says how it ends. [`ResolutionEnd::Finite`] means the
+//! resolution reaches zero. [`ResolutionEnd::Cut`] means the step budget runs out
+//! with the next syzygy nonzero, and nothing is claimed past that point. Partial
+//! homological invariants come back as [`Bounded`], never as a silently truncated
+//! number.
 
 use crate::field::Fp;
 use crate::hom::{Morphism, kernel, zero_morphism};
@@ -16,7 +18,7 @@ use crate::opposite::ElementMatrix;
 use crate::radical::top;
 
 /// How a computed resolution prefix ends.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ResolutionEnd {
     /// The syzygy after the last term is zero. The sequence
     /// `0 → P_L → … → P_0 → M → 0` with `L = terms.len() − 1` is a complete minimal
@@ -31,9 +33,9 @@ pub enum ResolutionEnd {
 
 /// A value known exactly or bounded from below.
 ///
-/// `AtLeast(n)` asserts only that the true value is `≥ n`. It does not claim the
-/// value is finite or infinite. `None`-means-infinite conventions are banned from
-/// this crate.
+/// `AtLeast(n)` asserts one thing: the true value is at least `n`. It does not
+/// claim the value is finite, and it does not claim the value is infinite. This
+/// crate never uses `None` to mean infinity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Bounded<T> {
     Exact(T),
@@ -76,17 +78,20 @@ pub fn projective_cover(m: &Module) -> (Module, Morphism) {
     let n = quiver.num_vertices();
     let (top_m, projection) = top(m);
     // One generator per top basis vector: a row vector x ∈ M_v with x · projection_v
-    // equal to the unit vector, i.e. projection_vᵀ · xᵀ = e_j.
+    // equal to the unit vector, i.e. projection_vᵀ · xᵀ = e_j. The unit vectors
+    // at one vertex are the identity, so all of them lift in one elimination.
     let mut generators: Vec<(u32, Vec<Fp>)> = Vec::new();
     for v in 0..n {
-        let pt = projection.map_at(v).transpose();
+        if top_m.dim_at(v) == 0 {
+            continue;
+        }
+        let lifts = projection
+            .map_at(v)
+            .transpose()
+            .solve_many(&DenseMat::identity(top_m.dim_at(v)), &field)
+            .expect("top projection is surjective, so every unit vector lifts");
         for j in 0..top_m.dim_at(v) {
-            let mut unit = vec![field.zero(); top_m.dim_at(v)];
-            unit[j] = field.one();
-            let lift = pt
-                .solve(&unit, &field)
-                .expect("top projection is surjective, so every unit vector lifts");
-            generators.push((v, lift));
+            generators.push((v, (0..lifts.rows()).map(|i| lifts.get(i, j)).collect()));
         }
     }
     let projectives: Vec<Module> = (0..n).map(|v| Module::projective(&algebra, v)).collect();
@@ -132,9 +137,14 @@ pub fn projective_cover(m: &Module) -> (Module, Morphism) {
 ///
 /// Iterates cover → kernel → cover. It stops with [`ResolutionEnd::Finite`] as soon
 /// as a syzygy is zero, including at the step boundary, so `Cut { at: steps }` always
-/// means the `(steps + 1)`-st syzygy is genuinely nonzero. Minimality holds by
-/// construction: covers are built from tops, so each syzygy lies in the radical of
-/// its cover.
+/// means the `(steps + 1)`-st syzygy is genuinely nonzero.
+///
+/// Two guarantees hold by construction, not by a later check. Exactness: the
+/// augmentation is onto `m`, and every `d_{k+1}` is a cover of `Ω^{k+1} m` followed
+/// by the inclusion of that syzygy, so its image is exactly the kernel of the map
+/// before it (the augmentation when `k = 0`, otherwise `d_k`). Minimality:
+/// covers are built from tops, so each syzygy lies in the radical of its cover and
+/// each differential induces the zero map on tops.
 pub fn resolve(m: &Module, steps: usize) -> ProjectiveResolution {
     let (p0, augmentation) = projective_cover(m);
     let mut terms = vec![p0];
@@ -170,8 +180,9 @@ pub fn resolve(m: &Module, steps: usize) -> ProjectiveResolution {
 /// Returns `Exact(n)` with `n ≤ bound` when the minimal resolution reaches zero by
 /// step `bound`, and `AtLeast(bound + 1)` otherwise. The lower bound is genuine: the
 /// resolution is minimal, so a nonzero `(bound + 1)`-st syzygy proves `pd m > bound`.
-/// Hitting the bound is never conflated with infinite dimension.
-/// Convention: the zero module is projective (the empty sum), so `pd 0 = Exact(0)`.
+/// `AtLeast(bound + 1)` says nothing more than that; it is not a claim that `pd m`
+/// is infinite. Convention: the zero module is projective (the empty sum), so
+/// `pd 0 = Exact(0)`.
 pub fn projective_dimension(m: &Module, bound: usize) -> Bounded<usize> {
     match resolve(m, bound) {
         ProjectiveResolution {
@@ -186,12 +197,14 @@ pub fn projective_dimension(m: &Module, bound: usize) -> Bounded<usize> {
     }
 }
 
-/// The minimal presentation differential `d_1: P_1 → P_0` of `m` in
-/// element-matrix form. The source summands are the cover summands of `Ω¹ m`, the
-/// target summands those of `m`. Each is `⊕_v P_v^{dim (top −)_v}` in increasing
-/// vertex order, the layout of [`projective_cover`]. The entry at `(k, l)` is the
-/// element whose left multiplication is the `(k, l)` component of `d_1`.
-/// A projective `m` has no source summands.
+/// The minimal presentation differential `d_1: P_1 → P_0` of `m` in element-matrix
+/// form.
+///
+/// The source summands are the cover summands of `Ω¹ m`, the target summands those
+/// of `m`. Each side is `⊕_v P_v^{dim (top −)_v}` in increasing vertex order, the
+/// layout of [`projective_cover`]. The entry at `(k, l)` is the element whose left
+/// multiplication is the `(k, l)` component of `d_1`. A projective `m` has no source
+/// summands.
 pub fn minimal_presentation_matrix(m: &Module) -> ElementMatrix {
     let resolution = resolve(m, 1);
     let targets = cover_summands(m);

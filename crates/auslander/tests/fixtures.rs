@@ -18,27 +18,26 @@
 //! `(source, sink)`. Where such a swap occurs we trust the right-module derivation.
 
 use std::env;
-use std::io::Read;
-use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use auslander::algebra::{
-    Algebra, MonomialPresentation, an_with_relations, cyclic_nakayama, dual_numbers, kronecker,
-    linear_an, linear_nakayama, radical_square_zero_cycle, truncated_poly,
+    Algebra, an_with_relations, cyclic_nakayama, dual_numbers, kronecker, linear_an,
+    linear_nakayama, monomial_algebra, path_algebra, radical_square_zero_cycle, truncated_poly,
 };
 use auslander::almost_split::{AlmostSplitOutcome, AlmostSplitWitness, almost_split};
 use auslander::arquiver::ar_quiver;
-use auslander::completion::CompletionLimits;
 use auslander::decompose::{Certificate, decompose};
 use auslander::ext::{ext_table, global_dimension};
 use auslander::field::PrimeField;
 use auslander::indec::IndecomposableModule;
 use auslander::module::{Module, direct_sum};
+use auslander::monomial::MonomialIdeal;
 use auslander::quiver::{ArrowId, Quiver};
 use auslander::radical::radical_series;
 use auslander::resolution::{Bounded, projective_dimension};
+
+mod common;
 
 const EXT_DEGREE: usize = 4;
 const PD_BOUND: usize = 8;
@@ -219,8 +218,7 @@ fn d4_three_arrows_into_a_center() {
     check(
         |field| {
             let quiver = Quiver::new(4, &[(0, 3), (1, 3), (2, 3)]).unwrap();
-            let presentation = MonomialPresentation::new(quiver, Vec::new()).unwrap();
-            Algebra::from_monomial(field, &presentation, &CompletionLimits::default()).unwrap()
+            path_algebra(quiver, field).unwrap()
         },
         &Expected {
             dim: 7,
@@ -346,42 +344,14 @@ fn linear_nakayama_2_2_1_child() {
     );
 }
 
-// Spawns the current test binary on the child test alone, polls it, and kills it
-// after 10 seconds. The child takes milliseconds, so the bound is far above what it
-// needs. The bound exists to turn a hang into a test failure.
+// The child takes milliseconds, so 10 seconds is far above what it needs. The
+// bound exists to turn a hang into a test failure: the old library hung here.
 #[test]
 fn linear_nakayama_2_2_1_completes_under_watchdog() {
-    let exe = env::current_exe().expect("path of the running test binary");
-    let mut child = Command::new(exe)
-        .args(["--exact", "linear_nakayama_2_2_1_child"])
-        .env("AUSLANDER_WATCHDOG_CHILD", "1")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn the child test process");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let status = loop {
-        match child.try_wait().expect("poll the child test process") {
-            Some(status) => break status,
-            None if Instant::now() >= deadline => {
-                child.kill().ok();
-                child.wait().ok();
-                panic!("Kupisch [2, 2, 1] ran past 10s; the old library hung here");
-            }
-            None => thread::sleep(Duration::from_millis(50)),
-        }
-    };
-    let mut stdout = String::new();
-    child
-        .stdout
-        .take()
-        .expect("stdout was piped")
-        .read_to_string(&mut stdout)
-        .expect("read child output");
-    assert!(status.success(), "child test failed:\n{stdout}");
-    assert!(
-        stdout.contains("1 passed"),
-        "child ran zero tests; was linear_nakayama_2_2_1_child renamed?\n{stdout}"
+    common::child_test_stdout(
+        "linear_nakayama_2_2_1_child",
+        "AUSLANDER_WATCHDOG_CHILD",
+        Duration::from_secs(10),
     );
 }
 
@@ -417,11 +387,11 @@ fn cyclic_nakayama_3_3_3() {
 
 // A representation-finite gentle algebra that is not a Nakayama algebra: quiver
 // a: 0 → 1, b: 1 → 2, c: 1 → 3 with the single relation ab = 0. The gentleness
-// conditions of Assem–Skowroński ("Iterated tilted algebras of type Ã_n", Math. Z.
+// conditions of Assem-Skowroński ("Iterated tilted algebras of type Ã_n", Math. Z.
 // 195, 1987) hold: at most two arrows in and out of every vertex, relations are paths
 // of length two, and for each arrow at most one continuation lies in the ideal (b
 // after a) and at most one outside it (c after a). The quiver is a tree, so there are
-// no band modules and the algebra is representation-finite (Butler–Ringel,
+// no band modules and the algebra is representation-finite (Butler-Ringel,
 // "Auslander-Reiten sequences with few middle terms", Comm. Algebra 15, 1987).
 //
 // Resolutions: rad P_0 = span{a, ac} is uniserial with top S_1 and socle S_3; its
@@ -433,9 +403,8 @@ fn gentle_branch_a_0_1_b_1_2_c_1_3_with_ab_zero() {
     check(
         |field| {
             let quiver = Quiver::new(4, &[(0, 1), (1, 2), (1, 3)]).unwrap();
-            let presentation =
-                MonomialPresentation::new(quiver, vec![vec![ArrowId(0), ArrowId(1)]]).unwrap();
-            Algebra::from_monomial(field, &presentation, &CompletionLimits::default()).unwrap()
+            let ideal = MonomialIdeal::new(quiver, vec![vec![ArrowId(0), ArrowId(1)]]).unwrap();
+            monomial_algebra(&ideal, field).unwrap()
         },
         &Expected {
             dim: 8,
@@ -468,9 +437,9 @@ fn gentle_branch_a_0_1_b_1_2_c_1_3_with_ab_zero() {
     );
 }
 
-// Mirrors the quick-start example in the repo README. Keep the two in sync.
+// Mirrors the Ext table example in the repo README. Keep the two in sync.
 #[test]
-fn readme_quick_start_example() {
+fn readme_ext_table_example() {
     let field = PrimeField::new(5).unwrap();
     let algebra = an_with_relations(3, &[(0, 2)], field).unwrap();
     let s0 = Module::simple(&algebra, 0);
