@@ -7,6 +7,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  QPA_COMMIT: 46f8bdac5f64e8a1df17ebb5a667c61fae781bed
+  GBNP_COMMIT: 6e7171d90aa1ea803029ae0d290b688899965785
 
 jobs:
   live-oracle:
@@ -20,9 +22,18 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gap
-      - name: Install QPA v1.36 and its gbnp dependency (pinned)
+      - name: Install pinned QPA and gbnp
         run: |
           mkdir -p "$HOME/.gap/pkg"
-          git clone --depth 1 --branch v1.36 https://github.com/gap-packages/qpa.git "$HOME/.gap/pkg/qpa"
-          git clone --depth 1 --branch v1.1.0 https://github.com/gap-packages/gbnp.git "$HOME/.gap/pkg/gbnp"
+          for spec in \
+            "qpa https://github.com/gap-packages/qpa.git $QPA_COMMIT" \
+            "gbnp https://github.com/gap-packages/gbnp.git $GBNP_COMMIT"; do
+            read -r name url commit <<< "$spec"
+            target="$HOME/.gap/pkg/$name"
+            git init "$target"
+            git -C "$target" remote add origin "$url"
+            git -C "$target" fetch --depth 1 origin "$commit"
+            git -C "$target" checkout --detach "$commit"
+            test "$(git -C "$target" rev-parse HEAD)" = "$commit"
+          done
       - run: QPA_ORACLE=1 cargo +1.92.0 test -p auslander --test qpa_oracle

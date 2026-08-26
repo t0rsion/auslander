@@ -59,7 +59,7 @@ jobs:
           cd "$RUNNER_TEMP"/pkg/auslander-*
           cargo +1.88.0 test
 
-  wheel-smoke:
+  wheel-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -72,7 +72,7 @@ jobs:
           target: x86_64
           manylinux: "2014"
           args: --release --out dist
-      - name: Install the wheel and run the smoke tests
+      - name: Install the wheel and run the Python tests
         run: |
           pip install pytest crates/auslander-py/dist/auslander-*.whl
-          python -m pytest crates/auslander-py/tests/test_smoke.py
+          python -m pytest crates/auslander-py/tests

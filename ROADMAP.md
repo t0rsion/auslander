@@ -1,14 +1,14 @@
 # Roadmap
 
-Releases ship when their gates hold, not when a calendar says so. A gate is
-a checkable condition: a test suite, a certificate, an oracle comparison.
-This file states the gates. It does not promise dates.
+Releases ship when their gates hold. A gate is a checkable condition: a
+test suite, a certificate, an oracle comparison. This file does not
+promise dates.
 
 ## v0.3: certified general bound quiver algebras
 
-One theme, end to end: every operation the crate offers works over a general
-admissible ideal, not only a monomial one. The enabling machinery is a new
-noncommutative completion engine inside this crate, but the release is the
+One theme: every operation the crate offers works over a general
+admissible ideal, not only a monomial one. The enabling machinery is a
+noncommutative completion engine inside this crate. The release is the
 capability, not the engine.
 
 ### Substrate
@@ -88,8 +88,8 @@ schema; golden certificate artifacts are committed beside it.
 The bindings expose the same decision surface over non-monomial quotients:
 general-relation construction, decomposition, isomorphism, tau, resolutions
 and coresolutions, Ext dimensions. `EndoAlgebra` and `ElementMatrix` stay
-Rust-only. The release ships one end-to-end non-monomial example in both
-languages, a migration guide, and a capability matrix.
+Rust-only. The release ships one non-monomial example in both languages, a
+migration guide, and a capability matrix.
 
 ### Cut from v0.3
 
@@ -101,10 +101,10 @@ quotients, string and gentle enumeration, characteristic zero.
 
 ## v0.4: the Auslander-Reiten layer, witnessed
 
-One theme, end to end: the homological layer moves from dimensions to
-objects with checkable witnesses. Ext classes, actual extensions, the
-distinguished AR class, almost-split sequences, irreducible morphisms,
-valued AR quivers. The binding specification is `docs/v0.4-design.md`.
+One theme: the homological layer moves from dimensions to objects with
+checkable witnesses. Ext classes, actual extensions, the distinguished AR
+class, almost-split sequences, irreducible morphisms, valued AR quivers.
+The binding specification is `docs/v0.4-design.md`.
 
 - `HomSpace` with subspaces, quotients, deterministic complements, and
   coordinates; `IndecomposableModule` tied to its End-locality proof.
@@ -123,14 +123,14 @@ valued AR quivers. The binding specification is `docs/v0.4-design.md`.
 - Gates: product laws tested exhaustively on bounded fixture degrees; a
   mutation corpus rejecting tampered witnesses; fresh-process determinism
   with golden AR-quiver snapshots; QPA oracle schema v6 frozen only after
-  a capability spike; the acceptance matrix split honestly between the
-  general tier and the catalog tier.
+  a capability spike; the acceptance matrix split between the general
+  tier and the catalog tier.
 
 ## v0.5: support tau-tilting, witnessed
 
-One theme, end to end: enumeration stops being a list and becomes a
-certificate. Candidate verification is general; a completeness claim requires
-a closed mutation graph. The binding specification is `docs/v0.5-design.md`.
+One theme: enumeration stops being a list and becomes a certificate.
+Candidate verification is general; a completeness claim requires a closed
+mutation graph. The binding specification is `docs/v0.5-design.md`.
 
 - `TauRigidModule` and `TauRigidityOutcome`, witnessed both ways. A vanishing
   claim stores no witness data, because it has none to store: private
@@ -155,14 +155,35 @@ a closed mutation graph. The binding specification is `docs/v0.5-design.md`.
   D_4 and truncated Kronecker; a QPA oracle at schema v7; fresh-process
   determinism.
 
-## v0.6 and later
+## v0.6: checked higher homology
 
-- v0.6: checked chain complexes and bar Hochschild cohomology with a real
-  budget model. Classical tilting returns there, since the generation axiom
-  for `n` above one needs a checked exact complex `0 -> A -> T^0 -> ... ->
-  T^n -> 0`.
-- Later: derived equivalence certificates, Ext algebras, A-infinity
-  minimal models, each only with the same witness discipline.
+One theme: every higher homological claim factors through a checked finite
+complex. The binding specification is `docs/v0.6-design.md`.
+
+- `CheckedComplex` validates display-order endpoints and zero composites.
+  Exactness returns `ExactComplex` or the first `NonExactWitness`, with exact
+  homology dimensions at every vertex.
+- Relative normalized bar Hochschild cohomology under four explicit ceilings.
+  A cut stores only degrees whose outgoing differential, square check, and
+  quotient bases finished.
+- Classical tilting at any finite projective dimension reached by the caller's
+  bound. Success stores the exact complex `A -> T^0 -> ... -> T^n` and one
+  `add(T)` witness per generated term. A positive self-extension and a bounded
+  construction blocker remain distinct outcomes.
+- One private verification context per top-level closure recheck. It memoizes
+  certified primitive computations on exact nominal operands and never
+  memoizes a witness verdict.
+- Rust and Python expose the same outcomes. GAP with QPA schema v8 checks the
+  designated projective-dimension-one and projective-dimension-two tilting
+  candidates.
+- Gates: independent full-bar, center, and derivation checks; fresh-process
+  bases and cut diagnostics; F2 and F5 tilting fixtures; a live QPA run; and a
+  production code count below v0.5.0.
+
+## Later
+
+Derived equivalence certificates, Ext algebras, and A-infinity minimal models.
+Each needs the same witness discipline before it enters a release.
 
 ## sylvester
 

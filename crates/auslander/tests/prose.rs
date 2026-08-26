@@ -1,28 +1,13 @@
 //! Tombstones for retired claims.
 //!
-//! Three review rounds of v0.5 found no code defect and eleven prose defects:
-//! comments asserting a check the code does not perform, a theorem that is not
-//! the one used, and measurements from a superseded design. Every one passed
-//! the whole test suite, clippy, and rustdoc. In a crate whose product is
-//! certified correctness, prose that overstates a guarantee is a defect, and
-//! until this file it had no gate.
+//! Each entry is a string that was true once and is false now. The test fails
+//! if any reappears outside its allowlist. That catches a stale number copied
+//! forward and a block edit that left a contradicting tail.
 //!
-//! Each entry below is a string that was true once and is false now. The test
-//! fails if any reappears outside its allowlist. That catches the two ways
-//! these defects arose: a stale number copied forward into a new document, and
-//! a block edit that rewrote the head of a paragraph and left its tail
-//! contradicting the new text.
-//!
-//! Adding a tombstone is part of retiring a claim. When a measurement or an
-//! API changes, delete the old statement and record it here, so the next
-//! attempt to restate it fails loudly instead of shipping.
-//!
-//! Two limits, both real. The gate cannot check mathematical prose. And it
-//! matches LITERAL strings, so a paraphrase of a retired claim passes: a
-//! module doc referring to the deleted `Tau::Zero` as "the `Zero` conventions"
-//! survived this gate and was caught by a human reading the file. Treat a
-//! green run as evidence that known wording did not come back, never as
-//! evidence that the prose is true.
+//! When a measurement or an API changes, delete the old statement and record
+//! it here. The gate matches literal strings only: a paraphrase of a retired
+//! claim passes. A green run means known wording did not come back, not that
+//! the remaining prose is true.
 
 use std::fs;
 use std::path::{Path, PathBuf};

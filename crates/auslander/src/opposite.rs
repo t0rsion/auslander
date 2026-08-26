@@ -6,19 +6,19 @@
 //! [`opposite`] runs the full completion and verification pipeline on the
 //! reversed relations. Reversing the reduced Groebner basis of `I` gives a
 //! generating set of `I^op`, not necessarily its reduced Groebner basis;
-//! completion recompletes it. Both sides have the same dimension. `D` sends a
-//! right `A`-module to a right `A^op`-module on the dual spaces: same
-//! dimension vector, `DM(a^op) = M(a)ᵀ`. Applied twice through one
-//! [`OppositeMap`], `D` restores the original module entry for entry.
+//! completion recompletes it. Both sides have the same dimension. `D` sends
+//! an `A`-module to an `A^op`-module on the dual spaces: same dimension
+//! vector, `DM(a^op) = M(a)ᵀ`. Applied twice through one [`OppositeMap`],
+//! `D` restores the original module entry for entry.
 
-use std::fmt;
 use std::sync::Arc;
 
 use crate::algebra::{Algebra, AlgebraBuildError};
 use crate::field::{Fp, PrimeField};
 use crate::hom::Morphism;
 use crate::linalg::DenseMat;
-use crate::module::{Module, direct_sum};
+use crate::module::{Module, same_representation, summand_sum};
+use crate::profile::{Site, hit};
 use crate::quiver::{ArrowId, PathWord, Quiver, QuiverError};
 use crate::relation::{Presentation, Relation};
 
@@ -63,53 +63,18 @@ pub enum OppositeError {
     TargetNotTheDeclaredSum,
 }
 
-impl fmt::Display for OppositeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::AlgebraOutsidePair => {
-                f.write_str("the algebra is neither side of the opposite pair")
-            }
-            Self::NotDualOfTarget => {
-                f.write_str("dual_of_target is not the entrywise dual of the morphism's target")
-            }
-            Self::NotDualOfSource => {
-                f.write_str("dual_of_source is not the entrywise dual of the morphism's source")
-            }
-            Self::SummandOutOfRange {
-                vertex,
-                num_vertices,
-            } => write!(f, "summand vertex {vertex} outside 0..{num_vertices}"),
-            Self::RowCountMismatch { expected, got } => {
-                write!(f, "entries has {got} rows, sources has {expected} summands")
-            }
-            Self::ColumnCountMismatch { row, expected, got } => write!(
-                f,
-                "entries row {row} has {got} columns, targets has {expected} summands"
-            ),
-            Self::CoefficientCountMismatch {
-                row,
-                col,
-                expected,
-                got,
-            } => write!(
-                f,
-                "entry ({row}, {col}) has {got} coefficients, its path component has {expected}"
-            ),
-            Self::NonCanonicalCoefficient { row, col, index } => write!(
-                f,
-                "entry ({row}, {col}) has a non-canonical coefficient at index {index} for the algebra's field"
-            ),
-            Self::SourceNotTheDeclaredSum => f.write_str(
-                "the morphism's source is not the standard direct sum of the declared source summands",
-            ),
-            Self::TargetNotTheDeclaredSum => f.write_str(
-                "the morphism's target is not the standard direct sum of the declared target summands",
-            ),
-        }
-    }
-}
-
-impl std::error::Error for OppositeError {}
+display_error! { error OppositeError {
+    Self::AlgebraOutsidePair => "the algebra is neither side of the opposite pair";
+    Self::NotDualOfTarget => "dual_of_target is not the entrywise dual of the morphism's target";
+    Self::NotDualOfSource => "dual_of_source is not the entrywise dual of the morphism's source";
+    Self::SummandOutOfRange { vertex, num_vertices } => "summand vertex {vertex} outside 0..{num_vertices}";
+    Self::RowCountMismatch { expected, got } => "entries has {got} rows, sources has {expected} summands";
+    Self::ColumnCountMismatch { row, expected, got } => "entries row {row} has {got} columns, targets has {expected} summands";
+    Self::CoefficientCountMismatch { row, col, expected, got } => "entry ({row}, {col}) has {got} coefficients, its path component has {expected}";
+    Self::NonCanonicalCoefficient { row, col, index } => "entry ({row}, {col}) has a non-canonical coefficient at index {index} for the algebra's field";
+    Self::SourceNotTheDeclaredSum => "the morphism's source is not the standard direct sum of the declared source summands";
+    Self::TargetNotTheDeclaredSum => "the morphism's target is not the standard direct sum of the declared target summands";
+} }
 
 /// An algebra paired with its opposite, carrying the arrow and word
 /// correspondence in both directions.
@@ -126,11 +91,9 @@ pub struct OppositeMap {
 /// The opposite algebra of `algebra` with its arrow/word correspondence: same
 /// vertices, arrows reversed keeping their ids, every relation word reversed.
 /// The reversed relations run through the full completion and verification
-/// pipeline independently, with the completion limits stored on `algebra`,
-/// so an algebra built with raised limits keeps them here. An error is
-/// possible in principle (a budget or engine failure), never an infinite
-/// dimension: reversal bijects paths, so the opposite has the same
-/// dimension.
+/// pipeline, with the completion limits stored on `algebra`. Reversal bijects
+/// paths, so the opposite has the same dimension. An error is a budget or
+/// engine failure, not an infinite dimension.
 ///
 /// ```
 /// use auslander::algebra::an_with_relations;
@@ -142,6 +105,7 @@ pub struct OppositeMap {
 /// assert_eq!(op.opposite().dim(), a.dim());
 /// ```
 pub fn opposite(algebra: &Arc<Algebra>) -> Result<OppositeMap, AlgebraBuildError> {
+    hit(Site::Opposite);
     let quiver = algebra.quiver();
     let field = algebra.field();
     let arrows: Vec<(u32, u32)> = quiver.arrows().iter().map(|&(s, t)| (t, s)).collect();
@@ -173,44 +137,21 @@ pub fn opposite(algebra: &Arc<Algebra>) -> Result<OppositeMap, AlgebraBuildError
 }
 
 impl OppositeMap {
-    /// The original algebra.
-    #[inline]
-    pub fn algebra(&self) -> &Arc<Algebra> {
-        &self.algebra
-    }
-
-    /// The opposite algebra.
-    #[inline]
-    pub fn opposite(&self) -> &Arc<Algebra> {
-        &self.opposite
-    }
-
-    /// The opposite-side arrow of `a`: the same id, endpoints swapped.
-    ///
-    /// # Panics
-    /// Panics unless `a` is an arrow of the algebra's quiver.
-    #[inline]
-    pub fn arrow_to_op(&self, a: ArrowId) -> ArrowId {
-        assert!(
-            a.index() < self.algebra.quiver().num_arrows(),
-            "arrow_to_op: arrow id {} out of range",
-            a.0
-        );
-        a
-    }
-
-    /// The algebra-side arrow of an opposite arrow, as [`Self::arrow_to_op`].
-    ///
-    /// # Panics
-    /// Panics unless `a` is an arrow of the opposite quiver.
-    #[inline]
-    pub fn arrow_from_op(&self, a: ArrowId) -> ArrowId {
-        assert!(
-            a.index() < self.opposite.quiver().num_arrows(),
-            "arrow_from_op: arrow id {} out of range",
-            a.0
-        );
-        a
+    accessor_methods! {
+        /// The original algebra.
+        pub algebra() -> &Arc<Algebra> = |this| &this.algebra;
+        /// The opposite algebra.
+        pub opposite() -> &Arc<Algebra> = |this| &this.opposite;
+        /// The opposite-side arrow of `a`: the same id, endpoints swapped.
+        ///
+        /// # Panics
+        /// Panics unless `a` is an arrow of the algebra's quiver.
+        pub arrow_to_op(a: ArrowId) -> ArrowId = |this| checked_arrow(a, this.algebra.quiver().num_arrows(), "arrow_to_op");
+        /// The algebra-side arrow of an opposite arrow, as [`Self::arrow_to_op`].
+        ///
+        /// # Panics
+        /// Panics unless `a` is an arrow of the opposite quiver.
+        pub arrow_from_op(a: ArrowId) -> ArrowId = |this| checked_arrow(a, this.opposite.quiver().num_arrows(), "arrow_from_op");
     }
 
     /// The reversal of a path word of the algebra as a word of the opposite.
@@ -238,6 +179,15 @@ impl OppositeMap {
     }
 }
 
+fn checked_arrow(arrow: ArrowId, count: usize, site: &str) -> ArrowId {
+    assert!(
+        arrow.index() < count,
+        "{site}: arrow id {} out of range",
+        arrow.0
+    );
+    arrow
+}
+
 /// Caller guarantees `word` is a path of the quiver that `quiver` reverses.
 /// The reversed arrows then compose left to right in `quiver` itself.
 fn reversed(word: &PathWord, quiver: &Quiver) -> PathWord {
@@ -249,24 +199,18 @@ fn reversed(word: &PathWord, quiver: &Quiver) -> PathWord {
     }
 }
 
-/// The k-dual `D(M) = Hom_k(M, k)` of a right module over either side of `op`,
-/// as a right module over the other side: same dimension vector,
-/// `DM(a^op) = M(a)ᵀ`. `dual(&dual(m, op)?, op)?` restores `m` entry for entry,
-/// over the same algebra [`Arc`].
+/// The k-dual `D(M) = Hom_k(M, k)` of a module over either side of `op`, as a
+/// module over the other side: same dimension vector, `DM(a^op) = M(a)ᵀ`.
+/// `dual(&dual(m, op)?, op)?` restores `m` entry for entry, over the same
+/// algebra [`Arc`].
 pub fn dual(m: &Module, op: &OppositeMap) -> Result<Module, OppositeError> {
+    hit(Site::Dual);
     let target = op.other_side(m.algebra())?.clone();
     let maps = (0..m.algebra().quiver().num_arrows())
         .map(|i| m.map(ArrowId(i as u32)).transpose())
         .collect();
     Ok(Module::new(target, m.dim_vector().to_vec(), maps)
         .expect("a reversed relation acts by the transposed original combination, which is zero"))
-}
-
-fn same_entries(a: &Module, b: &Module) -> bool {
-    Arc::ptr_eq(a.algebra(), b.algebra())
-        && a.dim_vector() == b.dim_vector()
-        && (0..a.algebra().quiver().num_arrows())
-            .all(|i| a.map(ArrowId(i as u32)) == b.map(ArrowId(i as u32)))
 }
 
 /// The dual `D(f): D(N) → D(M)` of `f: M → N`, with matrix `f_vᵀ` at each
@@ -284,10 +228,10 @@ pub fn dual_morphism(
     dual_of_source: &Module,
     op: &OppositeMap,
 ) -> Result<Morphism, OppositeError> {
-    if !same_entries(dual_of_target, &dual(f.target(), op)?) {
+    if !same_representation(dual_of_target, &dual(f.target(), op)?) {
         return Err(OppositeError::NotDualOfTarget);
     }
-    if !same_entries(dual_of_source, &dual(f.source(), op)?) {
+    if !same_representation(dual_of_source, &dual(f.source(), op)?) {
         return Err(OppositeError::NotDualOfSource);
     }
     let maps = (0..f.source().algebra().quiver().num_vertices())
@@ -297,15 +241,63 @@ pub fn dual_morphism(
         .expect("transposing every matrix of an A-linearity square transposes the square"))
 }
 
+fn validate_summands(
+    algebra: &Algebra,
+    sources: &[u32],
+    targets: &[u32],
+) -> Result<(), OppositeError> {
+    let num_vertices = algebra.quiver().num_vertices();
+    for &vertex in sources.iter().chain(targets) {
+        if vertex >= num_vertices {
+            return Err(OppositeError::SummandOutOfRange {
+                vertex,
+                num_vertices,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn build_vertex_maps<FR, FC, FB>(
+    algebra: &Algebra,
+    sources: &[u32],
+    targets: &[u32],
+    row_width: FR,
+    col_width: FC,
+    mut fill: FB,
+) -> Vec<DenseMat>
+where
+    FR: Fn(u32, u32) -> usize,
+    FC: Fn(u32, u32) -> usize,
+    FB: FnMut(u32, usize, u32, usize, u32, usize, usize, &mut DenseMat),
+{
+    (0..algebra.quiver().num_vertices())
+        .map(|w| {
+            let rows = sources.iter().map(|&s| row_width(s, w)).sum();
+            let cols = targets.iter().map(|&t| col_width(t, w)).sum();
+            let mut matrix = DenseMat::zero(rows, cols);
+            let mut row_offset = 0;
+            for (k, &s) in sources.iter().enumerate() {
+                let mut col_offset = 0;
+                for (l, &t) in targets.iter().enumerate() {
+                    fill(w, k, s, l, t, row_offset, col_offset, &mut matrix);
+                    col_offset += col_width(t, w);
+                }
+                row_offset += row_width(s, w);
+            }
+            matrix
+        })
+        .collect()
+}
+
 /// A map between finite direct sums of indecomposable projectives
 /// `⊕_k P_{sources[k]} → ⊕_l P_{targets[l]}`, stored as an element matrix.
 ///
 /// `Hom_A(e_i A, e_j A) ≅ e_j A e_i` by `f ↦ f(e_i)`, the inverse acting by
-/// left multiplication. Writing elements of the sums as row tuples, the map
-/// acts componentwise as `v_l = Σ_k x_{k,l}·u_k`, so the entry at `(k, l)` lies
-/// in `e_{targets[l]} A e_{sources[k]}`. The entry is stored as its
-/// coefficients on the normal-word basis
-/// `paths_between(targets[l], sources[k])`, in that order.
+/// left multiplication. The map acts as `v_l = Σ_k x_{k,l}·u_k`, so the entry
+/// at `(k, l)` lies in `e_{targets[l]} A e_{sources[k]}`. The entry is stored
+/// as its coefficients on `paths_between(targets[l], sources[k])`, in that
+/// order.
 #[derive(Clone, Debug)]
 pub struct ElementMatrix {
     algebra: Arc<Algebra>,
@@ -324,15 +316,7 @@ impl ElementMatrix {
         entries: Vec<Vec<Vec<Fp>>>,
     ) -> Result<ElementMatrix, OppositeError> {
         let field = algebra.field();
-        let num_vertices = algebra.quiver().num_vertices();
-        for &vertex in sources.iter().chain(&targets) {
-            if vertex >= num_vertices {
-                return Err(OppositeError::SummandOutOfRange {
-                    vertex,
-                    num_vertices,
-                });
-            }
-        }
+        validate_summands(&algebra, &sources, &targets)?;
         if entries.len() != sources.len() {
             return Err(OppositeError::RowCountMismatch {
                 expected: sources.len(),
@@ -370,36 +354,19 @@ impl ElementMatrix {
         })
     }
 
-    #[inline]
-    pub fn algebra(&self) -> &Arc<Algebra> {
-        &self.algebra
-    }
-
-    #[inline]
-    pub fn field(&self) -> PrimeField {
-        self.algebra.field()
-    }
-
-    /// The source summand vertices, `k`-th summand `P_{sources()[k]}`.
-    #[inline]
-    pub fn sources(&self) -> &[u32] {
-        &self.sources
-    }
-
-    /// The target summand vertices, `l`-th summand `P_{targets()[l]}`.
-    #[inline]
-    pub fn targets(&self) -> &[u32] {
-        &self.targets
-    }
-
-    /// The coefficients of entry `(k, l)` on
-    /// `paths_between(targets()[l], sources()[k])`.
-    ///
-    /// # Panics
-    /// Panics unless `k` and `l` are in range.
-    #[inline]
-    pub fn entry(&self, k: usize, l: usize) -> &[Fp] {
-        &self.entries[k][l]
+    accessor_methods! {
+        pub algebra() -> &Arc<Algebra> = |this| &this.algebra;
+        pub field() -> PrimeField = |this| this.algebra.field();
+        /// The source summand vertices, `k`-th summand `P_{sources()[k]}`.
+        pub sources() -> &[u32] = |this| &this.sources;
+        /// The target summand vertices, `l`-th summand `P_{targets()[l]}`.
+        pub targets() -> &[u32] = |this| &this.targets;
+        /// The coefficients of entry `(k, l)` on
+        /// `paths_between(targets()[l], sources()[k])`.
+        ///
+        /// # Panics
+        /// Panics unless `k` and `l` are in range.
+        pub entry(k: usize, l: usize) -> &[Fp] = |this| &this.entries[k][l];
     }
 
     /// Reads the element matrix off a morphism between the standard direct sums
@@ -414,22 +381,15 @@ impl ElementMatrix {
         targets: &[u32],
     ) -> Result<ElementMatrix, OppositeError> {
         let algebra = f.source().algebra().clone();
+        validate_summands(&algebra, sources, targets)?;
         let num_vertices = algebra.quiver().num_vertices();
-        for &vertex in sources.iter().chain(targets) {
-            if vertex >= num_vertices {
-                return Err(OppositeError::SummandOutOfRange {
-                    vertex,
-                    num_vertices,
-                });
-            }
-        }
-        if !same_entries(f.source(), &projective_sum(&algebra, sources)) {
+        if !same_representation(f.source(), &projective_sum(&algebra, sources)) {
             return Err(OppositeError::SourceNotTheDeclaredSum);
         }
-        if !same_entries(f.target(), &projective_sum(&algebra, targets)) {
+        if !same_representation(f.target(), &projective_sum(&algebra, targets)) {
             return Err(OppositeError::TargetNotTheDeclaredSum);
         }
-        let positions = component_positions(&algebra);
+        let positions = algebra.component_positions();
         let mut row_offsets = vec![0usize; num_vertices as usize];
         let mut entries = Vec::with_capacity(sources.len());
         for &s in sources {
@@ -471,45 +431,30 @@ impl ElementMatrix {
     fn vertex_matrices(&self) -> Vec<DenseMat> {
         let algebra = &self.algebra;
         let field = self.field();
-        let positions = component_positions(algebra);
-        (0..algebra.quiver().num_vertices())
-            .map(|w| {
-                let rows = self
-                    .sources
-                    .iter()
-                    .map(|&s| algebra.paths_between(s, w).len())
-                    .sum();
-                let cols = self
-                    .targets
-                    .iter()
-                    .map(|&t| algebra.paths_between(t, w).len())
-                    .sum();
-                let mut mat = DenseMat::zero(rows, cols);
-                let mut row_offset = 0;
-                for (k, &s) in self.sources.iter().enumerate() {
-                    let mut col_offset = 0;
-                    for (l, &t) in self.targets.iter().enumerate() {
-                        for (ri, &r) in algebra.paths_between(t, s).iter().enumerate() {
-                            let c = self.entries[k][l][ri];
-                            if c.is_zero() {
-                                continue;
-                            }
-                            for (ui, &u) in algebra.paths_between(s, w).iter().enumerate() {
-                                for &(product, pc) in &algebra.mul_basis(r, u) {
-                                    let row = row_offset + ui;
-                                    let col = col_offset + positions[product];
-                                    let add = field.mul(c, pc);
-                                    mat.set(row, col, field.add(mat.get(row, col), add));
-                                }
-                            }
-                        }
-                        col_offset += algebra.paths_between(t, w).len();
+        let positions = algebra.component_positions();
+        build_vertex_maps(
+            algebra,
+            &self.sources,
+            &self.targets,
+            |s, w| algebra.paths_between(s, w).len(),
+            |t, w| algebra.paths_between(t, w).len(),
+            |w, k, s, l, t, row_offset, col_offset, mat| {
+                for (ri, &r) in algebra.paths_between(t, s).iter().enumerate() {
+                    let c = self.entries[k][l][ri];
+                    if c.is_zero() {
+                        continue;
                     }
-                    row_offset += algebra.paths_between(s, w).len();
+                    for (ui, &u) in algebra.paths_between(s, w).iter().enumerate() {
+                        for &(product, pc) in &algebra.mul_basis(r, u) {
+                            let row = row_offset + ui;
+                            let col = col_offset + positions[product];
+                            let add = field.mul(c, pc);
+                            mat.set(row, col, field.add(mat.get(row, col), add));
+                        }
+                    }
                 }
-                mat
-            })
-            .collect()
+            },
+        )
     }
 
     /// The image of the matrix under `Hom_A(−, A)`: a map
@@ -523,7 +468,7 @@ impl ElementMatrix {
     pub fn transpose_over(&self, op: &OppositeMap) -> Result<ElementMatrix, OppositeError> {
         let to = op.other_side(&self.algebra)?.clone();
         let field = self.field();
-        let positions = component_positions(&to);
+        let positions = to.component_positions();
         let entries = self
             .targets
             .iter()
@@ -566,8 +511,7 @@ impl ElementMatrix {
 /// induced morphism `⊕_k I_{sources[k]} → ⊕_l I_{targets[l]}` between the matching
 /// sums of the injectives built by [`Module::injective`].
 ///
-/// The conventions come out of right modules and row vectors, in three steps. The
-/// `(k, l)` component of the input map is left multiplication by
+/// Three steps. The `(k, l)` component of the input map is left multiplication by
 /// `x = Σ_r c_r·r ∈ e_{t_l} A e_{s_k}` (see [`ElementMatrix`]). `Hom_A(−, A)`
 /// turns that into right multiplication `·x: A e_{t_l} → A e_{s_k}`. `D` turns
 /// that into `ν(x): D(A e_{s_k}) = I_{s_k} → D(A e_{t_l}) = I_{t_l}`. Two
@@ -575,92 +519,46 @@ impl ElementMatrix {
 ///
 /// The matrix follows from the same reading. On the dual bases of
 /// [`Module::injective`], `ν(x)(q^*) = q^* ∘ (·x)` sends a basis word
-/// `p: w → t_l` to the coefficient of `q` in the normal form of `p·x`. In the
-/// row-vector convention the matrix at vertex `w` therefore has entry
-/// `Σ_r c_r · [q](p·r)` at row `q ∈ paths(w, s_k)` and column
-/// `p ∈ paths(w, t_l)`.
+/// `p: w → t_l` to the coefficient of `q` in the normal form of `p·x`. The
+/// matrix at vertex `w` has entry `Σ_r c_r · [q](p·r)` at row
+/// `q ∈ paths(w, s_k)` and column `p ∈ paths(w, t_l)`.
 ///
 /// Apply this to a minimal presentation `P_1 → P_0 → M → 0` and the kernel is the
 /// AR translate. `Hom_A(−, A)` gives
 /// `0 → Hom(M, A) → Hom(P_0, A) → Hom(P_1, A) → Tr M → 0`, and dualizing gives
 /// `0 → τ M → ν P_1 → ν P_0 → ν M → 0`.
 pub fn nu_of_presentation_map(matrix: &ElementMatrix) -> Morphism {
+    hit(Site::NuOfPresentation);
     let algebra = matrix.algebra();
     let field = matrix.field();
-    let positions = component_positions(algebra);
+    let positions = algebra.component_positions();
     let source = injective_sum(algebra, matrix.sources());
     let target = injective_sum(algebra, matrix.targets());
-    let maps = (0..algebra.quiver().num_vertices())
-        .map(|w| {
-            let rows = matrix
-                .sources()
-                .iter()
-                .map(|&s| algebra.paths_between(w, s).len())
-                .sum();
-            let cols = matrix
-                .targets()
-                .iter()
-                .map(|&t| algebra.paths_between(w, t).len())
-                .sum();
-            let mut mat = DenseMat::zero(rows, cols);
-            let mut row_offset = 0;
-            for (k, &s) in matrix.sources().iter().enumerate() {
-                let mut col_offset = 0;
-                for (l, &t) in matrix.targets().iter().enumerate() {
-                    for (ri, &r) in algebra.paths_between(t, s).iter().enumerate() {
-                        let c = matrix.entry(k, l)[ri];
-                        if c.is_zero() {
-                            continue;
-                        }
-                        for (pi, &p) in algebra.paths_between(w, t).iter().enumerate() {
-                            for &(q, qc) in &algebra.mul_basis(p, r) {
-                                let row = row_offset + positions[q];
-                                let col = col_offset + pi;
-                                let add = field.mul(c, qc);
-                                mat.set(row, col, field.add(mat.get(row, col), add));
-                            }
-                        }
-                    }
-                    col_offset += algebra.paths_between(w, t).len();
+    let maps = build_vertex_maps(
+        algebra,
+        matrix.sources(),
+        matrix.targets(),
+        |s, w| algebra.paths_between(w, s).len(),
+        |t, w| algebra.paths_between(w, t).len(),
+        |w, k, _s, l, t, row_offset, col_offset, mat| {
+            for (ri, &r) in algebra.paths_between(t, _s).iter().enumerate() {
+                let c = matrix.entry(k, l)[ri];
+                if c.is_zero() {
+                    continue;
                 }
-                row_offset += algebra.paths_between(w, s).len();
+                for (pi, &p) in algebra.paths_between(w, t).iter().enumerate() {
+                    for &(q, qc) in &algebra.mul_basis(p, r) {
+                        let row = row_offset + positions[q];
+                        let col = col_offset + pi;
+                        let add = field.mul(c, qc);
+                        mat.set(row, col, field.add(mat.get(row, col), add));
+                    }
+                }
             }
-            mat
-        })
-        .collect();
+        },
+    );
     Morphism::new(&source, &target, maps)
         .expect("ν of an element matrix is A-linear between the injective sums")
-}
-
-/// Position of each normal word within `paths_between` of its own endpoints,
-/// indexed by [`crate::algebra::BasisIdx`].
-fn component_positions(algebra: &Algebra) -> Vec<usize> {
-    let n = algebra.quiver().num_vertices();
-    let mut positions = vec![usize::MAX; algebra.dim()];
-    for u in 0..n {
-        for v in 0..n {
-            for (i, &b) in algebra.paths_between(u, v).iter().enumerate() {
-                positions[b] = i;
-            }
-        }
-    }
-    positions
-}
-
-fn summand_sum(
-    algebra: &Arc<Algebra>,
-    vertices: &[u32],
-    build: fn(&Arc<Algebra>, u32) -> Module,
-) -> Module {
-    match vertices {
-        [] => Module::zero(algebra),
-        &[v] => build(algebra, v),
-        _ => {
-            let parts: Vec<Module> = vertices.iter().map(|&v| build(algebra, v)).collect();
-            let refs: Vec<&Module> = parts.iter().collect();
-            direct_sum(&refs).0
-        }
-    }
 }
 
 fn projective_sum(algebra: &Arc<Algebra>, vertices: &[u32]) -> Module {
@@ -847,7 +745,7 @@ mod tests {
                 Module::injective(&a, v),
             ] {
                 let dd = dual(&dual(&m, &op).unwrap(), &op).unwrap();
-                assert!(same_entries(&dd, &m), "D(D(M)) != M at vertex {v}");
+                assert!(same_representation(&dd, &m), "D(D(M)) != M at vertex {v}");
             }
         }
     }
@@ -881,7 +779,7 @@ mod tests {
 
     #[test]
     fn dual_morphism_is_contravariant_on_a_composition() {
-        // Right-module Hom runs down the arrows: f: P_2 → P_1, g: P_1 → P_0.
+        // Hom runs down the arrows: f: P_2 → P_1, g: P_1 → P_0.
         let a = linear_an(3, f5());
         let op = opposite(&a).unwrap();
         let p2 = Module::projective(&a, 2);
@@ -1094,8 +992,14 @@ mod tests {
                 ElementMatrix::new(a.clone(), vec![v], vec![v], vec![vec![coefficients]]).unwrap();
             let nu = nu_of_presentation_map(&em);
             let injective = Module::injective(&a, v);
-            assert!(same_entries(nu.source(), &injective), "ν(P_{v}) source");
-            assert!(same_entries(nu.target(), &injective), "ν(P_{v}) target");
+            assert!(
+                same_representation(nu.source(), &injective),
+                "ν(P_{v}) source"
+            );
+            assert!(
+                same_representation(nu.target(), &injective),
+                "ν(P_{v}) target"
+            );
             for w in 0..3 {
                 assert_eq!(*nu.map_at(w), DenseMat::identity(injective.dim_at(w)));
             }

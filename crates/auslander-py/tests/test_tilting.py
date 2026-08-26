@@ -310,7 +310,6 @@ def test_the_exception_taxonomy_separates_answers_from_failures():
     with pytest.raises(auslander.UnsupportedDomainError):
         auslander.Algebra.kronecker(2).enumerate_over_catalog(F)
 
-    # A non-basic module part is rejected input.
     with pytest.raises(ValueError, match="not basic"):
         auslander.SupportTauTiltingPair.classify(
             algebra, [algebra.projective(F, 0), algebra.projective(F, 0)], [], F
@@ -318,13 +317,11 @@ def test_the_exception_taxonomy_separates_answers_from_failures():
     with pytest.raises(ValueError, match="out of range"):
         auslander.SupportTauTiltingPair.classify(algebra, [], [4], F)
 
-    # A rejection has no slots, and neither has a slot past the last summand.
     with pytest.raises(ValueError, match="not a pair"):
         rejected.mutate_at(0)
     graph = auslander.Algebra.linear_an(2).support_tau_tilting_graph(F)
     with pytest.raises(ValueError, match="out of range"):
         graph.pairs()[0].mutate_at(9)
 
-    # A monomial presentation is field-free and a graph is not.
     with pytest.raises(ValueError, match="pass a field"):
         algebra.support_tau_tilting_graph()

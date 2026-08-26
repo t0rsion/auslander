@@ -1,26 +1,27 @@
 //! Differential harness against QPA. Design notes in `tests/qpa-oracle/README.md`.
 //!
-//! The oracle is `tests/qpa-oracle/qpa_expected.json` (schema v7). Only a real
-//! GAP+QPA run of `generate_fixtures.g` writes it. Every fixture carries its own
-//! prime field and its full presentation. The harness rebuilds each algebra from
-//! that presentation through `Relation`, `Presentation`, and `Algebra::new`, so
-//! the library consumes the same input QPA saw. The always-on test compares the
-//! library against the committed truth, and a missing file is a hard failure.
-//! `native_snapshot.json` is a drift snapshot of this library's own output, not
-//! an oracle. `QPA_ORACLE_WRITE=1` rewrites the snapshot and never touches
-//! `qpa_expected.json`. `QPA_ORACLE=1` invokes GAP itself and fails hard when
-//! GAP or QPA is unavailable, or when any value disagrees.
+//! The oracle is `tests/qpa-oracle/qpa_expected.json` (schema v8). Only a real
+//! GAP+QPA run of `generate_fixtures.g` writes it. Every fixture carries its
+//! own prime field and its full presentation. The harness rebuilds each algebra
+//! from that presentation through `Relation`, `Presentation`, and
+//! `Algebra::new`, so the library consumes the same input QPA saw. The
+//! always-on test compares the library against the committed truth, and a
+//! missing file is a hard failure. `native_snapshot.json` is a drift snapshot
+//! of this library's own output, not an oracle. `QPA_ORACLE_WRITE=1` rewrites
+//! the snapshot and never touches `qpa_expected.json`. `QPA_ORACLE=1` invokes
+//! GAP itself and fails hard when GAP or QPA is unavailable, or when any value
+//! disagrees.
 //!
 //! Two schema strings are implemented and no others: `SCHEMA` for the oracle,
-//! and `SNAPSHOT_SCHEMA` for the snapshot, which is the v6 projection of our
-//! own values. The v7 support tau-tilting block holds `brute_agreement`, a
-//! GAP-internal cross-check with no library counterpart, so a snapshot at v7
+//! and `SNAPSHOT_SCHEMA` for the snapshot, which is the v6 projection of this
+//! library's values. The v8 support tau-tilting block holds `brute_agreement`,
+//! a GAP-internal cross-check with no library counterpart, so a snapshot at v8
 //! would have to invent one.
 //!
 //! The JSON layer is hand-rolled. The schema is small and fixed, so a writer
 //! built on `format!` and a strict recursive-descent reader replace a serde
 //! dependency. The reader rejects unknown keys, duplicate keys, missing fields,
-//! and malformed values, and cross-checks the v7 block against itself before
+//! and malformed values, and cross-checks the v8 block against itself before
 //! any of it is compared.
 
 use std::collections::{BTreeMap, HashMap};
@@ -60,15 +61,17 @@ use auslander::taugraph::{
     MutationGraphLimits, SupportTauTiltingGraphOutcome, support_tau_tilting_graph,
 };
 use auslander::taurigid::{TauRigidityOutcome, is_tau_rigid};
+use auslander::tilting::{ClassicalTiltingModule, ClassicalTiltingResult, TiltingLimits};
 
 mod common;
 
 /// The oracle document `qpa_expected.json`, written only by GAP+QPA.
-const SCHEMA: &str = "auslander-qpa-oracle-v7";
+const SCHEMA: &str = "auslander-qpa-oracle-v8";
 /// `native_snapshot.json`, this library's own drift snapshot. It is the v6
-/// projection of our values: every v6 field, and none of the v7 support
-/// tau-tilting block, because `brute_agreement` is a GAP-internal cross-check
-/// with no library counterpart and a snapshot must not invent one.
+/// projection of the library's values: every v6 field, and none of the v8
+/// additions.
+/// The support tau-tilting block contains `brute_agreement`, a GAP-internal
+/// cross-check with no library counterpart, so a snapshot must not invent it.
 const SNAPSHOT_SCHEMA: &str = "auslander-qpa-oracle-v6";
 const MAX_EXT_DEGREE: usize = 4;
 /// Projective and injective dimensions are recorded up to these bounds. A
@@ -92,7 +95,7 @@ const ROOT_KEYS: [&str; 7] = [
     "fixtures",
 ];
 const PROVENANCE_KEYS: [&str; 3] = ["gap_version", "qpa_version", "command"];
-const FIXTURE_KEYS: [&str; 27] = [
+const FIXTURE_KEYS: [&str; 28] = [
     "family",
     "case",
     "field",
@@ -120,13 +123,14 @@ const FIXTURE_KEYS: [&str; 27] = [
     "rigid",
     "tau_period",
     "support_tau_tilting",
+    "classical_tilting",
 ];
 
-/// Keys of the v7 `support_tau_tilting` block on a fixture whose AR-quiver
+/// Keys of the v8 `support_tau_tilting` block on a fixture whose AR-quiver
 /// walk closed, and on one whose walk did not. The closure marker decides
 /// which set applies, so a document cannot carry a total without the marker
 /// that admits it.
-const STT_KEYS_CLOSED: [&str; 10] = [
+const STT_KEYS_CLOSED: [&str; 9] = [
     "indecomposables",
     "brute_agreement",
     "tau_rigid_designated",
@@ -135,9 +139,6 @@ const STT_KEYS_CLOSED: [&str; 10] = [
     "pairs",
     "approximation_slots",
     "approximations",
-    // Read by no test. The committed document carries it from the GAP run
-    // that wrote it, so the key is still accepted; schema v8 drops it.
-    "one_tilting",
     "exchange_graph_self_consistency",
 ];
 const STT_KEYS_OPEN: [&str; 4] = [
@@ -145,6 +146,13 @@ const STT_KEYS_OPEN: [&str; 4] = [
     "brute_agreement",
     "tau_rigid_designated",
     "not_computed",
+];
+
+/// The three schema v8 records and the fixture that constructs each one.
+const CLASSICAL_TILTING_MANIFEST: [(&str, &str, &str, &str, usize); 3] = [
+    ("linear-an-3", "f5", "linear-a3-pd1", "S0+P0+P2", 1),
+    ("a3-mod-ab", "f2", "a3-mod-ab-da-pd2", "I0+I1+I2", 2),
+    ("a3-mod-ab", "f5", "a3-mod-ab-da-pd2", "I0+I1+I2", 2),
 ];
 
 /// How many (pair, module summand) slots the generator samples per fixture.
@@ -160,8 +168,8 @@ const GENERATOR_SENTINEL: &str = "qpa-oracle-generator-ok";
 /// promoting a run is a deliberate copy.
 const GENERATOR_OUTPUT: &str = "qpa_generated.json";
 
-/// Every fixture the oracle file must contain, as (family, case). A document
-/// that drops or renames a fixture fails the comparison.
+/// Every fixture shared by the v6 snapshot and v8 oracle, as (family, case).
+/// A document that drops or renames one fails the comparison.
 const FIXTURE_MANIFEST: [(&str, &str); 23] = [
     ("linear-an-2", "f5"),
     ("linear-an-3", "f5"),
@@ -187,6 +195,9 @@ const FIXTURE_MANIFEST: [(&str, &str); 23] = [
     ("characteristic-sensitive", "f2"),
     ("characteristic-sensitive", "f3"),
 ];
+
+/// The schema v8 fixture absent from the schema v6 native snapshot.
+const V8_EXTRA_FIXTURES: [(&str, &str); 1] = [("a3-mod-ab", "f2")];
 
 /// Minimal JSON reader for the oracle schema. Strict where corruption could
 /// hide: duplicate object keys and trailing commas are parse errors. Only
@@ -450,8 +461,8 @@ fn designated_refs(n: usize) -> Vec<ModuleRef> {
     .collect()
 }
 
-/// The almost-split sequence ending at one designated module. A projective
-/// module has none, which is valid mathematics, not a missing value.
+/// The almost-split sequence ending at one designated module, or
+/// [`ArSequence::Projective`].
 #[derive(Clone, Debug, PartialEq)]
 enum ArSequence {
     Projective,
@@ -586,7 +597,7 @@ struct ExchangeShape {
     connected: bool,
 }
 
-/// The v7 `support_tau_tilting` block of one fixture.
+/// The v8 `support_tau_tilting` block of one fixture.
 #[derive(Clone, Debug, PartialEq)]
 struct SupportTauTilting {
     indecomposables: Closure,
@@ -611,6 +622,18 @@ struct SttValues {
     approximation_slots: usize,
     approximations: Vec<ApproxRecord>,
     exchange: ExchangeShape,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClassicalTiltingRecord {
+    id: String,
+    construction: String,
+    bound: usize,
+    module_dimvec: Vec<usize>,
+    qpa_tilting: bool,
+    projective_dimension: Option<usize>,
+    coresolutions: Vec<Vec<Vec<usize>>>,
+    coresolutions_exact: Vec<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -662,8 +685,10 @@ struct Fixture {
     tau_rigid: Vec<bool>,
     rigid: Vec<bool>,
     tau_period: Vec<TauPeriod>,
-    /// The v7 block, absent from the v6 snapshot projection.
+    /// The v8 block, absent from the v6 snapshot projection.
     stt: Option<SupportTauTilting>,
+    /// Designated schema v8 classical-tilting candidates.
+    classical_tilting: Vec<ClassicalTiltingRecord>,
     /// The tau-orbit search bound the `tau_period` list was computed with,
     /// read back from its `none_up_to` entries. Derived, so it never widens
     /// document equality.
@@ -1653,7 +1678,7 @@ fn read_exchange(
     })
 }
 
-/// The v7 `support_tau_tilting` block.
+/// The v8 `support_tau_tilting` block.
 ///
 /// Everything gated on the closure marker is present exactly when the marker
 /// says the walk closed. The totals, the histogram, the pair list, the slot
@@ -1778,16 +1803,120 @@ fn read_support_tau_tilting(
     })
 }
 
-fn read_fixture(value: &json::Value, index: usize, v7: bool) -> Result<Fixture, String> {
+fn read_classical_tilting(
+    value: &json::Value,
+    n: usize,
+    ctx: &str,
+) -> Result<Vec<ClassicalTiltingRecord>, String> {
+    let items = as_array(value, ctx)?;
+    let mut out = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let ictx = format!("{ctx} entry {i}");
+        let pairs = as_object(item, &ictx)?;
+        let qpa_tilting = read_bool(pairs, "qpa_tilting", &ictx)?;
+        let short = [
+            "id",
+            "construction",
+            "bound",
+            "module_dimvec",
+            "qpa_tilting",
+        ];
+        let full = [
+            "id",
+            "construction",
+            "bound",
+            "module_dimvec",
+            "qpa_tilting",
+            "projective_dimension",
+            "coresolutions",
+            "coresolutions_exact",
+        ];
+        check_keys(pairs, if qpa_tilting { &full } else { &short }, &ictx)?;
+        let projective_dimension = qpa_tilting
+            .then(|| read_usize(pairs, "projective_dimension", &ictx))
+            .transpose()?;
+        let bound = read_usize(pairs, "bound", &ictx)?;
+        if projective_dimension.is_some_and(|pd| pd > bound) {
+            return Err(format!(
+                "{ictx}: projective dimension exceeds the recorded bound {bound}"
+            ));
+        }
+        let (coresolutions, coresolutions_exact) = if qpa_tilting {
+            let pd = projective_dimension.expect("qpa_tilting records a projective dimension");
+            let max_terms = pd
+                .checked_add(2)
+                .ok_or_else(|| format!("{ictx}: coresolution length overflows usize"))?;
+            let cctx = format!("{ictx}: coresolutions");
+            let rows = as_array(get(pairs, "coresolutions", &ictx)?, &cctx)?;
+            if rows.len() != n {
+                return Err(format!("{cctx} has {} entries, expected {n}", rows.len()));
+            }
+            let mut complexes = Vec::with_capacity(n);
+            for (j, complex) in rows.iter().enumerate() {
+                let jctx = format!("{cctx} entry {j}");
+                let terms = as_array(complex, &jctx)?;
+                if terms.is_empty() || terms.len() > max_terms {
+                    return Err(format!(
+                        "{jctx} has {} terms, expected between 1 and {}",
+                        terms.len(),
+                        max_terms
+                    ));
+                }
+                complexes.push(
+                    terms
+                        .iter()
+                        .enumerate()
+                        .map(|(k, term)| usize_row(term, n, &format!("{jctx} term {k}")))
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+            }
+            let exact = read_bool_list(
+                get(pairs, "coresolutions_exact", &ictx)?,
+                n,
+                "coresolutions_exact",
+                &ictx,
+            )?;
+            if exact.iter().any(|&value| !value) {
+                return Err(format!(
+                    "{ictx}: qpa_tilting requires every coresolution to be exact"
+                ));
+            }
+            (complexes, exact)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        out.push(ClassicalTiltingRecord {
+            id: read_str(pairs, "id", &ictx)?,
+            construction: read_str(pairs, "construction", &ictx)?,
+            bound,
+            module_dimvec: usize_row(
+                get(pairs, "module_dimvec", &ictx)?,
+                n,
+                &format!("{ictx}: module_dimvec"),
+            )?,
+            qpa_tilting,
+            projective_dimension,
+            coresolutions,
+            coresolutions_exact,
+        });
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    if out.windows(2).any(|w| w[0].id == w[1].id) {
+        return Err(format!("{ctx} has a duplicate candidate id"));
+    }
+    Ok(out)
+}
+
+fn read_fixture(value: &json::Value, index: usize, v8: bool) -> Result<Fixture, String> {
     let fallback = format!("fixture {index}");
     let pairs = as_object(value, &fallback)?;
     let family = read_str(pairs, "family", &fallback)?;
     let case = read_str(pairs, "case", &fallback)?;
     let ctx = format!("{family}/{case}");
-    let keys = if v7 {
+    let keys = if v8 {
         &FIXTURE_KEYS[..]
     } else {
-        &FIXTURE_KEYS[..FIXTURE_KEYS.len() - 1]
+        &FIXTURE_KEYS[..FIXTURE_KEYS.len() - 2]
     };
     check_keys(pairs, keys, &ctx)?;
     let field = read_usize(pairs, "field", &ctx)? as u64;
@@ -1810,7 +1939,7 @@ fn read_fixture(value: &json::Value, index: usize, v7: bool) -> Result<Fixture, 
         read_tau_period(get(pairs, "tau_period", &ctx)?, width, &ctx)?;
     let cartan = read_matrix(get(pairs, "cartan", &ctx)?, n, n, "cartan", &ctx)?;
     let tau_rigid = read_bool_list(get(pairs, "tau_rigid", &ctx)?, width, "tau_rigid", &ctx)?;
-    let stt = v7
+    let stt = v8
         .then(|| {
             read_support_tau_tilting(
                 get(pairs, "support_tau_tilting", &ctx)?,
@@ -1820,6 +1949,15 @@ fn read_fixture(value: &json::Value, index: usize, v7: bool) -> Result<Fixture, 
             )
         })
         .transpose()?;
+    let classical_tilting = if v8 {
+        read_classical_tilting(
+            get(pairs, "classical_tilting", &ctx)?,
+            n,
+            &format!("{ctx}: classical_tilting"),
+        )?
+    } else {
+        Vec::new()
+    };
     Ok(Fixture {
         dim: read_usize(pairs, "dim", &ctx)?,
         cartan,
@@ -1861,6 +1999,7 @@ fn read_fixture(value: &json::Value, index: usize, v7: bool) -> Result<Fixture, 
         rigid: read_bool_list(get(pairs, "rigid", &ctx)?, width, "rigid", &ctx)?,
         tau_period,
         stt,
+        classical_tilting,
         tau_period_bound,
         designated,
         family,
@@ -1897,12 +2036,68 @@ fn check_presentation_ids(fixtures: &[Fixture]) -> Result<(), String> {
     Ok(())
 }
 
+/// Requires every designated v8 candidate once, on its construction fixture.
+fn check_classical_tilting_manifest(fixtures: &[Fixture]) -> Result<(), String> {
+    for &(family, case, id, construction, bound) in &CLASSICAL_TILTING_MANIFEST {
+        let Some(fixture) = fixtures
+            .iter()
+            .find(|fixture| fixture.family == family && fixture.case == case)
+        else {
+            return Err(format!(
+                "classical tilting candidate {id:?} requires fixture {family}/{case}"
+            ));
+        };
+        let Some(record) = fixture
+            .classical_tilting
+            .iter()
+            .find(|record| record.id == id)
+        else {
+            return Err(format!(
+                "{family}/{case}: missing classical tilting candidate {id:?}"
+            ));
+        };
+        if record.construction != construction {
+            return Err(format!(
+                "{family}/{case}: candidate {id:?} construction is {:?}, expected {construction:?}",
+                record.construction
+            ));
+        }
+        if record.bound != bound {
+            return Err(format!(
+                "{family}/{case}: candidate {id:?} bound is {}, expected {bound}",
+                record.bound
+            ));
+        }
+        if !record.qpa_tilting {
+            return Err(format!(
+                "{family}/{case}: designated candidate {id:?} is not QPA tilting"
+            ));
+        }
+    }
+    for fixture in fixtures {
+        for record in &fixture.classical_tilting {
+            if !CLASSICAL_TILTING_MANIFEST
+                .iter()
+                .any(|&(family, case, id, _, _)| {
+                    fixture.family == family && fixture.case == case && record.id == id
+                })
+            {
+                return Err(format!(
+                    "{}/{}: classical tilting candidate {:?} is not in the schema v8 manifest",
+                    fixture.family, fixture.case, record.id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Parses and validates a document against exactly one schema string, `SCHEMA`
 /// for the oracle and `SNAPSHOT_SCHEMA` for the native snapshot. Every
 /// structural defect is an error: wrong schema string, unknown or missing
 /// keys, wrong pinned bounds, malformed presentations, malformed typed
 /// outcomes, unsorted or unmerged decomposition summands, duplicate fixtures,
-/// inconsistent presentation ids, and every cross-check inside the v7 block.
+/// inconsistent presentation ids, and every cross-check inside the v8 block.
 /// A stale document fails loudly instead of silently skipping checks.
 fn parse_document(text: &str, expected: &str) -> Result<Document, String> {
     let root = json::parse(text)?;
@@ -1915,7 +2110,7 @@ fn parse_document(text: &str, expected: &str) -> Result<Document, String> {
             "{ctx}: schema is {schema:?}, expected {expected:?}"
         ));
     }
-    let v7 = expected == SCHEMA;
+    let v8 = expected == SCHEMA;
     let left_convention = match read_str(pairs, "convention", ctx)?.as_str() {
         "right" => false,
         "left" => true,
@@ -1946,7 +2141,7 @@ fn parse_document(text: &str, expected: &str) -> Result<Document, String> {
     let fixtures = items
         .iter()
         .enumerate()
-        .map(|(i, item)| read_fixture(item, i, v7))
+        .map(|(i, item)| read_fixture(item, i, v8))
         .collect::<Result<Vec<_>, String>>()?;
     for (i, fx) in fixtures.iter().enumerate() {
         if fixtures[..i]
@@ -1957,6 +2152,9 @@ fn parse_document(text: &str, expected: &str) -> Result<Document, String> {
         }
     }
     check_presentation_ids(&fixtures)?;
+    if v8 {
+        check_classical_tilting_manifest(&fixtures)?;
+    }
     Ok(Document {
         left_convention,
         provenance,
@@ -2660,8 +2858,8 @@ fn approximation_invariants(x: &Module, rest: &[Module]) -> Result<ApproxInvaria
     })
 }
 
-/// The shape of the graph on our own pairs, adjacent when they share `n - 1`
-/// of their `n` labels.
+/// The shape of the graph on the library's pairs, adjacent when they share
+/// `n - 1` of their `n` labels.
 ///
 /// This is a self-consistency check of the enumeration against itself, not
 /// external truth: both sides compute it from a pair list they already have.
@@ -2751,10 +2949,10 @@ fn computed_for(fx: &Fixture, left: bool) -> Result<Arc<Computed>, String> {
     result
 }
 
-/// The library's whole v7 layer for one fixture.
+/// The library's whole v8 layer for one fixture.
 struct OurSupportTauTilting {
     /// `is_tau_rigid` over the designated modules. An independent route to the
-    /// v6 `tau_rigid` list, which the reader already pins to the v7 copy.
+    /// v6 `tau_rigid` list, which the reader already pins to the v8 copy.
     tau_rigid_designated: Vec<bool>,
     enumeration: OurStt,
 }
@@ -2780,7 +2978,7 @@ fn build_stt(fx: &Fixture, enumerate: bool) -> Result<OurSupportTauTilting, Stri
 
 type SttSlot = Arc<Mutex<Option<Result<Arc<OurSupportTauTilting>, String>>>>;
 
-/// The v7 layer, cached by presentation exactly as [`computed_for`] caches the
+/// The v8 layer, cached by presentation exactly as [`computed_for`] caches the
 /// v6 layer. Corrupted documents keep their presentations, so the enumeration
 /// runs once per algebra across the whole binary.
 fn stt_for(fx: &Fixture, enumerate: bool) -> Result<Arc<OurSupportTauTilting>, String> {
@@ -2800,7 +2998,7 @@ fn stt_for(fx: &Fixture, enumerate: bool) -> Result<Arc<OurSupportTauTilting>, S
     result
 }
 
-/// How much of the v7 block one pass compares.
+/// How much of the v8 block one pass compares.
 ///
 /// `Shape` is the closure marker, tau-rigidity, the pair list, the histogram
 /// and the exchange graph shape, all of which read a pair list the fixture's
@@ -2820,7 +3018,7 @@ fn first_difference<T: PartialEq>(theirs: &[T], ours: &[T]) -> Option<usize> {
     (0..theirs.len().max(ours.len())).find(|&i| theirs.get(i) != ours.get(i))
 }
 
-/// The schema v7 support tau-tilting layer.
+/// The schema v8 support tau-tilting layer.
 ///
 /// Everything gated on the closure marker is compared only where the marker
 /// admits it, and against a route that certifies completeness: the catalog
@@ -3059,6 +3257,122 @@ fn compare_fixture(mismatches: &mut Vec<String>, ctx: &str, fx: &Fixture, ours: 
     compare_ar_layer(mismatches, ctx, fx, ours);
 }
 
+fn tilting_candidate(algebra: &Arc<Algebra>, id: &str) -> Result<Module, String> {
+    let parts = match id {
+        "linear-a3-pd1" => vec![
+            Module::simple(algebra, 0),
+            Module::projective(algebra, 0),
+            Module::projective(algebra, 2),
+        ],
+        "a3-mod-ab-da-pd2" => (0..3)
+            .map(|vertex| Module::injective(algebra, vertex))
+            .collect(),
+        _ => return Err(format!("unknown classical-tilting candidate {id:?}")),
+    };
+    Ok(direct_sum(&parts.iter().collect::<Vec<_>>()).0)
+}
+
+fn summed_coresolution_dims(
+    coresolutions: &[Vec<Vec<usize>>],
+    n: usize,
+) -> Result<Vec<Vec<usize>>, String> {
+    let len = coresolutions.iter().map(Vec::len).max().unwrap_or(0);
+    // QPA's lower-to-upper complex order ends at the projective. Reverse each
+    // list before adding the per-projective coresolutions term by term.
+    (0..len)
+        .map(|degree| {
+            let mut sum = vec![0usize; n];
+            for term in coresolutions
+                .iter()
+                .filter_map(|complex| complex.len().checked_sub(degree + 1).map(|i| &complex[i]))
+            {
+                for (entry, value) in sum.iter_mut().zip(term) {
+                    *entry = entry.checked_add(*value).ok_or_else(|| {
+                        "summed QPA coresolution dimension overflows usize".to_string()
+                    })?;
+                }
+            }
+            Ok(sum)
+        })
+        .collect()
+}
+
+fn compare_classical_tilting(mismatches: &mut Vec<String>, ctx: &str, fx: &Fixture) {
+    if fx.classical_tilting.is_empty() {
+        return;
+    }
+    let algebra = match build_algebra(fx) {
+        Ok(algebra) => algebra,
+        Err(error) => {
+            mismatches.push(format!("{ctx}: classical tilting: {error}"));
+            return;
+        }
+    };
+    for expected in &fx.classical_tilting {
+        let candidate = match tilting_candidate(&algebra, &expected.id) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                mismatches.push(format!("{ctx}: {error}"));
+                continue;
+            }
+        };
+        if candidate.dim_vector() != expected.module_dimvec {
+            mismatches.push(format!(
+                "{ctx}: {} ({}) has dimension {:?}, ours is {:?}",
+                expected.id,
+                expected.construction,
+                expected.module_dimvec,
+                candidate.dim_vector()
+            ));
+            continue;
+        }
+        let limits = TiltingLimits {
+            max_projective_dimension: expected.bound,
+            max_generation_steps: expected.bound.saturating_add(1),
+        };
+        match ClassicalTiltingModule::classify(&candidate, limits) {
+            Ok(ClassicalTiltingResult::Tilting(ours)) if expected.qpa_tilting => {
+                if Some(ours.projective_dimension()) != expected.projective_dimension {
+                    mismatches.push(format!(
+                        "{ctx}: {} has projective dimension {:?}, ours is {}",
+                        expected.id,
+                        expected.projective_dimension,
+                        ours.projective_dimension()
+                    ));
+                }
+                let qpa_dims = match summed_coresolution_dims(
+                    &expected.coresolutions,
+                    algebra.quiver().num_vertices() as usize,
+                ) {
+                    Ok(dims) => dims,
+                    Err(error) => {
+                        mismatches.push(format!("{ctx}: {}: {error}", expected.id));
+                        continue;
+                    }
+                };
+                let our_dims: Vec<Vec<usize>> = ours
+                    .generation_complex()
+                    .complex()
+                    .terms()
+                    .iter()
+                    .map(|term| term.dim_vector().to_vec())
+                    .collect();
+                if qpa_dims != our_dims {
+                    mismatches.push(format!(
+                        "{ctx}: {} has summed QPA coresolution {qpa_dims:?}, ours is {our_dims:?}",
+                        expected.id
+                    ));
+                }
+            }
+            Ok(other) => mismatches.push(format!(
+                "{ctx}: {} is tilting {} in QPA, ours returned {other:?}",
+                expected.id, expected.qpa_tilting
+            )),
+            Err(error) => mismatches.push(format!("{ctx}: {}: {error}", expected.id)),
+        }
+    }
+}
+
 /// The Auslander-Reiten layer of schema v6. Every list runs over the
 /// designated modules in one fixed order, so a length difference is reported
 /// once and the entrywise loops then line up.
@@ -3174,14 +3488,18 @@ fn compare_ar_layer(mismatches: &mut Vec<String>, ctx: &str, fx: &Fixture, ours:
 /// Mismatch descriptions from comparing the library against a validated
 /// document. Every fixture's algebra is rebuilt from its recorded
 /// presentation; a construction failure is a mismatch, not a skip. The
-/// fixture set itself is pinned by `FIXTURE_MANIFEST`.
+/// fixture set itself is pinned by the v6 manifest and `V8_EXTRA_FIXTURES`.
 fn compare(doc: &Document) -> Vec<String> {
     compare_at(doc, SttDepth::Shape)
 }
 
 fn compare_at(doc: &Document, depth: SttDepth) -> Vec<String> {
     let mut mismatches = Vec::new();
-    for (family, case) in FIXTURE_MANIFEST {
+    let v8 = doc.fixtures.iter().all(|fx| fx.stt.is_some());
+    for &(family, case) in FIXTURE_MANIFEST
+        .iter()
+        .chain(V8_EXTRA_FIXTURES.iter().filter(|_| v8))
+    {
         if !doc
             .fixtures
             .iter()
@@ -3194,6 +3512,7 @@ fn compare_at(doc: &Document, depth: SttDepth) -> Vec<String> {
         let ctx = format!("{}/{}", fx.family, fx.case);
         if !FIXTURE_MANIFEST
             .iter()
+            .chain(V8_EXTRA_FIXTURES.iter().filter(|_| v8))
             .any(|&(f, c)| f == fx.family && c == fx.case)
         {
             mismatches.push(format!("{ctx}: not in the fixture manifest"));
@@ -3202,7 +3521,10 @@ fn compare_at(doc: &Document, depth: SttDepth) -> Vec<String> {
             Ok(ours) => compare_fixture(&mut mismatches, &ctx, fx, &ours),
             Err(e) => mismatches.push(format!("{ctx}: {e}")),
         }
-        // The v7 block is stored in the right convention only. A
+        if !doc.left_convention {
+            compare_classical_tilting(&mut mismatches, &ctx, fx);
+        }
+        // The v8 block is stored in the right convention only. A
         // left-convention document carries no support tau-tilting values.
         if let Some(stt) = &fx.stt
             && !doc.left_convention
@@ -3390,6 +3712,15 @@ fn relation_json(terms: &[TermSpec]) -> String {
 /// values, in the layout `generate_fixtures.g` writes. The provenance block
 /// names this library, never GAP.
 fn render_document(fixtures: &[(&Fixture, &Computed)], convention: &str) -> String {
+    let fixtures: Vec<_> = fixtures
+        .iter()
+        .copied()
+        .filter(|(fx, _)| {
+            FIXTURE_MANIFEST
+                .iter()
+                .any(|&(family, case)| fx.family == family && fx.case == case)
+        })
+        .collect();
     let mut out = String::new();
     out.push_str("{\n");
     out.push_str(&format!("  \"schema\": \"{SNAPSHOT_SCHEMA}\",\n"));
@@ -3783,9 +4114,9 @@ fn committed_truth_carries_the_pinned_schema() {
 }
 
 /// `kronecker-2` is tau-tilting infinite, and the oracle records that GAP's
-/// AR-quiver walk did not close on it. Ours must not close either: both
+/// AR-quiver walk did not close on it. The library must not close either: both
 /// catalog constructors reject the algebra, and a bounded mutation-graph walk
-/// returns a typed truncation instead of a pair list. That is our own
+/// returns a typed truncation instead of a pair list. That is the library's
 /// truncation cross-checked against GAP's, not a restatement of it.
 ///
 /// The ceiling is the design's 16 vertices. The cost of failing grows steeply
@@ -3800,7 +4131,7 @@ fn kronecker_2_truncates_on_both_sides() {
         .iter()
         .find(|fx| fx.family == "kronecker-2")
         .expect("the oracle carries kronecker-2");
-    let stt = fx.stt.as_ref().expect("the oracle is at schema v7");
+    let stt = fx.stt.as_ref().expect("the oracle is at schema v8");
     assert!(
         matches!(stt.indecomposables, Closure::NotClosed { .. }),
         "the oracle must record that GAP's walk did not close on kronecker-2"
@@ -3919,8 +4250,8 @@ fn live_gap_run_agrees_with_library_and_committed_truth() {
         mismatches.join("\n")
     );
     // The check above is the one that carries the mathematics: a real GAP,
-    // whatever its version, recomputed these values and agrees with us. It runs
-    // unconditionally.
+    // whatever its version, recomputed these values and agrees with the
+    // library. It runs unconditionally.
     //
     // The document comparison below is a different claim, reproducibility of
     // the committed FILE, and it holds only within one GAP version. GAP 4.16dev
@@ -4037,10 +4368,59 @@ mod corruption {
     #[test]
     fn reader_rejects_the_previous_schema_version() {
         let from = format!("\"schema\": \"{SCHEMA}\"");
-        let to = from.replace("-v7", "-v6");
-        assert_ne!(from, to, "the pinned schema must carry the v7 marker");
+        let to = from.replace("-v8", "-v7");
+        assert_ne!(from, to, "the pinned schema must carry the v8 marker");
         let err = read_error(&from, &to);
         assert!(err.contains("schema"), "{err}");
+    }
+
+    #[test]
+    fn reader_rejects_an_unknown_classical_tilting_key() {
+        let err = read_error(
+            "\"bound\": 1, \"module_dimvec\"",
+            "\"bound\": 1, \"surprise\": 0, \"module_dimvec\"",
+        );
+        assert!(err.contains("unknown key \"surprise\""), "{err}");
+        assert!(err.contains("classical_tilting entry 0"), "{err}");
+    }
+
+    #[test]
+    fn reader_rejects_a_nonexact_qpa_tilting_coresolution() {
+        let err = read_error(
+            "\"coresolutions_exact\": [true, true, true]",
+            "\"coresolutions_exact\": [true, false, true]",
+        );
+        assert!(
+            err.contains("requires every coresolution to be exact"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn reader_rejects_qpa_tilting_without_coresolution_exactness() {
+        let err = read_error(", \"coresolutions_exact\": [true, true, true]", "");
+        assert!(err.contains("missing coresolutions_exact"), "{err}");
+    }
+
+    #[test]
+    fn reader_rejects_a_qpa_false_record_with_positive_only_fields() {
+        let err = read_error(
+            "\"qpa_tilting\": true, \"projective_dimension\": 1",
+            "\"qpa_tilting\": false, \"projective_dimension\": 1",
+        );
+        assert!(
+            err.contains("unknown key \"projective_dimension\""),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn reader_rejects_a_changed_classical_tilting_construction() {
+        let err = read_error(
+            "\"construction\": \"S0+P0+P2\"",
+            "\"construction\": \"other\"",
+        );
+        assert!(err.contains("construction is \"other\""), "{err}");
     }
 
     #[test]
@@ -4639,7 +5019,7 @@ mod corruption {
         );
     }
 
-    /// The v7 block repeats the v6 tau-rigidity list, so the reader requires
+    /// The v8 block repeats the v6 tau-rigidity list, so the reader requires
     /// the two to agree and a document that changes one alone is rejected.
     #[test]
     fn reader_rejects_tau_rigid_lists_that_disagree() {
@@ -4811,7 +5191,35 @@ mod corruption {
         );
     }
 
-    /// The exchange graph shape is a self-consistency check on our own
+    #[test]
+    fn compare_rejects_a_wrong_classical_tilting_dimension() {
+        let mismatches = corrupted_mismatches(
+            "\"module_dimvec\": [2, 1, 2]",
+            "\"module_dimvec\": [3, 1, 2]",
+        );
+        assert!(
+            mismatches
+                .iter()
+                .any(|m| m.contains("linear-a3-pd1") && m.contains("dimension")),
+            "{mismatches:?}"
+        );
+    }
+
+    #[test]
+    fn compare_rejects_wrong_classical_tilting_coresolution_terms() {
+        let mismatches = corrupted_mismatches(
+            "\"coresolutions\": [[[1, 1, 1], [1, 1, 1]]",
+            "\"coresolutions\": [[[2, 1, 1], [1, 1, 1]]",
+        );
+        assert!(
+            mismatches
+                .iter()
+                .any(|m| m.contains("linear-a3-pd1") && m.contains("summed QPA coresolution")),
+            "{mismatches:?}"
+        );
+    }
+
+    /// The exchange graph shape is a self-consistency check on the library's
     /// enumerated set, and a corrupted shape that still passes the reader's
     /// internal arithmetic must still fail the comparison.
     #[test]

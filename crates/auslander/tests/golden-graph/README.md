@@ -13,8 +13,8 @@ the edge order, or any stored witness value fails the suite.
 
 Every value the graph's witnesses store reaches the rendering, either as a
 printed field or through a digest. That is what design section 14 asks for,
-and a projection of the witnesses is not enough: over F_5 you can scale a
-stored forward isomorphism by 2 and its backward partner by 3, and the
+and a projection of the witnesses is not enough: over F_5 a stored forward
+isomorphism can be scaled by 2 and its backward partner by 3, and the
 witness still verifies with its summand bijection untouched.
 
 Only a `ClosedSupportTauTiltingGraph` is rendered, so every file here

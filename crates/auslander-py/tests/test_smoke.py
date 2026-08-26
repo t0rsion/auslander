@@ -102,7 +102,6 @@ def test_morphism_construction_is_checked():
     # f_1 = [1] with the empty f_0 violates the commuting square at the arrow.
     with pytest.raises(ValueError):
         P0.morphism(P1, [[[]], [[1]]])
-    # Wrong shape at vertex 0.
     with pytest.raises(ValueError):
         P0.morphism(P0, [[[1, 1]], [[1]]])
 
@@ -118,7 +117,6 @@ def test_invalid_module_raises():
     # x acting as the identity violates x^2 = 0.
     with pytest.raises(ValueError):
         D.module(F, [1], [[[1]]])
-    # Wrong number of vertex dimensions.
     with pytest.raises(ValueError):
         D.module(F, [1, 1], [[[0]]])
 
@@ -187,13 +185,10 @@ def test_decompose_p0_plus_s1_with_certificates():
     assert [c.kind for c in d.certificates] == ["indecomposable", "indecomposable"]
     assert all(c.attempts is None for c in d.certificates)
     assert sorted(s.dims for s in d.summands) == [[0, 1], [1, 1]]
-    # Summands are usable Modules over the same algebra object.
     P0 = A.projective(F, 0)
     summand_dims = {tuple(s.dims): s for s in d.summands}
     assert summand_dims[(1, 1)].is_isomorphic(P0).isomorphic is True
     assert summand_dims[(0, 1)].is_isomorphic(A.simple(F, 1)).isomorphic is True
-    # Inclusions and projections are checked Morphisms splitting the sum:
-    # each composite inclusion-then-projection is the identity on its summand.
     for s, inc, proj in zip(d.summands, d.inclusions, d.projections):
         composite = [_mat_mul(a, b, 5) for a, b in zip(inc.maps, proj.maps)]
         assert composite == [_identity(dim) for dim in s.dims]
@@ -228,22 +223,19 @@ def test_krull_schmidt_multiplicities_on_s1_p0_s1():
     assert r.reason is None
     classes = {tuple(rep.dims): mult for rep, mult in r.classes}
     assert classes == {(0, 1): 2, (1, 1): 1}
-    # The representatives are usable Modules over the same algebra object.
     for rep, _ in r.classes:
         assert rep.is_isomorphic(rep).isomorphic is True
 
 
-def test_tau_of_a_projective_is_none_and_of_a_simple_is_a_module():
+def test_tau_of_a_projective_is_zero_and_of_a_simple_is_a_module():
     # Hand-derived translates over linear A_3: tau S_0 = [0, 1, 0] and
-    # tau S_1 = [0, 0, 1]; every projective has tau = 0, reported as None
-    # (a definite answer, not partiality).
+    # tau S_1 = [0, 0, 1]. Every projective has tau = 0.
     A = auslander.MonomialAlgebra.linear_an(3)
     F = auslander.PrimeField(5)
     for v in range(3):
         assert all(d == 0 for d in A.projective(F, v).tau().dims)
     t0 = A.simple(F, 0).tau()
     assert t0.dims == [0, 1, 0]
-    # The translate is a usable Module over the same algebra object.
     assert t0.is_isomorphic(A.simple(F, 1)).isomorphic is True
     assert A.simple(F, 1).tau().dims == [0, 0, 1]
 
@@ -281,8 +273,6 @@ def test_injective_coresolution_of_s2_over_ka3_mod_ab():
     assert c.status.at is None
     assert c.status == auslander.ResolutionStatus(auslander.ResolutionKind.FINITE)
     assert repr(c) == "InjectiveCoresolution(terms=3, status=finite)"
-    # The coaugmentation is the injective envelope, and its source is S_2, so
-    # the terms are usable Modules over the same algebra object.
     envelope, embedding = S2.injective_envelope()
     assert envelope.dims == c.terms[0].dims == A.injective(F, 2).dims
     assert c.coaugmentation.maps == embedding.maps
@@ -303,8 +293,6 @@ def test_projective_resolution_exposes_terms_maps_and_augmentation():
     assert [t.dims for t in res.terms] == res.terms_dims
     assert len(res.maps) == len(res.terms) - 1
     assert res.status.kind == auslander.ResolutionKind.FINITE
-    # The augmentation is the projective cover, and its target is S_0, so the
-    # terms are usable Modules over the same algebra object.
     cover, epi = S0.projective_cover()
     assert cover.dims == res.terms[0].dims == A.projective(F, 0).dims
     assert res.augmentation.maps == epi.maps

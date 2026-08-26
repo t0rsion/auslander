@@ -12,7 +12,6 @@
 //! multiplicity in the generalized Cartan matrix.
 
 use std::collections::VecDeque;
-use std::fmt;
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -23,6 +22,27 @@ use crate::field::{Fp, PrimeField};
 use crate::linalg::DenseMat;
 use crate::module::Module;
 use crate::quiver::Quiver;
+
+/// The number of vertices reachable from `start` in a finite adjacency list.
+pub(crate) fn reachable_count(neighbours: &[Vec<usize>], start: usize) -> usize {
+    if start >= neighbours.len() {
+        return 0;
+    }
+    let mut seen = vec![false; neighbours.len()];
+    let mut stack = vec![start];
+    seen[start] = true;
+    let mut count = 1;
+    while let Some(vertex) = stack.pop() {
+        for &next in &neighbours[vertex] {
+            if !seen[next] {
+                seen[next] = true;
+                count += 1;
+                stack.push(next);
+            }
+        }
+    }
+    count
+}
 
 /// A simply laced Dynkin diagram.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -81,17 +101,13 @@ impl DynkinType {
     }
 }
 
-impl fmt::Display for DynkinType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::A(n) => write!(f, "A_{n}"),
-            Self::D(n) => write!(f, "D_{n}"),
-            Self::E6 => f.write_str("E_6"),
-            Self::E7 => f.write_str("E_7"),
-            Self::E8 => f.write_str("E_8"),
-        }
-    }
-}
+display_error! { DynkinType {
+    Self::A(n) => "A_{n}";
+    Self::D(n) => "D_{n}";
+    Self::E6 => "E_6";
+    Self::E7 => "E_7";
+    Self::E8 => "E_8";
+} }
 
 /// A simply laced Euclidean (affine) diagram. The subscript is the rank of the
 /// finite diagram it extends, so the diagram itself has one more vertex.
@@ -130,17 +146,13 @@ impl EuclideanType {
     }
 }
 
-impl fmt::Display for EuclideanType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::A(n) => write!(f, "affine A_{n}"),
-            Self::D(n) => write!(f, "affine D_{n}"),
-            Self::E6 => f.write_str("affine E_6"),
-            Self::E7 => f.write_str("affine E_7"),
-            Self::E8 => f.write_str("affine E_8"),
-        }
-    }
-}
+display_error! { EuclideanType {
+    Self::A(n) => "affine A_{n}";
+    Self::D(n) => "affine D_{n}";
+    Self::E6 => "affine E_6";
+    Self::E7 => "affine E_7";
+    Self::E8 => "affine E_8";
+} }
 
 /// The Dynkin type of the quiver's underlying graph, or `None` when that graph
 /// is not a Dynkin diagram.
@@ -338,25 +350,11 @@ pub enum DynkinError {
     },
 }
 
-impl fmt::Display for DynkinError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NonzeroIdeal { relations } => write!(
-                f,
-                "the algebra has {relations} relations; \
-                 Gabriel's theorem needs the full path algebra"
-            ),
-            Self::NotDynkin { euclidean: None } => {
-                f.write_str("the underlying graph is not a Dynkin diagram")
-            }
-            Self::NotDynkin { euclidean: Some(t) } => {
-                write!(f, "the underlying graph is {t}, not a Dynkin diagram")
-            }
-        }
-    }
-}
-
-impl std::error::Error for DynkinError {}
+display_error! { error DynkinError {
+    Self::NonzeroIdeal { relations } => "the algebra has {relations} relations; Gabriel's theorem needs the full path algebra";
+    Self::NotDynkin { euclidean: None } => "the underlying graph is not a Dynkin diagram";
+    Self::NotDynkin { euclidean: Some(t) } => "the underlying graph is {t}, not a Dynkin diagram";
+} }
 
 /// Every indecomposable right module of a hereditary path algebra `kQ` with `Q` of
 /// Dynkin type, one per positive root of the underlying graph, ordered as
@@ -634,45 +632,24 @@ impl Underlying {
         }
     }
 
-    fn num_edges(&self) -> usize {
-        self.loops + self.multiplicity.values().sum::<usize>()
-    }
-
-    fn max_multiplicity(&self) -> usize {
-        self.multiplicity.values().copied().max().unwrap_or(0)
-    }
-
-    fn simple(&self) -> Simple {
-        let mut neighbours = vec![Vec::new(); self.num_vertices];
-        for &(u, v) in self.multiplicity.keys() {
-            neighbours[u].push(v);
-            neighbours[v].push(u);
-        }
-        for list in &mut neighbours {
-            list.sort_unstable();
-        }
-        Simple { neighbours }
+    accessor_methods! {
+        num_edges() -> usize = |this| this.loops + this.multiplicity.values().sum::<usize>();
+        max_multiplicity() -> usize = |this| this.multiplicity.values().copied().max().unwrap_or(0);
+        simple() -> Simple = |this| {
+            let mut neighbours = vec![Vec::new(); this.num_vertices];
+            for &(u, v) in this.multiplicity.keys() {
+                neighbours[u].push(v);
+                neighbours[v].push(u);
+            }
+            for list in &mut neighbours {
+                list.sort_unstable();
+            }
+            Simple { neighbours }
+        };
     }
 
     fn is_connected(&self) -> bool {
-        if self.num_vertices == 0 {
-            return false;
-        }
-        let simple = self.simple();
-        let mut seen = vec![false; self.num_vertices];
-        let mut stack = vec![0usize];
-        seen[0] = true;
-        let mut count = 1usize;
-        while let Some(v) = stack.pop() {
-            for &w in &simple.neighbours[v] {
-                if !seen[w] {
-                    seen[w] = true;
-                    count += 1;
-                    stack.push(w);
-                }
-            }
-        }
-        count == self.num_vertices
+        self.num_vertices > 0 && reachable_count(&self.simple().neighbours, 0) == self.num_vertices
     }
 }
 

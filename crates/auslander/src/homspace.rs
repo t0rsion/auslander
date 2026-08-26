@@ -1,45 +1,32 @@
 //! `Hom_A(M, N)` as an explicit vector space: fixed basis, flat coordinates,
 //! subspaces, and deterministic quotients.
 //!
-//! A [`HomSpace`] stores the `hom_rows` rows, in the order `hom_rows`
-//! fixes: kernel variables vertex-major, then row-major inside a vertex, and
-//! one basis vector per free column in increasing column order. That layout is
-//! the flattening itself, the per-vertex matrices row-major concatenated in
-//! vertex order, so row `i` is basis morphism `i` and a caller pays for a
-//! [`Morphism`] only where it asks for one. A [`HomSubspace`] stores the
-//! reduced row echelon form of its spanning set in these flat coordinates, so
-//! two subspaces of compatible spaces are equal exactly when their matrices
-//! are equal.
+//! A [`HomSpace`] stores the `hom_rows` rows in the order `hom_rows` fixes:
+//! kernel variables vertex-major, then row-major inside a vertex, and one
+//! basis vector per free column in increasing column order. Row `i` is basis
+//! morphism `i`. A [`HomSubspace`] stores the reduced row echelon form of its
+//! spanning set in these coordinates, so two subspaces of compatible spaces
+//! are equal exactly when their matrices are equal.
 //!
 //! The complement rule is fixed crate-wide: to complement a subspace `B`
 //! inside an ambient subspace `Z`, scan the RREF basis rows of `Z` in order
 //! and keep each row that increases the rank of `B` plus the rows kept so
 //! far. [`HomQuotient`] representatives are combinations of the kept rows, so
 //! rebuilding a quotient from the same modules gives the same representatives.
-//! The AR quiver reads its irreducible-map classes off those representatives,
-//! and `tests/determinism_ar.rs` compares the resulting renderings byte for
-//! byte, in-process and across a fresh process.
+//! The AR quiver reads irreducible-map classes off those representatives.
+//! `tests/determinism_ar.rs` compares the resulting renderings byte for byte.
 //!
 //! Two spaces are compatible when their sources are [`Module::ptr_eq`] and
-//! their targets are [`Module::ptr_eq`]. The basis construction is
-//! deterministic, so recomputed compatible spaces have identical bases and
-//! coordinates transport verbatim. An operation on a morphism whose
-//! endpoints do not match is a typed [`HomSpaceError`], never a silent
-//! reinterpretation.
-//!
-//! The file also holds the crate-private helpers that the Ext, sequence, and
-//! almost-split layers share with this one: `row_times`, `stack_rows`,
-//! `rref_coords`, `scale_morphism`, and `deterministic_complement`. One copy
-//! each, so a change to the complement rule or to a coordinate convention
-//! lands in one place.
+//! their targets are [`Module::ptr_eq`]. Compatible spaces rebuilt from the
+//! same modules have identical bases, and coordinates transport verbatim.
 
-use std::fmt;
 use std::sync::OnceLock;
 
 use crate::field::{Fp, PrimeField};
 use crate::hom::{HomError, Morphism, hom_rows};
 use crate::linalg::{DenseMat, RowReducer};
 use crate::module::Module;
+use crate::profile::{Site, hit};
 
 /// Rejected Hom space input.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,25 +47,13 @@ pub enum HomSpaceError {
     OutsideSubspace,
 }
 
-impl fmt::Display for HomSpaceError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::SourceMismatch => f.write_str("the morphism's source is not the space's source"),
-            Self::TargetMismatch => f.write_str("the morphism's target is not the space's target"),
-            Self::IncompatibleSubspaces => {
-                f.write_str("the subspaces do not share both endpoint modules")
-            }
-            Self::NotContained => {
-                f.write_str("the inner subspace is not contained in the ambient subspace")
-            }
-            Self::OutsideSubspace => {
-                f.write_str("the morphism lies outside the ambient subspace of the quotient")
-            }
-        }
-    }
-}
-
-impl std::error::Error for HomSpaceError {}
+display_error! { error HomSpaceError {
+    Self::SourceMismatch => "the morphism's source is not the space's source";
+    Self::TargetMismatch => "the morphism's target is not the space's target";
+    Self::IncompatibleSubspaces => "the subspaces do not share both endpoint modules";
+    Self::NotContained => "the inner subspace is not contained in the ambient subspace";
+    Self::OutsideSubspace => "the morphism lies outside the ambient subspace of the quotient";
+} }
 
 /// The morphism as one flat row: the vertex matrices flattened row-major,
 /// concatenated in vertex order. This is the layout `hom_rows` solves in, so
@@ -105,13 +80,7 @@ fn flat_width(m: &Module, n: &Module) -> usize {
 /// The morphism whose flat row is `row`, the inverse of [`flat_row`].
 ///
 /// `row` must be a linear combination of the flat rows of morphisms
-/// `source -> target`, with canonical entries for the modules' field. Every
-/// caller in this file passes one: [`HomSpace::morphism`] combines the rows of
-/// `flat`, [`HomSubspace::basis_morphism`] takes a row of the row-space basis of
-/// the spanning rows, [`HomQuotient::representative`] combines complement rows,
-/// which are rows of that same basis, and [`HomQuotient::reduce`] combines the
-/// RREF rows of the subspace.
-///
+/// `source -> target`, with canonical entries for the modules' field.
 /// Flattening is a linear bijection between the vertex-matrix tuples and rows of
 /// width [`flat_width`], so the unflattening of a combination of flat rows is the
 /// same combination of morphisms. `Hom_A(M, N)` is a subspace of the tuples, so
@@ -124,12 +93,7 @@ fn morphism_from_flat(source: &Module, target: &Module, row: &[Fp]) -> Morphism 
     let mut offset = 0;
     for v in 0..num_vertices {
         let (dm, dn) = (source.dim_at(v), target.dim_at(v));
-        let mut block = DenseMat::zero(dm, dn);
-        for r in 0..dm {
-            for c in 0..dn {
-                block.set(r, c, row[offset + r * dn + c]);
-            }
-        }
+        let block = DenseMat::from_flat(dm, dn, &row[offset..offset + dm * dn]);
         offset += dm * dn;
         maps.push(block);
     }
@@ -178,10 +142,6 @@ pub(crate) fn rref_coords(rref: &DenseMat, v: &[Fp], field: &PrimeField) -> Opti
 /// [`rref_coords`] over many vectors: row `r` of the result holds the
 /// coordinates of row `r` of `rows`, and `None` means some row lies outside
 /// the row space.
-///
-/// The pivot columns are found once for the whole call and one matrix product
-/// decides every row, where a loop over [`rref_coords`] rescans the pivots and
-/// runs a separate `row_times` per row.
 pub(crate) fn rref_coords_many(
     rref: &DenseMat,
     rows: &DenseMat,
@@ -222,41 +182,29 @@ pub(crate) fn scale_morphism(f: &Morphism, c: Fp) -> Morphism {
     let field = f.source().field();
     let maps = (0..f.source().algebra().quiver().num_vertices())
         .map(|v| {
-            let block = f.map_at(v);
-            let mut out = DenseMat::zero(block.rows(), block.cols());
-            for r in 0..block.rows() {
-                for j in 0..block.cols() {
-                    out.set(r, j, field.mul(c, block.get(r, j)));
-                }
-            }
-            out
+            let mut block = f.map_at(v).clone();
+            block.scale(c, &field);
+            block
         })
         .collect();
     Morphism::new_unchecked(f.source(), f.target(), maps)
 }
 
 fn check_endpoints(source: &Module, target: &Module, f: &Morphism) -> Result<(), HomSpaceError> {
-    if !f.source().ptr_eq(source) {
-        return Err(HomSpaceError::SourceMismatch);
+    if f.source().ptr_eq(source) {
+        f.target()
+            .ptr_eq(target)
+            .then_some(())
+            .ok_or(HomSpaceError::TargetMismatch)
+    } else {
+        Err(HomSpaceError::SourceMismatch)
     }
-    if !f.target().ptr_eq(target) {
-        return Err(HomSpaceError::TargetMismatch);
-    }
-    Ok(())
 }
 
 /// The matrices stacked in order, all with `cols` columns. An empty stack is
 /// the `0 x cols` matrix.
 pub(crate) fn stack_rows(matrices: &[&DenseMat], cols: usize) -> DenseMat {
-    let rows: Vec<Vec<Fp>> = matrices
-        .iter()
-        .flat_map(|m| (0..m.rows()).map(|r| m.row(r).to_vec()))
-        .collect();
-    if rows.is_empty() {
-        DenseMat::zero(0, cols)
-    } else {
-        DenseMat::from_rows(&rows)
-    }
+    DenseMat::stack(matrices, cols)
 }
 
 /// The crate-wide complement rule: scan the rows of `ambient` in order and
@@ -264,10 +212,8 @@ pub(crate) fn stack_rows(matrices: &[&DenseMat], cols: usize) -> DenseMat {
 /// far. The kept rows are the complement basis. This is the only complement
 /// construction in the crate.
 ///
-/// One [`RowReducer`] carries the rank test across the scan, where a rank
-/// call per candidate row rebuilt the whole elimination. The decision is
-/// exact either way, and the kept rows are copies of `ambient` rows in scan
-/// order, so the result is byte for byte what the rule names.
+/// One [`RowReducer`] carries the rank test across the scan. The kept rows
+/// are copies of `ambient` rows in scan order.
 pub(crate) fn deterministic_complement(
     ambient: &DenseMat,
     inner: &DenseMat,
@@ -283,37 +229,28 @@ pub(crate) fn deterministic_complement(
             return empty;
         }
     }
-    let mut kept: Vec<Vec<Fp>> = Vec::new();
-    for r in 0..ambient.rows() {
-        if reducer.push(ambient.row(r), field) {
-            kept.push(ambient.row(r).to_vec());
-        }
-    }
-    if kept.is_empty() {
-        empty
-    } else {
-        DenseMat::from_rows(&kept)
-    }
+    let kept: Vec<Vec<Fp>> = (0..ambient.rows())
+        .filter(|&r| reducer.push(ambient.row(r), field))
+        .map(|r| ambient.row(r).to_vec())
+        .collect();
+    DenseMat::from_rows_with_cols(&kept, ambient.cols())
 }
 
 /// `Hom_A(M, N)` as its flat rows, in the order `hom_rows` fixes.
 ///
-/// The rows are the primary form: row `i` is basis element `i` flattened, so
-/// [`HomSpace::dim`] and every coordinate operation read them directly and no
-/// [`Morphism`] is built. [`HomSpace::basis_morphism`] unflattens one row,
-/// [`HomSpace::basis_iter`] unflattens the rows a caller consumes, and
-/// [`HomSpace::basis`] unflattens all of them once and keeps them, for callers
-/// that want the whole slice.
+/// Row `i` is basis element `i` flattened. [`HomSpace::basis_morphism`]
+/// unflattens one row, [`HomSpace::basis_iter`] unflattens as the caller
+/// consumes, and [`HomSpace::basis`] unflattens all of them once and keeps
+/// them.
 ///
-/// Fields are private; construction goes through [`HomSpace::new`], so the rows
-/// are always the deterministic `hom_rows` rows of the stored endpoints.
+/// Fields are private. Construction goes through [`HomSpace::new`], so the
+/// rows are always the `hom_rows` rows of the stored endpoints.
 #[derive(Clone, Debug)]
 pub struct HomSpace {
     source: Module,
     target: Module,
     // One row per basis element, flattened as in `flat_row`.
     flat: DenseMat,
-    // The whole materialized basis, filled by the first `basis` call.
     basis: OnceLock<Vec<Morphism>>,
 }
 
@@ -321,60 +258,46 @@ impl HomSpace {
     /// Builds `Hom(m, n)` with the `hom_rows` rows in their deterministic
     /// order. Errors when the modules do not share one algebra, as `hom_rows`.
     pub fn new(m: &Module, n: &Module) -> Result<HomSpace, HomError> {
-        Ok(HomSpace {
+        hit(Site::HomSpaceNew);
+        hom_rows(m, n).map(|flat| HomSpace {
             source: m.clone(),
             target: n.clone(),
-            flat: hom_rows(m, n)?,
+            flat,
             basis: OnceLock::new(),
         })
     }
 
-    /// `dim_k Hom(M, N)`.
-    #[inline]
-    pub fn dim(&self) -> usize {
-        self.flat.rows()
+    accessor_methods! {
+        /// `dim_k Hom(M, N)`.
+        pub dim() -> usize = |this| this.flat.rows();
+        /// The source module `M`.
+        pub source() -> &Module = |this| &this.source;
+        /// The target module `N`.
+        pub target() -> &Module = |this| &this.target;
+        /// Basis morphism `i`, unflattened from row `i`.
+        ///
+        /// # Panics
+        /// Panics unless `i` is below [`HomSpace::dim`].
+        pub basis_morphism(i: usize) -> Morphism = |this| morphism_from_flat(&this.source, &this.target, this.flat.row(i));
     }
 
-    /// The source module `M`.
-    #[inline]
-    pub fn source(&self) -> &Module {
-        &self.source
-    }
-
-    /// The target module `N`.
-    #[inline]
-    pub fn target(&self) -> &Module {
-        &self.target
-    }
-
-    /// Basis morphism `i`, unflattened from row `i`.
-    ///
-    /// # Panics
-    /// Panics unless `i` is below [`HomSpace::dim`].
-    pub fn basis_morphism(&self, i: usize) -> Morphism {
-        morphism_from_flat(&self.source, &self.target, self.flat.row(i))
-    }
-
-    /// The basis morphisms in order, each unflattened as the iterator reaches
-    /// it. A caller that stops early pays for nothing past the last one it took.
+    /// The basis morphisms in order, each unflattened as the iterator reaches it.
     pub fn basis_iter(&self) -> impl Iterator<Item = Morphism> + '_ {
         (0..self.dim()).map(|i| self.basis_morphism(i))
     }
 
-    /// The whole basis, materialized once and kept; coordinates index into this
-    /// list. Use [`HomSpace::basis_morphism`] or [`HomSpace::basis_iter`] to
-    /// take fewer.
+    /// The whole basis, built once and kept. Coordinates index into this list.
+    /// Use [`HomSpace::basis_morphism`] or [`HomSpace::basis_iter`] to take fewer.
     pub fn basis(&self) -> &[Morphism] {
         self.basis.get_or_init(|| self.basis_iter().collect())
     }
 
-    /// The whole basis, materialized and taken by value.
+    /// The whole basis, taken by value.
     pub fn into_basis(self) -> Vec<Morphism> {
         self.into_parts().1
     }
 
-    /// The flat rows and the whole basis, both taken by value, so a caller that
-    /// keeps the two does not copy the rows.
+    /// The flat rows and the whole basis, both taken by value.
     pub(crate) fn into_parts(self) -> (DenseMat, Vec<Morphism>) {
         let HomSpace {
             source,
@@ -472,8 +395,7 @@ impl HomSubspace {
     /// The subspace of `Hom(source, target)` spanned by the given morphisms,
     /// stored as the RREF of their flat rows.
     ///
-    /// The `hom_rows` rows play no part, so a caller that needs only a span
-    /// skips building the whole [`HomSpace`]. Errors when a spanning morphism
+    /// Does not build the whole [`HomSpace`]. Errors when a spanning morphism
     /// has an endpoint that is not the matching module (by [`Module::ptr_eq`]).
     pub(crate) fn spanned_by(
         source: &Module,
@@ -485,11 +407,7 @@ impl HomSubspace {
         }
         let field = source.field();
         let rows: Vec<Vec<Fp>> = spanning.iter().map(flat_row).collect();
-        let stacked = if rows.is_empty() {
-            DenseMat::zero(0, flat_width(source, target))
-        } else {
-            DenseMat::from_rows(&rows)
-        };
+        let stacked = DenseMat::from_rows_with_cols(&rows, flat_width(source, target));
         Ok(HomSubspace {
             source: source.clone(),
             target: target.clone(),
@@ -497,37 +415,21 @@ impl HomSubspace {
         })
     }
 
-    /// The source module of the parent space.
-    #[inline]
-    pub fn source(&self) -> &Module {
-        &self.source
-    }
-
-    /// The target module of the parent space.
-    #[inline]
-    pub fn target(&self) -> &Module {
-        &self.target
-    }
-
-    /// The dimension of the subspace.
-    #[inline]
-    pub fn dim(&self) -> usize {
-        self.basis.rows()
-    }
-
-    /// The basis over flat coordinates, one vector per row, in reduced row
-    /// echelon form.
-    #[inline]
-    pub fn rref_basis(&self) -> &DenseMat {
-        &self.basis
-    }
-
-    /// The morphism of RREF basis row `r`.
-    ///
-    /// # Panics
-    /// Panics if `r` is out of range.
-    pub fn basis_morphism(&self, r: usize) -> Morphism {
-        morphism_from_flat(&self.source, &self.target, self.basis.row(r))
+    accessor_methods! {
+        /// The source module of the parent space.
+        pub source() -> &Module = |this| &this.source;
+        /// The target module of the parent space.
+        pub target() -> &Module = |this| &this.target;
+        /// The dimension of the subspace.
+        pub dim() -> usize = |this| this.basis.rows();
+        /// The basis over flat coordinates, one vector per row, in reduced row
+        /// echelon form.
+        pub rref_basis() -> &DenseMat = |this| &this.basis;
+        /// The morphism of RREF basis row `r`.
+        ///
+        /// # Panics
+        /// Panics if `r` is out of range.
+        pub basis_morphism(r: usize) -> Morphism = |this| morphism_from_flat(&this.source, &this.target, this.basis.row(r));
     }
 
     /// Whether `f` lies in the subspace: a row-space membership test. Errors
@@ -581,35 +483,18 @@ pub struct HomQuotient {
 }
 
 impl HomQuotient {
-    /// The source module of the parent space.
-    #[inline]
-    pub fn source(&self) -> &Module {
-        &self.subspace.source
-    }
-
-    /// The target module of the parent space.
-    #[inline]
-    pub fn target(&self) -> &Module {
-        &self.subspace.target
-    }
-
-    /// The dimension of the quotient.
-    #[inline]
-    pub fn dim(&self) -> usize {
-        self.complement.rows()
-    }
-
-    /// The denominator subspace.
-    #[inline]
-    pub fn subspace(&self) -> &HomSubspace {
-        &self.subspace
-    }
-
-    /// The complement rows over flat coordinates, one vector per row, in the
-    /// scan order of the complement rule.
-    #[inline]
-    pub fn complement_basis(&self) -> &DenseMat {
-        &self.complement
+    accessor_methods! {
+        /// The source module of the parent space.
+        pub source() -> &Module = |this| &this.subspace.source;
+        /// The target module of the parent space.
+        pub target() -> &Module = |this| &this.subspace.target;
+        /// The dimension of the quotient.
+        pub dim() -> usize = |this| this.complement.rows();
+        /// The denominator subspace.
+        pub subspace() -> &HomSubspace = |this| &this.subspace;
+        /// The complement rows over flat coordinates, one vector per row, in the
+        /// scan order of the complement rule.
+        pub complement_basis() -> &DenseMat = |this| &this.complement;
     }
 
     /// The representative morphism with the given coordinates over the

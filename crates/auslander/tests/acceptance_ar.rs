@@ -1,21 +1,13 @@
 //! v0.4 acceptance matrix for the AR layer (design sections 12, 13, 18).
 //!
-//! Tier 1 runs on the full non-monomial matrix plus monomial fixtures: the
-//! commutative square kQ/(ab - cd) over F_5, the preprojective algebra of
-//! A_3 over F_2, the inhomogeneous algebra kQ/(ab - cde) over F_5,
-//! k[x]/(x^3) over F_2 and F_5, and linearly oriented A_3 over F_5. It
-//! covers Ext space dimensions, the Yoneda product laws on every bounded
-//! basis tuple, extensions built from degree 1 classes, AR-duality
-//! almost-split sequences, and stable Hom.
-//!
-//! Tier 2 runs only where an exhaustive catalog exists: k[x]/(x^3) over
-//! F_2 and F_5, linear A_3 over F_5, the radical-square-zero 3-cycle over
-//! F_5, and the zero-ideal D_4 path algebra over F_2. It covers the AR
-//! quiver, the middle-term cross-check gate of design section 12, the
-//! catalog witness route, and arrow valuations. The preprojective algebra
-//! of A_3 is representation finite but carries no certified catalog in
-//! this release, so it runs tier 1 only and the AR quiver dispatch rejects
-//! it with both carried reasons.
+//! Tier 1 covers Ext dimensions, Yoneda products, extensions from degree-1
+//! classes, AR-duality almost-split sequences, and stable Hom, on the
+//! non-monomial matrix plus k[x]/(x^3) and linear A_3. Tier 2 covers the AR
+//! quiver, the middle-term cross-check, the catalog witness route, and arrow
+//! valuations, and runs only where an exhaustive catalog exists. The
+//! preprojective algebra of A_3 is representation finite but has no certified
+//! catalog here, so it runs tier 1 only and the AR quiver dispatch rejects it
+//! with both carried reasons.
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};

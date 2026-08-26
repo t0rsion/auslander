@@ -1,19 +1,17 @@
 //! Bound quiver algebras `kQ/I` with a certificate-verified normal-word basis.
 //!
-//! [`Algebra`] is the sole runtime algebra type: it owns a prime field, the
+//! [`Algebra`] is the sole runtime algebra type. It owns a prime field, the
 //! reduced Groebner basis of its ideal, the normal-word basis, and per-arrow
 //! multiplication tables. Every `Algebra` comes from one pipeline: completion
 //! emits a certificate, the independent verifier checks it, and the
-//! constructor builds the tables from the verified data. Nothing in this
-//! module truncates silently.
+//! constructor builds the tables from the verified data.
 //!
-//! Monomial input takes the same pipeline. [`monomial_presentation`] turns a
+//! Monomial input takes that pipeline. [`monomial_presentation`] turns a
 //! [`crate::monomial::MonomialIdeal`] into a [`Presentation`] of one-term
 //! relations, and [`monomial_limits`] derives budgets adequate for it. The
-//! named constructors ([`linear_an`], [`kronecker`], and the rest) are that
-//! pair applied to the families of [`crate::monomial`].
+//! named constructors ([`linear_an`], [`kronecker`], and the rest) apply that
+//! pair to the families of [`crate::monomial`].
 
-use std::fmt;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
@@ -21,7 +19,7 @@ use rustc_hash::FxHashMap;
 use crate::certificate::{Certificate, FinitenessData, RelationData};
 use crate::completion::{CompletionLimits, Outcome, TruncationDiagnostics, complete};
 use crate::field::{Fp, PrimeField};
-use crate::linalg::DenseMat;
+use crate::linalg::{DenseMat, merge_scaled_terms};
 use crate::monomial::{
     MonomialError, MonomialIdeal, an_with_relations_ideal, cyclic_nakayama_ideal, kronecker_ideal,
     linear_an_ideal, linear_nakayama_ideal, radical_square_zero_cycle_ideal, truncated_poly_ideal,
@@ -65,57 +63,26 @@ pub enum AlgebraBuildError {
     /// Completion ran out of budget; no certificate exists.
     Truncated(TruncationDiagnostics),
     /// The verifier rejected the engine's own certificate for a reason other
-    /// than infinite dimension. This is an engine defect, still typed.
+    /// than infinite dimension. This is an engine defect.
     Verification(VerifyError),
 }
 
-impl fmt::Display for AlgebraBuildError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Monomial(error) => write!(f, "monomial input rejected: {error}"),
-            Self::Relation(error) => write!(f, "relation rejected: {error}"),
-            Self::NonAdmissible {
-                stable_power,
-                dimension,
-            } => write!(
-                f,
-                "the ideal is not admissible: J^{stable_power} has dimension {dimension} \
-                 and equals every higher power, so J is not nilpotent"
-            ),
-            Self::InputRelationsMismatch { index } => write!(
-                f,
-                "the certificate's input relations differ from the presentation at index {index}"
-            ),
-            Self::InfiniteDimensional { witness, .. } => write!(
-                f,
-                "the quotient is infinite dimensional: prefix {:?}, cycle {:?}",
-                witness.prefix, witness.cycle
-            ),
-            Self::Truncated(diagnostics) => write!(
-                f,
-                "completion ran out of budget ({:?}): basis {}, pending ambiguities {}, steps {}",
-                diagnostics.reason,
-                diagnostics.basis_len,
-                diagnostics.pending_ambiguities,
-                diagnostics.steps_used
-            ),
-            Self::Verification(error) => {
-                write!(f, "the engine's certificate failed verification: {error}")
-            }
-        }
-    }
-}
+display_error! { AlgebraBuildError {
+    Self::Monomial(error) => "monomial input rejected: {error}";
+    Self::Relation(error) => "relation rejected: {error}";
+    Self::NonAdmissible { stable_power, dimension } => "the ideal is not admissible: J^{stable_power} has dimension {dimension} and equals every higher power, so J is not nilpotent";
+    Self::InputRelationsMismatch { index } => "the certificate's input relations differ from the presentation at index {index}";
+    Self::InfiniteDimensional { witness, .. } => "the quotient is infinite dimensional: prefix {:?}, cycle {:?}", witness.prefix, witness.cycle;
+    Self::Truncated(diagnostics) => "completion ran out of budget ({:?}): basis {}, pending ambiguities {}, steps {}", diagnostics.reason, diagnostics.basis_len, diagnostics.pending_ambiguities, diagnostics.steps_used;
+    Self::Verification(error) => "the engine's certificate failed verification: {error}";
+} }
 
-impl std::error::Error for AlgebraBuildError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Monomial(error) => Some(error),
-            Self::Relation(error) => Some(error),
-            Self::Verification(error) => Some(error),
-            _ => None,
-        }
-    }
-}
+error_source!(AlgebraBuildError {
+    Self::Monomial(error) => Some(error),
+    Self::Relation(error) => Some(error),
+    Self::Verification(error) => Some(error),
+    _ => None,
+});
 
 /// Rejects a certificate whose `input_relations` are not the relations of
 /// `presentation`, term for term in stored order.
@@ -179,13 +146,14 @@ fn index_basis(quiver: &Quiver, basis: &[PathWord]) -> BasisIndexes {
 ///
 /// Construction runs the full pipeline: completion of the relations into the
 /// reduced Groebner basis, certificate emission, independent verification of
-/// the certificate, and the admissibility decision. The ideal is
-/// admissible: `I ⊆ J²` holds term by term, and the arrow ideal `J` is
-/// nilpotent, which every construction path decides by iterating the radical
-/// step. The basis consists of the normal words (words
-/// irreducible by the Groebner leading words) in the fixed order: `basis[v]`
-/// is the trivial path `e_v` for `v < num_vertices`; the remaining entries
-/// are sorted by length, then source vertex, then lexicographic arrow word.
+/// the certificate, and the admissibility decision. The ideal is admissible:
+/// `I ⊆ J²` holds term by term, and the arrow ideal `J` is nilpotent. Every
+/// construction path decides nilpotence by iterating the radical step.
+///
+/// A normal word is a path that contains no Groebner leading word as a
+/// factor. The basis is those words, in the fixed order: `basis[v]` is the
+/// trivial path `e_v` for `v < num_vertices`. Remaining entries are sorted
+/// by length, then source vertex, then lexicographic arrow word.
 /// Multiplication tables store normal forms, so every product is exact.
 ///
 /// ```
@@ -214,21 +182,20 @@ pub struct Algebra {
     left_mul: Vec<Vec<Vec<(BasisIdx, Fp)>>>,
     // The chain J^0 ⊇ J^1 ⊇ ... ⊇ J^d = 0, one entry per power, built once at
     // construction by radical_chain. The last index d is the nilpotency
-    // degree. An Algebra is immutable and lives behind an Arc, so every reader
-    // shares this one copy.
+    // degree. An Algebra is immutable and lives behind an Arc, so every
+    // reader shares this one copy.
     radical_powers: Vec<Vec<Vec<DenseMat>>>,
 }
 
 impl Algebra {
-    /// Runs the full pipeline on `presentation`: completion, independent
-    /// verification of the emitted certificate, and table construction from
-    /// the verified data.
+    /// Completes `presentation`, verifies the emitted certificate, and builds
+    /// the tables from the verified data.
     ///
-    /// Verification goes through [`crate::verify::verify_certificate`], which
-    /// is the same verifier [`crate::verify::verify`] runs after parsing
-    /// bytes. The engine shares no algorithm with it.
+    /// Verification goes through [`crate::verify::verify_certificate`], the
+    /// same verifier [`crate::verify::verify`] runs after parsing bytes. The
+    /// engine shares no reduction code with it.
     ///
-    /// Errors: [`AlgebraBuildError::Truncated`] when a budget of `limits`
+    /// Errors with [`AlgebraBuildError::Truncated`] when a budget of `limits`
     /// runs out, [`AlgebraBuildError::InfiniteDimensional`] when the verifier
     /// proves the quotient infinite dimensional,
     /// [`AlgebraBuildError::InputRelationsMismatch`] when the verified
@@ -237,9 +204,9 @@ impl Algebra {
     /// nilpotent, and [`AlgebraBuildError::Verification`] when the verifier
     /// rejects the certificate for any other reason (an engine defect).
     ///
-    /// The algebra stores `limits` as its effective completion limits, and
-    /// every derived completion, [`crate::opposite::opposite`] included,
-    /// runs with them.
+    /// The algebra stores `limits` as its effective completion limits. Every
+    /// derived completion, [`crate::opposite::opposite`] included, runs with
+    /// them.
     pub fn new(
         presentation: Presentation,
         limits: &CompletionLimits,
@@ -278,8 +245,9 @@ impl Algebra {
         }
     }
 
-    /// Builds the algebra from an already verified completion. This is the
-    /// dump, reload, and reverify path: serialize with
+    /// Builds the algebra from an already verified completion.
+    ///
+    /// This is the dump, reload, and reverify path: serialize with
     /// [`Algebra::certificate`], later call [`crate::verify::verify`] on the
     /// bytes, and rebuild from the token.
     ///
@@ -289,18 +257,19 @@ impl Algebra {
     /// the leading words alone.
     ///
     /// The rebuilt algebra uses [`CompletionLimits::default`] as its
-    /// effective limits. This is policy: certificate bytes are untrusted
-    /// input, and untrusted input must never carry or select downstream
-    /// resource budgets. Use [`Algebra::from_verified_with_limits`] when a
-    /// reload flow wants to preserve the budgets of the original build.
+    /// effective limits. Certificate bytes are untrusted input, and untrusted
+    /// input must never carry or select downstream resource budgets. Use
+    /// [`Algebra::from_verified_with_limits`] to preserve the budgets of the
+    /// original build.
     pub fn from_verified(verified: VerifiedCompletion) -> Result<Arc<Algebra>, AlgebraBuildError> {
         Algebra::from_verified_with_limits(verified, &CompletionLimits::default())
     }
 
-    /// [`Algebra::from_verified`] with explicit effective completion
-    /// limits. The limits come from the caller, never from the certificate
-    /// bytes; downstream completions such as
-    /// [`crate::opposite::opposite`] run with them.
+    /// [`Algebra::from_verified`] with caller-supplied completion limits.
+    ///
+    /// The limits come from the caller, never from the certificate bytes.
+    /// Downstream completions such as [`crate::opposite::opposite`] run with
+    /// them.
     pub fn from_verified_with_limits(
         verified: VerifiedCompletion,
         limits: &CompletionLimits,
@@ -366,13 +335,12 @@ impl Algebra {
     /// The chain is descending, so within `dim` steps it either reaches zero
     /// or repeats a nonzero dimension. A repeat means `J^k = J^{k+1}`, hence
     /// `J^k = J^m` for every `m >= k`, so `J` is not nilpotent and the ideal
-    /// is not admissible. Multiplication tables are the only input: leading
-    /// words alone cannot decide this, because `(x³)` and `(x³ - x²)` share
-    /// every leading word and only the first is admissible.
+    /// is not admissible. Multiplication tables are the only input. Leading
+    /// words alone cannot decide this: `(x³)` and `(x³ - x²)` share every
+    /// leading word, and only the first is admissible.
     ///
     /// The walk runs once, at construction. Every reader of a radical power
-    /// indexes the stored chain, so the cost is paid one time per algebra
-    /// rather than once per query.
+    /// indexes the stored chain.
     fn radical_chain(&self) -> Result<Vec<Vec<Vec<DenseMat>>>, AlgebraBuildError> {
         let total =
             |power: &[Vec<DenseMat>]| -> usize { power.iter().flatten().map(DenseMat::rows).sum() };
@@ -406,93 +374,60 @@ impl Algebra {
         unreachable!("a strictly descending chain of subspaces of A reaches zero within dim steps")
     }
 
-    /// The verified certificate this algebra was built from. Serialize it
-    /// with [`Certificate::to_canonical_json`] for dumping.
-    #[inline]
-    pub fn certificate(&self) -> &Certificate {
-        &self.certificate
+    accessor_methods! {
+        /// The verified certificate this algebra was built from.
+        ///
+        /// Serialize it with [`Certificate::to_canonical_json`] for dumping.
+        pub certificate() -> &Certificate = |this| &this.certificate;
+        /// The effective completion limits of this algebra.
+        ///
+        /// Derived completions, [`crate::opposite::opposite`] included, run
+        /// with them.
+        pub completion_limits() -> &CompletionLimits = |this| &this.limits;
+        /// `dim_k A` = number of normal words.
+        pub dim() -> usize = |this| this.basis.len();
+        pub quiver() -> &Quiver = |this| &this.quiver;
+        pub field() -> PrimeField = |this| this.field;
+        /// The normal-word basis, in the order documented on the type.
+        pub basis() -> &[PathWord] = |this| &this.basis;
+        /// The reduced Groebner basis of the ideal, each element a monic
+        /// [`Relation`] with terms in descending order.
+        pub relations() -> &[Relation] = |this| &this.relations;
     }
 
-    /// The effective completion limits of this algebra. Derived
-    /// completions, [`crate::opposite::opposite`] included, run with
-    /// them.
-    #[inline]
-    pub fn completion_limits(&self) -> &CompletionLimits {
-        &self.limits
-    }
-
-    /// `dim_k A` = number of normal words.
-    #[inline]
-    pub fn dim(&self) -> usize {
-        self.basis.len()
-    }
-
-    #[inline]
-    pub fn quiver(&self) -> &Quiver {
-        &self.quiver
-    }
-
-    #[inline]
-    pub fn field(&self) -> PrimeField {
-        self.field
-    }
-
-    /// The normal-word basis, in the order documented on the type.
-    #[inline]
-    pub fn basis(&self) -> &[PathWord] {
-        &self.basis
-    }
-
-    /// The reduced Groebner basis of the ideal, each element a monic
-    /// [`Relation`] with terms in descending order.
-    #[inline]
-    pub fn relations(&self) -> &[Relation] {
-        &self.relations
-    }
-
-    /// Basis index of `path`: `Ok(Some(i))` when the path is a normal word,
-    /// `Ok(None)` when it is a valid path of the quiver but not a normal
-    /// word, and `Err` when it is not a path of this algebra's quiver at all
-    /// (see [`PathWord::validate_in`]).
+    /// Basis index of `path`.
+    ///
+    /// `Ok(Some(i))` when the path is a normal word. `Ok(None)` when it is a
+    /// valid path of the quiver but not a normal word. `Err` when it is not
+    /// a path of this algebra's quiver (see [`PathWord::validate_in`]).
     ///
     /// A non-normal path is not zero in general: it equals its normal form,
     /// a combination of normal words that [`Algebra::nf_word`] computes. For
-    /// a monomial ideal the two notions coincide and `Ok(None)` does mean
-    /// zero.
+    /// a monomial ideal the two notions coincide and `Ok(None)` means zero.
     pub fn path_index(&self, path: &PathWord) -> Result<Option<BasisIdx>, QuiverError> {
         path.validate_in(&self.quiver)?;
-        if path.is_trivial() {
-            Ok(Some(path.source() as usize))
+        Ok(if path.is_trivial() {
+            Some(path.source() as usize)
         } else {
-            Ok(self.index_of.get(path.arrows()).copied())
-        }
+            self.index_of.get(path.arrows()).copied()
+        })
     }
 
-    /// Basis index of `e_v`; equals `v`. Panics if `v >= num_vertices`.
-    pub fn vertex_idempotent(&self, v: u32) -> BasisIdx {
-        assert!(v < self.quiver.num_vertices());
-        v as usize
-    }
-
-    /// Basis indices of normal words with source `v`, the basis of
-    /// `e_v A = P_v`. Panics if `v >= num_vertices`.
-    #[inline]
-    pub fn paths_from(&self, v: u32) -> &[BasisIdx] {
-        &self.from[v as usize]
-    }
-
-    /// Basis indices of normal words with target `v`, the basis of `A e_v`.
-    /// Panics if `v >= num_vertices`.
-    #[inline]
-    pub fn paths_to(&self, v: u32) -> &[BasisIdx] {
-        &self.to[v as usize]
-    }
-
-    /// Basis indices of normal words from `u` to `v`, the basis of
-    /// `e_u A e_v`. Panics if either vertex is out of range.
-    #[inline]
-    pub fn paths_between(&self, u: u32, v: u32) -> &[BasisIdx] {
-        &self.between[u as usize][v as usize]
+    accessor_methods! {
+        /// Basis index of `e_v`; equals `v`. Panics if `v >= num_vertices`.
+        pub vertex_idempotent(v: u32) -> BasisIdx = |this| {
+            assert!(v < this.quiver.num_vertices());
+            v as usize
+        };
+        /// Basis indices of normal words with source `v`, the basis of
+        /// `e_v A = P_v`. Panics if `v >= num_vertices`.
+        pub paths_from(v: u32) -> &[BasisIdx] = |this| &this.from[v as usize];
+        /// Basis indices of normal words with target `v`, the basis of `A e_v`.
+        /// Panics if `v >= num_vertices`.
+        pub paths_to(v: u32) -> &[BasisIdx] = |this| &this.to[v as usize];
+        /// Basis indices of normal words from `u` to `v`, the basis of
+        /// `e_u A e_v`. Panics if either vertex is out of range.
+        pub paths_between(u: u32, v: u32) -> &[BasisIdx] = |this| &this.between[u as usize][v as usize];
     }
 
     /// Cartan matrix: `c[i][j] = dim e_i A e_j`, the number of normal words
@@ -505,19 +440,14 @@ impl Algebra {
             .collect()
     }
 
-    /// `basis[i] · a` as a sparse coefficient row over the basis, sorted by
-    /// basis index. The row is empty when the product is zero, and has at
-    /// most one entry over a monomial ideal. Panics on out-of-range `i` or
-    /// `a`.
-    #[inline]
-    pub fn right_mul(&self, i: BasisIdx, a: ArrowId) -> &[(BasisIdx, Fp)] {
-        &self.right_mul[i][a.index()]
-    }
-
-    /// `a · basis[i]`, as [`Self::right_mul`].
-    #[inline]
-    pub fn left_mul(&self, a: ArrowId, i: BasisIdx) -> &[(BasisIdx, Fp)] {
-        &self.left_mul[a.index()][i]
+    accessor_methods! {
+        /// `basis[i] · a` as a sparse coefficient row over the basis, sorted by
+        /// basis index. The row is empty when the product is zero, and has at
+        /// most one entry over a monomial ideal. Panics on out-of-range `i` or
+        /// `a`.
+        pub right_mul(i: BasisIdx, a: ArrowId) -> &[(BasisIdx, Fp)] = |this| &this.right_mul[i][a.index()];
+        /// `a · basis[i]`, as [`Self::right_mul`].
+        pub left_mul(a: ArrowId, i: BasisIdx) -> &[(BasisIdx, Fp)] = |this| &this.left_mul[a.index()][i];
     }
 
     /// The normal form of `word` as a sparse coefficient row over the basis,
@@ -557,7 +487,7 @@ impl Algebra {
     /// nonempty and composable in the quiver.
     ///
     /// The verified diamond property makes every reduction order give the
-    /// same normal form, so reducing the first matching basis element at its
+    /// same normal form. Reducing the first matching basis element at its
     /// leftmost factor is as good as any other choice.
     fn nf_arrow_word(&self, word: Vec<ArrowId>) -> Vec<(BasisIdx, Fp)> {
         let mut poly: Vec<(Fp, Vec<ArrowId>)> = vec![(self.field.one(), word)];
@@ -568,7 +498,7 @@ impl Algebra {
                     let index = *self
                         .index_of
                         .get(&word)
-                        .expect("the verifier enumerated every irreducible word");
+                        .expect("the verifier enumerated every normal word");
                     out.push((index, coeff));
                     poly.remove(0);
                 }
@@ -590,11 +520,8 @@ impl Algebra {
     fn leftmost_reduction(&self, word: &[ArrowId]) -> Option<(&Relation, usize)> {
         self.relations.iter().find_map(|relation| {
             let lead = relation.leading().1.arrows();
-            if lead.len() > word.len() {
-                return None;
-            }
-            (0..=word.len() - lead.len())
-                .find(|&at| &word[at..at + lead.len()] == lead)
+            word.windows(lead.len())
+                .position(|factor| factor == lead)
                 .map(|at| (relation, at))
         })
     }
@@ -608,23 +535,21 @@ impl Algebra {
     /// non-trivial basis words and `J^{k+1}` is the span of `x·a` over `x`
     /// spanning `J^k` and arrows `a`. Word length does not decide radical
     /// depth: an inhomogeneous relation can place a short normal word inside
-    /// a deep radical power.
-    ///
-    /// The iteration runs at construction, not here, and the matrix is
-    /// borrowed, so this method costs one index.
+    /// a deep radical power. The iteration runs at construction; this method
+    /// indexes the stored matrix.
     pub fn radical_power_matrix(&self, u: u32, v: u32, k: usize) -> &DenseMat {
         assert!(u < self.quiver.num_vertices() && v < self.quiver.num_vertices());
         &self.radical_power(k)[u as usize][v as usize]
     }
 
-    /// The least `k` with `J^k = 0`, read off the chain construction built.
-    /// Finite for every constructed algebra: an `Algebra` exists only when its
-    /// arrow ideal `J` is nilpotent. The Jacobson radical of a
-    /// finite-dimensional algebra is always nilpotent, but `J` is the arrow
-    /// ideal, and a quotient can be finite dimensional with `J` not nilpotent.
-    #[inline]
-    pub fn nilpotency_degree(&self) -> usize {
-        self.radical_powers.len() - 1
+    accessor_methods! {
+        /// The least `k` with `J^k = 0`, read off the stored chain.
+        /// Finite for every constructed algebra: an `Algebra` exists only when
+        /// its arrow ideal `J` is nilpotent. The Jacobson radical of a
+        /// finite-dimensional algebra is always nilpotent, but `J` is the
+        /// arrow ideal. A quotient can be finite dimensional with `J` not
+        /// nilpotent.
+        pub nilpotency_degree() -> usize = |this| this.radical_powers.len() - 1;
     }
 
     /// Row-reduced component matrices of `J^k`, indexed `[u][v]` with columns
@@ -657,8 +582,8 @@ impl Algebra {
                                 continue;
                             }
                             for &(q, qc) in self.right_mul(word_indices[pos], a) {
-                                let slot = &mut image[positions[q]];
-                                *slot = self.field.add(*slot, self.field.mul(c, qc));
+                                image[positions[q]] =
+                                    self.field.add(image[positions[q]], self.field.mul(c, qc));
                             }
                         }
                         if image.iter().any(|c| !c.is_zero()) {
@@ -673,13 +598,8 @@ impl Algebra {
                 (0..n)
                     .map(|v| {
                         let cols = self.between[u][v].len();
-                        let mut mat = DenseMat::zero(rows[u][v].len(), cols);
-                        for (r, row) in rows[u][v].iter().enumerate() {
-                            for (c, &value) in row.iter().enumerate() {
-                                mat.set(r, c, value);
-                            }
-                        }
-                        mat.into_row_space_basis(&self.field)
+                        DenseMat::from_rows_with_cols(&rows[u][v], cols)
+                            .into_row_space_basis(&self.field)
                     })
                     .collect()
             })
@@ -688,7 +608,7 @@ impl Algebra {
 
     /// Position of each basis word within `paths_between` of its own
     /// endpoints.
-    fn component_positions(&self) -> Vec<usize> {
+    pub(crate) fn component_positions(&self) -> Vec<usize> {
         let mut positions = vec![usize::MAX; self.basis.len()];
         for row in &self.between {
             for component in row {
@@ -714,38 +634,18 @@ fn add_scaled(
 ) -> Vec<(Fp, Vec<ArrowId>)> {
     let addend: Vec<(Fp, Vec<ArrowId>)> = terms
         .iter()
-        .map(|(c, w)| {
-            let mut word = left.to_vec();
-            word.extend_from_slice(w.arrows());
-            word.extend_from_slice(right);
-            (field.mul(scale, *c), word)
-        })
+        .map(|(c, w)| (*c, [left, w.arrows(), right].concat()))
         .collect();
-    let mut merged = Vec::with_capacity(poly.len() + addend.len());
-    let mut i = 0;
-    let mut j = 0;
-    while i < poly.len() && j < addend.len() {
-        match word_cmp(&poly[i].1, &addend[j].1) {
-            std::cmp::Ordering::Greater => {
-                merged.push(poly[i].clone());
-                i += 1;
-            }
-            std::cmp::Ordering::Less => {
-                merged.push(addend[j].clone());
-                j += 1;
-            }
-            std::cmp::Ordering::Equal => {
-                let sum = field.add(poly[i].0, addend[j].0);
-                if !sum.is_zero() {
-                    merged.push((sum, poly[i].1.clone()));
-                }
-                i += 1;
-                j += 1;
-            }
-        }
-    }
-    merged.extend_from_slice(&poly[i..]);
-    merged.extend(addend.into_iter().skip(j));
+    let mut merged = Vec::new();
+    merge_scaled_terms(
+        poly,
+        &addend,
+        (scale, &field),
+        |a, b| word_cmp(&b.1, &a.1),
+        |term| term.0,
+        |term, value| (value, term.1.clone()),
+        &mut merged,
+    );
     merged
 }
 
@@ -780,8 +680,7 @@ pub fn monomial_presentation(ideal: &MonomialIdeal, field: PrimeField) -> Presen
 ///
 /// `max_steps` keeps the default as well, and that is the one budget these
 /// limits do not derive. Each emitted normal word costs one step, so a
-/// monomial algebra of dimension above `max_steps` truncates. The truncation
-/// is typed, so the caller sees it.
+/// monomial algebra of dimension above `max_steps` truncates.
 pub fn monomial_limits(ideal: &MonomialIdeal) -> CompletionLimits {
     let defaults = CompletionLimits::default();
     let words = ideal.forbidden().len();
@@ -900,7 +799,7 @@ pub fn commutative_square(field: PrimeField) -> Arc<Algebra> {
     let presentation = Presentation::new(quiver, field, vec![relation])
         .expect("the relation was built over this quiver and field");
     // The one relation has length 2, so completion needs word length 3 at
-    // most and a handful of steps. The defaults cover that.
+    // most. The defaults cover that.
     Algebra::new(presentation, &CompletionLimits::default())
         .expect("the commutative square is finite dimensional")
 }
@@ -1085,8 +984,8 @@ mod tests {
     fn linear_a3_dim_and_cartan() {
         let a = linear_an(3, f5());
         assert_eq!(a.dim(), 6);
-        // Row i = dimension vector of P_i; upper triangular under left-to-right
-        // composition since paths run from lower to higher vertices.
+        // Row i is the dimension vector of P_i. Upper triangular because
+        // paths run from lower to higher vertices.
         assert_eq!(
             a.cartan_matrix(),
             vec![vec![1, 1, 1], vec![0, 1, 1], vec![0, 0, 1]]

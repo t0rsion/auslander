@@ -1,31 +1,79 @@
 //! Exact linear algebra over F_p.
 //!
 //! Two matrix types share one set of operations: [`DenseMat`] (row-major
-//! contiguous, the default at module scale) and [`SparseMat`] (sorted rows,
-//! Markowitz-pivoted elimination). Matrices are plain data and do not store
-//! their field. Every arithmetic operation takes the [`PrimeField`] as an
-//! argument, and all entries of the operands must belong to that field.
-//! Direct callers must supply canonical matrices: every entry must be the
-//! reduced representative for the field passed, as produced by
-//! [`PrimeField::elem`]. The field arithmetic debug-asserts this and does
-//! not re-reduce.
+//! contiguous) and [`SparseMat`] (sorted rows, Markowitz-pivoted
+//! elimination). Matrices are plain data and do not store their field. Every
+//! arithmetic operation takes the [`PrimeField`] as an argument. All entries
+//! of the operands must belong to that field.
+//!
+//! Direct callers must supply canonical matrices: every entry is the reduced
+//! representative for the field passed, as produced by [`PrimeField::elem`].
+//! The field arithmetic debug-asserts this and does not re-reduce.
 //!
 //! Basis-returning operations (`kernel_basis`, `left_kernel_basis`,
 //! `row_space_basis`, `image_basis`) return a matrix whose rows are the basis
 //! vectors, derived from the reduced row echelon form. The reduced form is
-//! unique, so these operations are deterministic and the dense and sparse
-//! paths return identical rows in identical order. Callers above this module
-//! depend on the exact rows and their order, so both are part of the contract.
+//! unique, so these operations are deterministic. The dense and sparse paths
+//! return identical rows in identical order. Callers above this module depend
+//! on the exact rows and their order, so both are part of the contract.
 //!
 //! Every reduction has two forms. `rref`, `rank`, `kernel_basis`, and
-//! `row_space_basis` take the matrix by reference and reduce a copy of it.
-//! The matching `into_rref`, `into_rank`, `into_kernel_basis`, and
-//! `into_row_space_basis` take the matrix by value and reduce it in place, so
-//! a caller whose input is dead after the call pays for no copy. Both forms
-//! return the same thing. The consuming form is crate-private.
+//! `row_space_basis` take the matrix by reference and reduce a copy. The
+//! matching `into_rref`, `into_rank`, `into_kernel_basis`, and
+//! `into_row_space_basis` take the matrix by value and reduce it in place.
+//! Both forms return the same thing. The consuming form is crate-private.
 
 use crate::field::{Fp, PrimeField};
 use crate::profile::{Site, hit};
+
+/// Merges two sorted sparse term lists as `left + scale * right`.
+pub(crate) fn merge_scaled_terms<T: Clone>(
+    left: &[T],
+    right: &[T],
+    (scale, field): (Fp, &PrimeField),
+    order: impl Fn(&T, &T) -> std::cmp::Ordering,
+    coefficient: impl Fn(&T) -> Fp,
+    with_coefficient: impl Fn(&T, Fp) -> T,
+    out: &mut Vec<T>,
+) {
+    out.clear();
+    out.reserve(left.len() + right.len());
+    let mut i = 0;
+    let mut j = 0;
+    while i < left.len() && j < right.len() {
+        match order(&left[i], &right[j]) {
+            std::cmp::Ordering::Less => {
+                out.push(left[i].clone());
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                let value = field.mul(scale, coefficient(&right[j]));
+                if !value.is_zero() {
+                    out.push(with_coefficient(&right[j], value));
+                }
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                let value = field.add(
+                    coefficient(&left[i]),
+                    field.mul(scale, coefficient(&right[j])),
+                );
+                if !value.is_zero() {
+                    out.push(with_coefficient(&left[i], value));
+                }
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    out.extend_from_slice(&left[i..]);
+    for term in &right[j..] {
+        let value = field.mul(scale, coefficient(term));
+        if !value.is_zero() {
+            out.push(with_coefficient(term, value));
+        }
+    }
+}
 
 /// Row-major dense matrix over F_p.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,28 +115,51 @@ impl DenseMat {
     /// Panics if the rows have differing lengths.
     pub fn from_rows(rows: &[Vec<Fp>]) -> DenseMat {
         let cols = rows.first().map_or(0, Vec::len);
-        let mut data = Vec::with_capacity(rows.len() * cols);
+        Self::from_rows_with_cols(rows, cols)
+    }
+
+    /// A matrix with the given rows and explicit width.
+    ///
+    /// The width preserves the shape when `rows` is empty.
+    pub(crate) fn from_rows_with_cols(rows: &[Vec<Fp>], cols: usize) -> DenseMat {
         for row in rows {
             assert_eq!(row.len(), cols, "from_rows: ragged rows");
-            data.extend_from_slice(row);
         }
         DenseMat {
             rows: rows.len(),
             cols,
-            data,
+            data: rows.iter().flatten().copied().collect(),
         }
     }
 
-    /// Number of rows.
-    #[inline]
-    pub fn rows(&self) -> usize {
-        self.rows
+    /// A matrix from row-major entries.
+    pub(crate) fn from_flat(rows: usize, cols: usize, data: &[Fp]) -> DenseMat {
+        assert_eq!(data.len(), rows * cols, "from_flat: entry count");
+        DenseMat {
+            rows,
+            cols,
+            data: data.to_vec(),
+        }
     }
 
-    /// Number of columns.
-    #[inline]
-    pub fn cols(&self) -> usize {
-        self.cols
+    /// The matrices stacked in order with an explicit width.
+    pub(crate) fn stack(matrices: &[&DenseMat], cols: usize) -> DenseMat {
+        assert!(matrices.iter().all(|matrix| matrix.cols == cols));
+        DenseMat {
+            rows: matrices.iter().map(|matrix| matrix.rows).sum(),
+            cols,
+            data: matrices
+                .iter()
+                .flat_map(|matrix| matrix.data.iter().copied())
+                .collect(),
+        }
+    }
+
+    accessor_methods! {
+        /// Number of rows.
+        pub rows() -> usize = |this| this.rows;
+        /// Number of columns.
+        pub cols() -> usize = |this| this.cols;
     }
 
     /// The entry at (r, c).
@@ -148,16 +219,25 @@ impl DenseMat {
             rhs.rows,
             rhs.cols
         );
-        let data = self
-            .data
-            .iter()
-            .zip(&rhs.data)
-            .map(|(&a, &b)| f.add(a, b))
-            .collect();
-        DenseMat {
-            rows: self.rows,
-            cols: self.cols,
-            data,
+        let mut out = self.clone();
+        for (left, &right) in out.data.iter_mut().zip(&rhs.data) {
+            *left = f.add(*left, right);
+        }
+        out
+    }
+
+    /// Adds `scale * rhs` to this matrix in place.
+    pub(crate) fn add_scaled_assign(&mut self, rhs: &DenseMat, scale: Fp, f: &PrimeField) {
+        assert_eq!((self.rows, self.cols), (rhs.rows, rhs.cols));
+        for (left, &right) in self.data.iter_mut().zip(&rhs.data) {
+            *left = f.add(*left, f.mul(scale, right));
+        }
+    }
+
+    /// Multiplies every entry by `scale` in place.
+    pub(crate) fn scale(&mut self, scale: Fp, f: &PrimeField) {
+        for value in &mut self.data {
+            *value = f.mul(*value, scale);
         }
     }
 
@@ -242,9 +322,7 @@ impl DenseMat {
 
     /// The reduced row echelon form and its pivot columns.
     ///
-    /// Pivot rows come first in pivot-column order; zero rows follow. The
-    /// matrix is copied first. Where the input is dead after the call,
-    /// `into_rref` reduces the input itself and copies nothing.
+    /// Pivot rows come first in pivot-column order; zero rows follow.
     pub fn rref(&self, f: &PrimeField) -> (DenseMat, Vec<usize>) {
         self.clone().into_rref(f)
     }
@@ -314,9 +392,6 @@ impl DenseMat {
     }
 
     /// The dimension of the row space, which equals that of the column space.
-    ///
-    /// The matrix is copied first. Where the input is dead after the call,
-    /// `into_rank` eliminates in the input itself.
     pub fn rank(&self, f: &PrimeField) -> usize {
         self.clone().into_rank(f)
     }
@@ -335,9 +410,6 @@ impl DenseMat {
     /// [`SparseMat::kernel_basis`] emits the same rows in the same order, and
     /// [`crate::hom::hom`] takes its Hom basis order from that one. Change the
     /// rule here and the two paths disagree.
-    ///
-    /// The matrix is copied first. Where the input is dead after the call,
-    /// `into_kernel_basis` reduces the input itself.
     pub fn kernel_basis(&self, f: &PrimeField) -> DenseMat {
         self.clone().into_kernel_basis(f)
     }
@@ -376,9 +448,6 @@ impl DenseMat {
 
     /// A basis of the row space: the nonzero rows of the reduced row echelon
     /// form, one vector per row of the result.
-    ///
-    /// The matrix is copied first. Where the input is dead after the call,
-    /// `into_row_space_basis` reduces the input itself.
     pub fn row_space_basis(&self, f: &PrimeField) -> DenseMat {
         self.clone().into_row_space_basis(f)
     }
@@ -399,7 +468,7 @@ impl DenseMat {
     }
 
     /// A solution of `A x = b` with free variables set to zero, or `None` when
-    /// the system is inconsistent; `b` has length `self.rows()`. Fixing the
+    /// the system is inconsistent. `b` has length `self.rows()`. Fixing the
     /// free variables at zero makes the returned solution unique, so repeated
     /// calls on equal inputs agree.
     ///
@@ -424,13 +493,13 @@ impl DenseMat {
     }
 
     /// A solution of `A X = B` with free variables set to zero, or `None` when
-    /// any column of `b` lies outside the image; `b` has `self.rows()` rows and
-    /// the result has `self.cols()` rows and `b.cols()` columns.
+    /// any column of `b` lies outside the image. `b` has `self.rows()` rows.
+    /// The result has `self.cols()` rows and `b.cols()` columns.
     ///
     /// Column `j` of the result equals [`DenseMat::solve`] applied to column
-    /// `j` of `b`, entry for entry. One elimination serves every column, where
-    /// the loop over `solve` runs one per column: for a square `A` of size `n`
-    /// and `n` right-hand sides that is `O(n^3)` against `O(n^4)`.
+    /// `j` of `b`, entry for entry. One elimination serves every column.
+    /// Looping `solve` once per column is `O(n^4)` for a square `A` of size
+    /// `n` with `n` right-hand sides; this is `O(n^3)`.
     ///
     /// # Panics
     /// Panics unless `b.rows() == self.rows()`, or if the augmented matrix
@@ -497,8 +566,8 @@ impl DenseMat {
     }
 
     /// The position of the first entry whose stored representative is not
-    /// canonical for `f` (that is, not below `f.modulus()`), or `None` when
-    /// every entry is canonical. Entries are scanned row by row.
+    /// canonical for `f` (not below `f.modulus()`), or `None` when every
+    /// entry is canonical. Entries are scanned row by row.
     pub(crate) fn first_noncanonical(&self, f: &PrimeField) -> Option<(usize, usize)> {
         hit(Site::DenseFirstNoncanonical);
         self.data
@@ -549,16 +618,16 @@ fn eliminate(rows: &mut [Fp], pivot: &[Fp], col: usize, cols: usize, f: &PrimeFi
 
 /// An incremental rank accumulator over F_p.
 ///
-/// Rows arrive one at a time and each is reduced against the rows kept so
-/// far. A row raises the rank exactly when it does not reduce to zero against
-/// the current basis, and that is what [`RowReducer::push`] returns. Building
-/// a set of independent rows this way costs one reduction per row, where
-/// re-running [`DenseMat::rank`] on the growing set costs a full elimination
-/// per row: `O(n^3)` against `O(n^4)` for `n` rows of `n` entries.
+/// Rows arrive one at a time. Each is reduced against the rows kept so far.
+/// A row raises the rank exactly when it does not reduce to zero against the
+/// current basis, and that is what [`RowReducer::push`] returns. Building a
+/// set of independent rows this way costs one reduction per row. Re-running
+/// [`DenseMat::rank`] on the growing set costs a full elimination per row:
+/// `O(n^3)` against `O(n^4)` for `n` rows of `n` entries.
 ///
-/// The kept rows are held in row echelon form ordered by pivot column, each
-/// normalized to a leading 1. They are an internal basis, not a returned one;
-/// no caller depends on them.
+/// The kept rows are in row echelon form ordered by pivot column, each
+/// normalized to a leading 1. They are an internal basis, not a returned one.
+/// No caller depends on them.
 pub struct RowReducer {
     cols: usize,
     /// One kept row per pivot, ordered by pivot column.
@@ -616,9 +685,9 @@ impl RowReducer {
         true
     }
 
-    /// The rank of everything pushed so far.
-    pub fn rank(&self) -> usize {
-        self.pivots.len()
+    accessor_methods! {
+        /// The rank of everything pushed so far.
+        pub rank() -> usize = |this| this.pivots.len();
     }
 }
 
@@ -657,17 +726,13 @@ impl SparseRow {
         SparseRow { entries: merged }
     }
 
-    /// The nonzero entries, sorted by column.
-    #[inline]
-    pub fn entries(&self) -> &[(usize, Fp)] {
-        &self.entries
-    }
-
-    /// The value at `col`, zero when absent.
-    pub fn get(&self, col: usize) -> Fp {
-        self.entries
+    accessor_methods! {
+        /// The nonzero entries, sorted by column.
+        pub entries() -> &[(usize, Fp)] = |this| &this.entries;
+        /// The value at `col`, zero when absent.
+        pub get(col: usize) -> Fp = |this| this.entries
             .binary_search_by_key(&col, |&(c, _)| c)
-            .map_or(Fp::ZERO, |i| self.entries[i].1)
+            .map_or(Fp::ZERO, |i| this.entries[i].1);
     }
 
     /// Sets the value at `col`; a zero value removes the entry.
@@ -688,20 +753,12 @@ impl SparseRow {
         }
     }
 
-    /// Whether the vector is zero.
-    #[inline]
-    pub fn is_zero(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Number of nonzero entries.
-    #[inline]
-    pub fn nnz(&self) -> usize {
-        self.entries.len()
-    }
-
-    fn leading(&self) -> Option<(usize, Fp)> {
-        self.entries.first().copied()
+    accessor_methods! {
+        /// Whether the vector is zero.
+        pub is_zero() -> bool = |this| this.entries.is_empty();
+        /// Number of nonzero entries.
+        pub nnz() -> usize = |this| this.entries.len();
+        leading() -> Option<(usize, Fp)> = |this| this.entries.first().copied();
     }
 
     /// Multiplies every entry by `c`; `c = 0` clears the vector.
@@ -746,47 +803,16 @@ impl SparseRow {
         f: &PrimeField,
         scratch: &mut Vec<(usize, Fp)>,
     ) {
-        if c.is_zero() || other.is_zero() {
-            return;
-        }
-        let result = scratch;
-        result.clear();
-        result.reserve(self.entries.len() + other.entries.len());
-        let mut i = 0;
-        let mut j = 0;
-        while i < self.entries.len() && j < other.entries.len() {
-            let (col_a, val_a) = self.entries[i];
-            let (col_b, val_b) = other.entries[j];
-            match col_a.cmp(&col_b) {
-                std::cmp::Ordering::Less => {
-                    result.push((col_a, val_a));
-                    i += 1;
-                }
-                std::cmp::Ordering::Greater => {
-                    let scaled = f.mul(val_b, c);
-                    if !scaled.is_zero() {
-                        result.push((col_b, scaled));
-                    }
-                    j += 1;
-                }
-                std::cmp::Ordering::Equal => {
-                    let sum = f.add(val_a, f.mul(val_b, c));
-                    if !sum.is_zero() {
-                        result.push((col_a, sum));
-                    }
-                    i += 1;
-                    j += 1;
-                }
-            }
-        }
-        result.extend_from_slice(&self.entries[i..]);
-        for &(col_b, val_b) in &other.entries[j..] {
-            let scaled = f.mul(val_b, c);
-            if !scaled.is_zero() {
-                result.push((col_b, scaled));
-            }
-        }
-        std::mem::swap(&mut self.entries, result);
+        merge_scaled_terms(
+            &self.entries,
+            &other.entries,
+            (c, f),
+            |left, right| left.0.cmp(&right.0),
+            |term| term.1,
+            |term, value| (term.0, value),
+            scratch,
+        );
+        std::mem::swap(&mut self.entries, scratch);
     }
 
     /// The dot product with `other`.
@@ -847,25 +873,16 @@ impl SparseMat {
         }
     }
 
-    /// Number of rows.
-    #[inline]
-    pub fn rows(&self) -> usize {
-        self.rows
-    }
-
-    /// Number of columns.
-    #[inline]
-    pub fn cols(&self) -> usize {
-        self.cols
-    }
-
-    /// Row `r`.
-    ///
-    /// # Panics
-    /// Panics if `r` is out of range.
-    #[inline]
-    pub fn row(&self, r: usize) -> &SparseRow {
-        &self.data[r]
+    accessor_methods! {
+        /// Number of rows.
+        pub rows() -> usize = |this| this.rows;
+        /// Number of columns.
+        pub cols() -> usize = |this| this.cols;
+        /// Row `r`.
+        ///
+        /// # Panics
+        /// Panics if `r` is out of range.
+        pub row(r: usize) -> &SparseRow = |this| &this.data[r];
     }
 
     /// The transpose.
@@ -949,18 +966,12 @@ impl SparseMat {
             if pr == self.rows {
                 break;
             }
-            let mut best = None;
-            let mut best_nnz = usize::MAX;
-            for r in pr..self.rows {
-                if self.data[r].leading().is_some_and(|(c, _)| c == col) {
-                    let nnz = self.data[r].nnz();
-                    if nnz < best_nnz {
-                        best_nnz = nnz;
-                        best = Some(r);
-                    }
-                }
-            }
-            let Some(idx) = best else { continue };
+            let Some(idx) = (pr..self.rows)
+                .filter(|&r| self.data[r].leading().is_some_and(|(c, _)| c == col))
+                .min_by_key(|&r| self.data[r].nnz())
+            else {
+                continue;
+            };
             self.data.swap(pr, idx);
             self.data[pr].normalize(f);
             let (head, tail) = self.data.split_at_mut(pr + 1);
@@ -980,9 +991,7 @@ impl SparseMat {
 
     /// The reduced row echelon form and its pivot columns.
     ///
-    /// Pivot rows come first in pivot-column order; zero rows follow. The
-    /// matrix is copied first. Where the input is dead after the call,
-    /// `into_rref` reduces the input itself and copies nothing.
+    /// Pivot rows come first in pivot-column order; zero rows follow.
     pub fn rref(&self, f: &PrimeField) -> (SparseMat, Vec<usize>) {
         self.clone().into_rref(f)
     }
@@ -1007,9 +1016,6 @@ impl SparseMat {
     }
 
     /// The dimension of the row space, which equals that of the column space.
-    ///
-    /// The matrix is copied first. Where the input is dead after the call,
-    /// `into_rank` eliminates in the input itself.
     pub fn rank(&self, f: &PrimeField) -> usize {
         self.clone().into_rank(f)
     }
@@ -1025,9 +1031,6 @@ impl SparseMat {
     /// Rows come in the same order as [`DenseMat::kernel_basis`]: one row per
     /// free column of the reduced row echelon form, free columns increasing.
     /// [`crate::hom::hom`] builds its Hom basis from this order.
-    ///
-    /// The matrix is copied first. Where the input is dead after the call,
-    /// `into_kernel_basis` reduces the input itself.
     pub fn kernel_basis(&self, f: &PrimeField) -> SparseMat {
         self.clone().into_kernel_basis(f)
     }
@@ -1076,9 +1079,6 @@ impl SparseMat {
 
     /// A basis of the row space: the nonzero rows of the reduced row echelon
     /// form, one vector per row of the result.
-    ///
-    /// The matrix is copied first. Where the input is dead after the call,
-    /// `into_row_space_basis` reduces the input itself.
     pub fn row_space_basis(&self, f: &PrimeField) -> SparseMat {
         self.clone().into_row_space_basis(f)
     }

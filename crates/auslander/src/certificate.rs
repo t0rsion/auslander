@@ -1,8 +1,8 @@
 //! Completion certificates: the data model shared by the completion engine
 //! and the verifier, with canonical JSON encoding and strict decoding.
 //!
-//! A certificate is plain data. This module checks shape, not mathematics;
-//! the verifier replays the traces. Encoding is canonical: one byte-exact
+//! A certificate is plain data. This module checks shape, not mathematics.
+//! The verifier replays the traces. Encoding is canonical: one byte-exact
 //! format, no timestamps, no machine data. Decoding is strict: duplicate
 //! keys, unknown keys, missing keys, trailing commas, wrong types, string
 //! escapes, numbers with leading zeros, and containers nested deeper than
@@ -11,13 +11,50 @@
 
 use std::fmt;
 
+macro_rules! json_object {
+    ($out:expr; $($key:literal => $write:expr),+ $(,)?) => {{
+        let out = $out;
+        out.push('{');
+        let mut needs_separator = false;
+        $(
+            if std::mem::replace(&mut needs_separator, true) { out.push(','); }
+            out.push_str(concat!("\"", $key, "\":"));
+            ($write)(out);
+        )+
+        out.push('}');
+    }};
+}
+
+macro_rules! decoded_object {
+    ($(#[$type_attr:meta])* $visibility:vis struct $type:ident
+        by $function:ident in $context:literal {
+        $($(#[$field_attr:meta])* $field_visibility:vis $field:ident: $field_type:ty;
+            $key:literal => |$raw:ident| $decode:expr),+ $(,)?
+    }) => {
+        $(#[$type_attr])*
+        $visibility struct $type {
+            $($(#[$field_attr])* $field_visibility $field: $field_type,)+
+        }
+
+        fn $function(value: &Value) -> Result<$type, CertParseError> {
+            let mut values = obj_fields(value, $context, &[$($key),+])?.into_iter();
+            Ok($type {
+                $($field: {
+                    let $raw = values.next().expect("one value per object key");
+                    ($decode)?
+                },)+
+            })
+        }
+    };
+}
+
 /// Schema identifier stored in [`Certificate::schema`].
 pub const CERT_SCHEMA: &str = "auslander-completion-certificate-v1";
 
 /// Maximum container nesting the parser accepts. The schema needs seven
-/// levels at its deepest, an arrow word inside a step of an ambiguity
-/// trace, so the bound leaves wide headroom and still stops stack
-/// exhaustion from adversarial bytes.
+/// levels at its deepest: an arrow word inside a step of an ambiguity
+/// trace. The bound is far above that and still stops stack exhaustion
+/// from adversarial bytes.
 pub const MAX_JSON_DEPTH: usize = 64;
 
 /// A relation as certificate data: terms `(coefficient, word)` with the
@@ -25,40 +62,51 @@ pub const MAX_JSON_DEPTH: usize = 64;
 /// arrow indices. Terms descend strictly under the sealed order.
 pub type RelationData = Vec<(u64, Vec<u32>)>;
 
-/// The quiver as certificate data: vertex count and `(source, target)`
-/// arrow pairs in [`crate::quiver::ArrowId`] order.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct QuiverData {
-    pub vertices: u32,
-    pub arrows: Vec<(u32, u32)>,
+decoded_object! {
+    /// The quiver as certificate data: vertex count and `(source, target)`
+    /// arrow pairs in [`crate::quiver::ArrowId`] order.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct QuiverData by decode_quiver in "quiver" {
+        pub vertices: u32; "vertices" => |raw| as_u32(raw, "quiver.vertices"),
+        pub arrows: Vec<(u32, u32)>; "arrows" => |raw| decode_list(raw, "quiver.arrows", |pair| {
+            let [source, target] = tuple(pair, "quiver.arrows", "expected a [source, target] pair")?;
+            Ok((as_u32(source, "quiver.arrows")?, as_u32(target, "quiver.arrows")?))
+        }),
+    }
 }
 
-/// One term of a provenance expression: `coeff · left · r_{input_index} · right`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OriginTerm {
-    pub coeff: u64,
-    pub left: Vec<u32>,
-    pub input_index: usize,
-    pub right: Vec<u32>,
+decoded_object! {
+    /// One term of a provenance expression: `coeff · left · r_{input_index} · right`.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct OriginTerm by decode_origin_term in "origin term" {
+        pub coeff: u64; "coeff" => |raw| as_u64(raw, "origin term coeff"),
+        pub left: Vec<u32>; "left" => |raw| decode_word(raw, "origin term left"),
+        pub input_index: usize; "input_index" => |raw| as_usize(raw, "origin term input_index"),
+        pub right: Vec<u32>; "right" => |raw| decode_word(raw, "origin term right"),
+    }
 }
 
-/// One reduction step: the element under reduction contains `word` as
-/// `left · leading(basis[basis_index]) · right`, and the step subtracts
-/// `coeff · left · basis[basis_index] · right`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TraceStep {
-    pub word: Vec<u32>,
-    pub basis_index: usize,
-    pub left: Vec<u32>,
-    pub right: Vec<u32>,
-    pub coeff: u64,
+decoded_object! {
+    /// One reduction step: the element under reduction contains `word` as
+    /// `left · leading(basis[basis_index]) · right`, and the step subtracts
+    /// `coeff · left · basis[basis_index] · right`.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct TraceStep by decode_step in "trace step" {
+        pub word: Vec<u32>; "word" => |raw| decode_word(raw, "trace step word"),
+        pub basis_index: usize; "basis_index" => |raw| as_usize(raw, "trace step basis_index"),
+        pub left: Vec<u32>; "left" => |raw| decode_word(raw, "trace step left"),
+        pub right: Vec<u32>; "right" => |raw| decode_word(raw, "trace step right"),
+        pub coeff: u64; "coeff" => |raw| as_u64(raw, "trace step coeff"),
+    }
 }
 
-/// A reduction trace: the start element and the steps that take it to zero.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Trace {
-    pub start: RelationData,
-    pub steps: Vec<TraceStep>,
+decoded_object! {
+    /// A reduction trace: the start element and the steps that take it to zero.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Trace by decode_trace in "trace" {
+        pub start: RelationData; "start" => |raw| decode_relation(raw, "trace start"),
+        pub steps: Vec<TraceStep>; "steps" => |raw| decode_list(raw, "trace steps", decode_step),
+    }
 }
 
 /// How two leading words form an ambiguity.
@@ -81,27 +129,42 @@ impl AmbiguityKind {
     }
 }
 
-/// One ambiguity of the basis leading words, keyed `(i, j, kind, offset)`,
-/// with a reduction trace of its composition ending at zero.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AmbiguityEntry {
-    pub i: usize,
-    pub j: usize,
-    pub kind: AmbiguityKind,
-    pub offset: usize,
-    pub trace: Trace,
+decoded_object! {
+    /// One ambiguity of the basis leading words, keyed `(i, j, kind, offset)`,
+    /// with a reduction trace of its composition ending at zero.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct AmbiguityEntry by decode_ambiguity in "ambiguity" {
+        pub i: usize; "i" => |raw| as_usize(raw, "ambiguity i"),
+        pub j: usize; "j" => |raw| as_usize(raw, "ambiguity j"),
+        pub kind: AmbiguityKind; "kind" => |raw| decode_kind(raw),
+        pub offset: usize; "offset" => |raw| as_usize(raw, "ambiguity offset"),
+        pub trace: Trace; "trace" => |raw| decode_trace(raw),
+    }
 }
 
-/// The normal-word automaton as certificate data. `states[v]` is the empty
-/// word for each vertex `v` in vertex order; the remaining states are the
-/// proper nonempty prefixes of the basis leading words, sorted
-/// lexicographically, each stored as its arrow-id word. `transitions` holds
-/// sparse `(state, arrow, next state)` triples sorted by state then arrow;
-/// a missing pair is noncomposable or completes a leading word.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AutomatonData {
-    pub states: Vec<Vec<u32>>,
-    pub transitions: Vec<(usize, u32, usize)>,
+decoded_object! {
+    /// The normal-word automaton as certificate data. `states[v]` is the empty
+    /// word for each vertex `v` in vertex order; the remaining states are the
+    /// proper nonempty prefixes of the basis leading words, sorted
+    /// lexicographically, each stored as its arrow-id word. `transitions` holds
+    /// sparse `(state, arrow, next state)` triples sorted by state then arrow;
+    /// a missing pair is noncomposable or completes a leading word.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct AutomatonData by decode_automaton in "automaton" {
+        pub states: Vec<Vec<u32>>; "states" => |raw| decode_words(raw, "automaton.states"),
+        pub transitions: Vec<(usize, u32, usize)>; "transitions" => |raw| decode_list(raw, "automaton.transitions", |triple| {
+            let [state, arrow, next] = tuple(
+                triple,
+                "automaton.transitions",
+                "expected a [state, arrow, next state] triple",
+            )?;
+            Ok((
+                as_usize(state, "automaton.transitions")?,
+                as_u32(arrow, "automaton.transitions")?,
+                as_usize(next, "automaton.transitions")?,
+            ))
+        }),
+    }
 }
 
 /// The finiteness claim of the certificate. `Infinite` carries a witness:
@@ -114,36 +177,40 @@ pub enum FinitenessData {
     Infinite { prefix: Vec<u32>, cycle: Vec<u32> },
 }
 
-/// A completion certificate. The engine emits it; the verifier checks it
-/// from bytes. See the v0.3 design, sections 4 and 5.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Certificate {
-    pub schema: String,
-    pub field: u64,
-    pub quiver: QuiverData,
-    pub order: String,
-    pub input_relations: Vec<RelationData>,
-    pub basis: Vec<RelationData>,
-    /// `origin[j]` expands to `basis[j]` as a two-sided combination of the
-    /// input relations.
-    pub origin: Vec<Vec<OriginTerm>>,
-    /// `membership[i]` reduces `input_relations[i]` to zero by `basis`.
-    pub membership: Vec<Trace>,
-    pub ambiguities: Vec<AmbiguityEntry>,
-    /// The claimed normal-word basis of the quotient, in the fixed basis
-    /// order of the design, section 6. Empty when `finiteness` claims an
-    /// infinite quotient.
-    pub normal_words: Vec<Vec<u32>>,
-    /// The normal-word automaton over the basis leading words.
-    pub automaton: AutomatonData,
-    /// Whether the normal-word language is finite, with a cycle witness
-    /// when it is not.
-    pub finiteness: FinitenessData,
+decoded_object! {
+    /// A completion certificate. The engine emits it. The verifier checks it
+    /// from bytes. See the v0.3 design, sections 4 and 5.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Certificate by decode_certificate in "certificate" {
+        pub schema: String; "schema" => |raw| as_string(raw, "schema"),
+        pub field: u64; "field" => |raw| as_u64(raw, "field"),
+        pub quiver: QuiverData; "quiver" => |raw| decode_quiver(raw),
+        pub order: String; "order" => |raw| as_string(raw, "order"),
+        pub input_relations: Vec<RelationData>; "input_relations" => |raw| decode_relations(raw, "input_relations"),
+        pub basis: Vec<RelationData>; "basis" => |raw| decode_relations(raw, "basis"),
+        /// `origin[j]` expands to `basis[j]` as a two-sided combination of the
+        /// input relations.
+        pub origin: Vec<Vec<OriginTerm>>; "origin" => |raw| decode_list(raw, "origin", |terms| {
+            decode_list(terms, "origin", decode_origin_term)
+        }),
+        /// `membership[i]` reduces `input_relations[i]` to zero by `basis`.
+        pub membership: Vec<Trace>; "membership" => |raw| decode_list(raw, "membership", decode_trace),
+        pub ambiguities: Vec<AmbiguityEntry>; "ambiguities" => |raw| decode_list(raw, "ambiguities", decode_ambiguity),
+        /// The claimed normal-word basis of the quotient, in the fixed basis
+        /// order of the design, section 6. Empty when `finiteness` claims an
+        /// infinite quotient.
+        pub normal_words: Vec<Vec<u32>>; "normal_words" => |raw| decode_words(raw, "normal_words"),
+        /// The normal-word automaton over the basis leading words.
+        pub automaton: AutomatonData; "automaton" => |raw| decode_automaton(raw),
+        /// Whether the normal-word language is finite, with a cycle witness
+        /// when it is not.
+        pub finiteness: FinitenessData; "finiteness" => |raw| decode_finiteness(raw),
+    }
 }
 
 impl Certificate {
-    /// Serializes the certificate as canonical JSON. One fixed format:
-    /// equal certificates produce equal bytes.
+    /// Serializes the certificate as canonical JSON. Equal certificates
+    /// produce equal bytes.
     ///
     /// The format has no whitespace. Numbers are unsigned decimal integers
     /// without leading zeros. Strings are plain ASCII without escapes.
@@ -170,70 +237,38 @@ impl Certificate {
     /// crate only store fixed ASCII identifiers.
     pub fn to_canonical_json(&self) -> String {
         let mut out = String::new();
-        out.push_str("{\"schema\":");
-        push_string(&mut out, &self.schema);
-        out.push_str(",\"field\":");
-        out.push_str(&self.field.to_string());
-        out.push_str(",\"quiver\":{\"vertices\":");
-        out.push_str(&self.quiver.vertices.to_string());
-        out.push_str(",\"arrows\":");
-        push_list(&mut out, &self.quiver.arrows, |out, &(s, t)| {
-            out.push('[');
-            out.push_str(&s.to_string());
-            out.push(',');
-            out.push_str(&t.to_string());
-            out.push(']');
-        });
-        out.push_str("},\"order\":");
-        push_string(&mut out, &self.order);
-        out.push_str(",\"input_relations\":");
-        push_list(&mut out, &self.input_relations, push_relation);
-        out.push_str(",\"basis\":");
-        push_list(&mut out, &self.basis, push_relation);
-        out.push_str(",\"origin\":");
-        push_list(&mut out, &self.origin, |out, terms| {
-            push_list(out, terms, push_origin_term);
-        });
-        out.push_str(",\"membership\":");
-        push_list(&mut out, &self.membership, |out, trace| {
-            push_trace(out, trace);
-        });
-        out.push_str(",\"ambiguities\":");
-        push_list(&mut out, &self.ambiguities, push_ambiguity);
-        out.push_str(",\"normal_words\":");
-        push_list(&mut out, &self.normal_words, |out, word| {
-            push_word(out, word);
-        });
-        out.push_str(",\"automaton\":{\"states\":");
-        push_list(&mut out, &self.automaton.states, |out, word| {
-            push_word(out, word);
-        });
-        out.push_str(",\"transitions\":");
-        push_list(
-            &mut out,
-            &self.automaton.transitions,
-            |out, &(state, arrow, next)| {
-                out.push('[');
-                out.push_str(&state.to_string());
-                out.push(',');
-                out.push_str(&arrow.to_string());
-                out.push(',');
-                out.push_str(&next.to_string());
-                out.push(']');
+        json_object!(&mut out;
+            "schema" => |out: &mut String| push_string(out, &self.schema),
+            "field" => |out: &mut String| push_number(out, self.field),
+            "quiver" => |out: &mut String| json_object!(out;
+                "vertices" => |out: &mut String| push_number(out, self.quiver.vertices),
+                "arrows" => |out: &mut String| push_list(out, &self.quiver.arrows, |out, &(s, t)| {
+                    out.push('['); push_number(out, s); out.push(','); push_number(out, t); out.push(']');
+                }),
+            ),
+            "order" => |out: &mut String| push_string(out, &self.order),
+            "input_relations" => |out: &mut String| push_list(out, &self.input_relations, push_relation),
+            "basis" => |out: &mut String| push_list(out, &self.basis, push_relation),
+            "origin" => |out: &mut String| push_list(out, &self.origin, |out, terms| push_list(out, terms, push_origin_term)),
+            "membership" => |out: &mut String| push_list(out, &self.membership, push_trace),
+            "ambiguities" => |out: &mut String| push_list(out, &self.ambiguities, push_ambiguity),
+            "normal_words" => |out: &mut String| push_list(out, &self.normal_words, |out, word| push_word(out, word)),
+            "automaton" => |out: &mut String| json_object!(out;
+                "states" => |out: &mut String| push_list(out, &self.automaton.states, |out, word| push_word(out, word)),
+                "transitions" => |out: &mut String| push_list(out, &self.automaton.transitions, |out, &(state, arrow, next)| {
+                    out.push('['); push_number(out, state); out.push(','); push_number(out, arrow); out.push(','); push_number(out, next); out.push(']');
+                }),
+            ),
+            "finiteness" => |out: &mut String| match &self.finiteness {
+                FinitenessData::Finite => json_object!(out; "finite" => |out: &mut String| out.push_str("true")),
+                FinitenessData::Infinite { prefix, cycle } => json_object!(out;
+                    "infinite" => |out: &mut String| json_object!(out;
+                        "prefix" => |out: &mut String| push_word(out, prefix),
+                        "cycle" => |out: &mut String| push_word(out, cycle),
+                    ),
+                ),
             },
         );
-        out.push_str("},\"finiteness\":");
-        match &self.finiteness {
-            FinitenessData::Finite => out.push_str("{\"finite\":true}"),
-            FinitenessData::Infinite { prefix, cycle } => {
-                out.push_str("{\"infinite\":{\"prefix\":");
-                push_word(&mut out, prefix);
-                out.push_str(",\"cycle\":");
-                push_word(&mut out, cycle);
-                out.push_str("}}");
-            }
-        }
-        out.push('}');
         out
     }
 
@@ -245,12 +280,12 @@ impl Certificate {
     /// It rejects containers nested deeper than [`MAX_JSON_DEPTH`] levels
     /// before recursing into them. It accepts the literals `true` and
     /// `false` as tokens, but the schema stores a boolean in exactly one
-    /// place, `finiteness.finite`, and only as `true`; `false` anywhere is
-    /// a shape error. It allows whitespace between tokens; on canonical
+    /// place, `finiteness.finite`, and only as `true`. `false` anywhere is
+    /// a shape error. It allows whitespace between tokens. On canonical
     /// input, `to_canonical_json` reproduces the exact bytes.
     ///
     /// This function checks shape only. It does not check the schema
-    /// string, primality, or any mathematical claim; the verifier does.
+    /// string, primality, or any mathematical claim. The verifier does.
     pub fn from_json(text: &str) -> Result<Certificate, CertParseError> {
         decode_certificate(&parse(text)?)
     }
@@ -267,20 +302,10 @@ pub enum CertParseError {
     Shape { context: String, message: String },
 }
 
-impl fmt::Display for CertParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Syntax { byte, message } => {
-                write!(f, "invalid certificate JSON at byte {byte}: {message}")
-            }
-            Self::Shape { context, message } => {
-                write!(f, "invalid certificate shape in {context}: {message}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for CertParseError {}
+display_error! { error CertParseError {
+    Self::Syntax { byte, message } => "invalid certificate JSON at byte {byte}: {message}";
+    Self::Shape { context, message } => "invalid certificate shape in {context}: {message}";
+} }
 
 fn push_string(out: &mut String, s: &str) {
     assert!(
@@ -291,6 +316,10 @@ fn push_string(out: &mut String, s: &str) {
     out.push('"');
     out.push_str(s);
     out.push('"');
+}
+
+fn push_number(out: &mut String, number: impl fmt::Display) {
+    out.push_str(&number.to_string());
 }
 
 fn push_list<T>(out: &mut String, items: &[T], mut push_item: impl FnMut(&mut String, &T)) {
@@ -319,51 +348,39 @@ fn push_relation(out: &mut String, relation: &RelationData) {
 }
 
 fn push_origin_term(out: &mut String, term: &OriginTerm) {
-    out.push_str("{\"coeff\":");
-    out.push_str(&term.coeff.to_string());
-    out.push_str(",\"left\":");
-    push_word(out, &term.left);
-    out.push_str(",\"input_index\":");
-    out.push_str(&term.input_index.to_string());
-    out.push_str(",\"right\":");
-    push_word(out, &term.right);
-    out.push('}');
+    json_object!(out;
+        "coeff" => |out: &mut String| push_number(out, term.coeff),
+        "left" => |out: &mut String| push_word(out, &term.left),
+        "input_index" => |out: &mut String| push_number(out, term.input_index),
+        "right" => |out: &mut String| push_word(out, &term.right),
+    );
 }
 
 fn push_trace(out: &mut String, trace: &Trace) {
-    out.push_str("{\"start\":");
-    push_relation(out, &trace.start);
-    out.push_str(",\"steps\":");
-    push_list(out, &trace.steps, push_step);
-    out.push('}');
+    json_object!(out;
+        "start" => |out: &mut String| push_relation(out, &trace.start),
+        "steps" => |out: &mut String| push_list(out, &trace.steps, push_step),
+    );
 }
 
 fn push_step(out: &mut String, step: &TraceStep) {
-    out.push_str("{\"word\":");
-    push_word(out, &step.word);
-    out.push_str(",\"basis_index\":");
-    out.push_str(&step.basis_index.to_string());
-    out.push_str(",\"left\":");
-    push_word(out, &step.left);
-    out.push_str(",\"right\":");
-    push_word(out, &step.right);
-    out.push_str(",\"coeff\":");
-    out.push_str(&step.coeff.to_string());
-    out.push('}');
+    json_object!(out;
+        "word" => |out: &mut String| push_word(out, &step.word),
+        "basis_index" => |out: &mut String| push_number(out, step.basis_index),
+        "left" => |out: &mut String| push_word(out, &step.left),
+        "right" => |out: &mut String| push_word(out, &step.right),
+        "coeff" => |out: &mut String| push_number(out, step.coeff),
+    );
 }
 
 fn push_ambiguity(out: &mut String, entry: &AmbiguityEntry) {
-    out.push_str("{\"i\":");
-    out.push_str(&entry.i.to_string());
-    out.push_str(",\"j\":");
-    out.push_str(&entry.j.to_string());
-    out.push_str(",\"kind\":");
-    push_string(out, entry.kind.as_str());
-    out.push_str(",\"offset\":");
-    out.push_str(&entry.offset.to_string());
-    out.push_str(",\"trace\":");
-    push_trace(out, &entry.trace);
-    out.push('}');
+    json_object!(out;
+        "i" => |out: &mut String| push_number(out, entry.i),
+        "j" => |out: &mut String| push_number(out, entry.j),
+        "kind" => |out: &mut String| push_string(out, entry.kind.as_str()),
+        "offset" => |out: &mut String| push_number(out, entry.offset),
+        "trace" => |out: &mut String| push_trace(out, &entry.trace),
+    );
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -423,11 +440,11 @@ fn parse_value(bytes: &[u8], pos: &mut usize, depth: usize) -> Result<Value, Cer
     skip_ws(bytes, pos);
     match bytes.get(*pos) {
         Some(b'{') => {
-            check_depth(bytes, pos, depth)?;
+            check_depth(pos, depth)?;
             parse_obj(bytes, pos, depth + 1)
         }
         Some(b'[') => {
-            check_depth(bytes, pos, depth)?;
+            check_depth(pos, depth)?;
             parse_arr(bytes, pos, depth + 1)
         }
         Some(b'"') => Ok(Value::Str(parse_string(bytes, pos)?)),
@@ -440,15 +457,13 @@ fn parse_value(bytes: &[u8], pos: &mut usize, depth: usize) -> Result<Value, Cer
     }
 }
 
-fn check_depth(bytes: &[u8], pos: &mut usize, depth: usize) -> Result<(), CertParseError> {
-    let _ = bytes;
-    if depth >= MAX_JSON_DEPTH {
-        return Err(syntax(
+fn check_depth(pos: &mut usize, depth: usize) -> Result<(), CertParseError> {
+    (depth < MAX_JSON_DEPTH).then_some(()).ok_or_else(|| {
+        syntax(
             *pos,
             &format!("containers nest deeper than {MAX_JSON_DEPTH} levels"),
-        ));
-    }
-    Ok(())
+        )
+    })
 }
 
 fn parse_bool(bytes: &[u8], pos: &mut usize) -> Result<Value, CertParseError> {
@@ -608,105 +623,43 @@ fn as_arr<'a>(value: &'a Value, context: &str) -> Result<&'a [Value], CertParseE
     }
 }
 
+fn decode_list<T>(
+    value: &Value,
+    context: &str,
+    mut decode: impl FnMut(&Value) -> Result<T, CertParseError>,
+) -> Result<Vec<T>, CertParseError> {
+    as_arr(value, context)?.iter().map(&mut decode).collect()
+}
+
+fn tuple<'a, const N: usize>(
+    value: &'a Value,
+    context: &str,
+    message: &str,
+) -> Result<[&'a Value; N], CertParseError> {
+    let parts = as_arr(value, context)?;
+    if parts.len() != N {
+        return Err(shape(context, message.to_string()));
+    }
+    Ok(std::array::from_fn(|index| &parts[index]))
+}
+
 fn decode_word(value: &Value, context: &str) -> Result<Vec<u32>, CertParseError> {
-    as_arr(value, context)?
-        .iter()
-        .map(|item| as_u32(item, context))
-        .collect()
+    decode_list(value, context, |item| as_u32(item, context))
 }
 
 fn decode_words(value: &Value, context: &str) -> Result<Vec<Vec<u32>>, CertParseError> {
-    as_arr(value, context)?
-        .iter()
-        .map(|item| decode_word(item, context))
-        .collect()
+    decode_list(value, context, |item| decode_word(item, context))
 }
 
 fn decode_relation(value: &Value, context: &str) -> Result<RelationData, CertParseError> {
-    as_arr(value, context)?
-        .iter()
-        .map(|term| {
-            let parts = as_arr(term, context)?;
-            let [coeff, word] = parts else {
-                return Err(shape(
-                    context,
-                    "expected a [coefficient, word] pair".to_string(),
-                ));
-            };
-            Ok((as_u64(coeff, context)?, decode_word(word, context)?))
-        })
-        .collect()
+    decode_list(value, context, |term| {
+        let [coeff, word] = tuple(term, context, "expected a [coefficient, word] pair")?;
+        Ok((as_u64(coeff, context)?, decode_word(word, context)?))
+    })
 }
 
 fn decode_relations(value: &Value, context: &str) -> Result<Vec<RelationData>, CertParseError> {
-    as_arr(value, context)?
-        .iter()
-        .map(|item| decode_relation(item, context))
-        .collect()
-}
-
-fn decode_quiver(value: &Value) -> Result<QuiverData, CertParseError> {
-    let fields = obj_fields(value, "quiver", &["vertices", "arrows"])?;
-    let arrows = as_arr(fields[1], "quiver.arrows")?
-        .iter()
-        .map(|pair| {
-            let parts = as_arr(pair, "quiver.arrows")?;
-            let [source, target] = parts else {
-                return Err(shape(
-                    "quiver.arrows",
-                    "expected a [source, target] pair".to_string(),
-                ));
-            };
-            Ok((
-                as_u32(source, "quiver.arrows")?,
-                as_u32(target, "quiver.arrows")?,
-            ))
-        })
-        .collect::<Result<_, _>>()?;
-    Ok(QuiverData {
-        vertices: as_u32(fields[0], "quiver.vertices")?,
-        arrows,
-    })
-}
-
-fn decode_origin_term(value: &Value) -> Result<OriginTerm, CertParseError> {
-    let fields = obj_fields(
-        value,
-        "origin term",
-        &["coeff", "left", "input_index", "right"],
-    )?;
-    Ok(OriginTerm {
-        coeff: as_u64(fields[0], "origin term coeff")?,
-        left: decode_word(fields[1], "origin term left")?,
-        input_index: as_usize(fields[2], "origin term input_index")?,
-        right: decode_word(fields[3], "origin term right")?,
-    })
-}
-
-fn decode_step(value: &Value) -> Result<TraceStep, CertParseError> {
-    let fields = obj_fields(
-        value,
-        "trace step",
-        &["word", "basis_index", "left", "right", "coeff"],
-    )?;
-    Ok(TraceStep {
-        word: decode_word(fields[0], "trace step word")?,
-        basis_index: as_usize(fields[1], "trace step basis_index")?,
-        left: decode_word(fields[2], "trace step left")?,
-        right: decode_word(fields[3], "trace step right")?,
-        coeff: as_u64(fields[4], "trace step coeff")?,
-    })
-}
-
-fn decode_trace(value: &Value) -> Result<Trace, CertParseError> {
-    let fields = obj_fields(value, "trace", &["start", "steps"])?;
-    Ok(Trace {
-        start: decode_relation(fields[0], "trace start")?,
-        steps: as_arr(fields[1], "trace steps")?
-            .iter()
-            .map(decode_step)
-            .collect::<Result<_, _>>()?,
-    })
+    decode_list(value, context, |item| decode_relation(item, context))
 }
 
 fn decode_kind(value: &Value) -> Result<AmbiguityKind, CertParseError> {
@@ -718,42 +671,6 @@ fn decode_kind(value: &Value) -> Result<AmbiguityKind, CertParseError> {
             format!("expected \"overlap\" or \"inclusion\", got {other:?}"),
         )),
     }
-}
-
-fn decode_ambiguity(value: &Value) -> Result<AmbiguityEntry, CertParseError> {
-    let fields = obj_fields(value, "ambiguity", &["i", "j", "kind", "offset", "trace"])?;
-    Ok(AmbiguityEntry {
-        i: as_usize(fields[0], "ambiguity i")?,
-        j: as_usize(fields[1], "ambiguity j")?,
-        kind: decode_kind(fields[2])?,
-        offset: as_usize(fields[3], "ambiguity offset")?,
-        trace: decode_trace(fields[4])?,
-    })
-}
-
-fn decode_automaton(value: &Value) -> Result<AutomatonData, CertParseError> {
-    let fields = obj_fields(value, "automaton", &["states", "transitions"])?;
-    let transitions = as_arr(fields[1], "automaton.transitions")?
-        .iter()
-        .map(|triple| {
-            let parts = as_arr(triple, "automaton.transitions")?;
-            let [state, arrow, next] = parts else {
-                return Err(shape(
-                    "automaton.transitions",
-                    "expected a [state, arrow, next state] triple".to_string(),
-                ));
-            };
-            Ok((
-                as_usize(state, "automaton.transitions")?,
-                as_u32(arrow, "automaton.transitions")?,
-                as_usize(next, "automaton.transitions")?,
-            ))
-        })
-        .collect::<Result<_, _>>()?;
-    Ok(AutomatonData {
-        states: decode_words(fields[0], "automaton.states")?,
-        transitions,
-    })
 }
 
 fn decode_finiteness(value: &Value) -> Result<FinitenessData, CertParseError> {
@@ -780,55 +697,6 @@ fn decode_finiteness(value: &Value) -> Result<FinitenessData, CertParseError> {
             "expected exactly one key, \"finite\" or \"infinite\"".to_string(),
         )),
     }
-}
-
-fn decode_certificate(value: &Value) -> Result<Certificate, CertParseError> {
-    let fields = obj_fields(
-        value,
-        "certificate",
-        &[
-            "schema",
-            "field",
-            "quiver",
-            "order",
-            "input_relations",
-            "basis",
-            "origin",
-            "membership",
-            "ambiguities",
-            "normal_words",
-            "automaton",
-            "finiteness",
-        ],
-    )?;
-    Ok(Certificate {
-        schema: as_string(fields[0], "schema")?,
-        field: as_u64(fields[1], "field")?,
-        quiver: decode_quiver(fields[2])?,
-        order: as_string(fields[3], "order")?,
-        input_relations: decode_relations(fields[4], "input_relations")?,
-        basis: decode_relations(fields[5], "basis")?,
-        origin: as_arr(fields[6], "origin")?
-            .iter()
-            .map(|terms| {
-                as_arr(terms, "origin")?
-                    .iter()
-                    .map(decode_origin_term)
-                    .collect()
-            })
-            .collect::<Result<_, _>>()?,
-        membership: as_arr(fields[7], "membership")?
-            .iter()
-            .map(decode_trace)
-            .collect::<Result<_, _>>()?,
-        ambiguities: as_arr(fields[8], "ambiguities")?
-            .iter()
-            .map(decode_ambiguity)
-            .collect::<Result<_, _>>()?,
-        normal_words: decode_words(fields[9], "normal_words")?,
-        automaton: decode_automaton(fields[10])?,
-        finiteness: decode_finiteness(fields[11])?,
-    })
 }
 
 #[cfg(test)]

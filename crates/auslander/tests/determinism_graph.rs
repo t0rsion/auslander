@@ -23,26 +23,10 @@
 //! is of a graph that already passed `ClosureWitness::verify`. A truncated
 //! walk has no rendering and fails the test that asked for one.
 //!
-//! Every test here is always-on, and nothing sits behind `#[ignore]`. CI runs
-//! `cargo test --workspace` and never `--ignored`, so an ignored gate over the
-//! closed graph would run on no machine but a developer's. Measured in the dev
-//! profile on the development host over nine runs of this binary only, against
-//! nine interleaved runs of the binary as it stood before the rendering
-//! reached every stored witness:
-//!
-//! ```text
-//!                          median   maximum   median before   maximum before
-//! default parallelism      0.70 s   0.80 s    0.60 s          0.70 s
-//! --test-threads=1         1.22 s   1.33 s    0.83 s          1.02 s
-//! ```
-//!
-//! The D_4 walks are the cost, and their closure recheck is the slower half of
-//! each walk; `taugraph` carries the recheck intervals. Each fixture is walked
-//! once per process, and three processes walk them: this one and the two
-//! children. One such pass went from 0.220 s to 0.277 s at the median, so the
-//! wider rendering costs about 0.06 s per pass. The host throws intermittent
-//! machine-check errors, which is why these are medians over nine runs and not
-//! single readings.
+//! Every test here is always-on. CI runs `cargo test --workspace` and never
+//! `--ignored`, so an ignored gate over the closed graph would run on no
+//! machine but a developer's. The D_4 walks are the cost, and their closure
+//! recheck is the slower half of each walk.
 //!
 //! # What the rendering covers
 //!

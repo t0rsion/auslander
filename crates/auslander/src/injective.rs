@@ -1,24 +1,24 @@
 //! Injective envelopes and minimal injective coresolutions, dual to
 //! [`crate::resolution`].
 //!
-//! Each construction here is the image under the k-dual `D` of the matching
-//! projective construction over the opposite algebra. `D` is the vertexwise
-//! vector-space dual: the same dimension vector, every arrow matrix transposed
-//! (see [`crate::opposite::dual`]). Vector-space duality is exact, so `D` is an
-//! exact contravariant functor. It carries the projective cover of `D(M)` over
-//! `A^op` to the injective envelope of `M`, and a minimal projective resolution of
-//! `D(M)` to a minimal injective coresolution of `M`.
+//! Each construction is `D` of the matching projective construction over the
+//! opposite algebra. `D` is the vertexwise vector-space dual: the same
+//! dimension vector, every arrow matrix transposed (see
+//! [`crate::opposite::dual`]). Vector-space duality is exact, so `D` is an
+//! exact contravariant functor. It sends the projective cover of `D(M)` over
+//! `A^op` to the injective envelope of `M`, and a minimal projective
+//! resolution of `D(M)` to a minimal injective coresolution of `M`.
 //!
-//! Minimality transports with it: a superfluous epimorphism dualizes to an
-//! essential monomorphism, so `soc I^k` lies in the kernel of `d^k` at every step.
-//! Partial coresolutions carry the same typed status as projective resolutions,
+//! Minimality transports: a superfluous epimorphism dualizes to an essential
+//! monomorphism, so `soc I^k` lies in the kernel of `d^k` at every step.
+//! Partial coresolutions use the same typed status as projective resolutions,
 //! [`ResolutionEnd`] and [`Bounded`].
 
 use crate::algebra::AlgebraBuildError;
 use crate::hom::Morphism;
 use crate::module::Module;
 use crate::opposite::{dual, dual_morphism, opposite};
-use crate::resolution::{Bounded, ResolutionEnd, projective_cover, resolve};
+use crate::resolution::{Bounded, ResolutionEnd, bounded_dimension, projective_cover, resolve};
 
 /// The injective envelope `M ↪ I(M)` with `I(M) ≅ ⊕_v I_v^{dim (soc M)_v}`.
 ///
@@ -103,10 +103,10 @@ pub fn coresolve(m: &Module, steps: usize) -> Result<InjectiveCoresolution, Alge
 /// Errors when building the opposite algebra fails (see [`opposite`]).
 pub fn injective_dimension(m: &Module, bound: usize) -> Result<Bounded<usize>, AlgebraBuildError> {
     let coresolution = coresolve(m, bound)?;
-    Ok(match coresolution.end {
-        ResolutionEnd::Finite => Bounded::Exact(coresolution.terms.len() - 1),
-        ResolutionEnd::Cut { at } => Bounded::AtLeast(at + 1),
-    })
+    Ok(bounded_dimension(
+        coresolution.end,
+        coresolution.terms.len(),
+    ))
 }
 
 #[cfg(test)]

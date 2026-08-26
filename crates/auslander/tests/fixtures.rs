@@ -11,11 +11,12 @@
 //! `Ext^1(S_i, S_j)` counts arrows `i → j`, and `Ext^2(S_i, S_j)` counts minimal
 //! relations from `i` to `j` (Bongartz, "Algebras and quadratic forms", 1983).
 //!
-//! Convention note against the frozen archive repo: the old code computed with left
-//! modules (column convention), so its nonzero Ext pairs are the transposes of ours.
-//! For example, its `verify_ext_manual.rs` expected `Ext¹(S_sink, S_source) = 1` for A_2,
-//! while for right modules the extension realized by an arrow sits on
-//! `(source, sink)`. Where such a swap occurs we trust the right-module derivation.
+//! Convention against the frozen archive repo: the old code computed with left
+//! modules (column convention), so its nonzero Ext pairs are the transposes of
+//! these. Its `verify_ext_manual.rs` expected `Ext¹(S_sink, S_source) = 1` for
+//! A_2; for right modules the extension realized by an arrow sits on
+//! `(source, sink)`. Where such a swap occurs, the right-module derivation is
+//! the one this file checks.
 
 use std::env;
 use std::sync::Arc;

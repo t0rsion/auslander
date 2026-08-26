@@ -1,6 +1,6 @@
 # Builds every auslander fixture algebra in QPA and writes
 # qpa_generated.json
-# with schema auslander-qpa-oracle-v7. Each fixture carries its own prime field
+# with schema auslander-qpa-oracle-v8. Each fixture carries its own prime field
 # and its full presentation: the quiver, and relations as integer combinations
 # of paths given by arrow indices. The results per fixture: algebra dimension,
 # dimension vectors of the indecomposable projectives (the Cartan rows) and
@@ -31,6 +31,11 @@
 # approximation sample, the one-tilting entries and the exchange graph are
 # emitted only when that walk closed: a truncated walk still yields a plausible
 # pair count, and an ungated total would be a silent undercount.
+#
+# Schema v8 moves classical tilting out of that closed-walk block. Two
+# constructions give three records: one projective-dimension-one control, and
+# the injective cogenerator over A3/(ab) in two fields. Each positive QPA answer
+# carries its coresolutions and an exactness check on every returned complex.
 #
 # Writes into the current working directory; run under GAP with QPA loadable
 # (discovery order in README.md):
@@ -501,24 +506,29 @@ ApproximationSample := function(A, indecs, pairs, want)
   return rec(total := N, entries := out);
 end;
 
-# Classical tilting over the enumerated pairs with n summands. TiltingModule
-# returns false, or the projective dimension and one coresolution per
-# indecomposable projective. IsTiltingModule is an attribute with no computing
-# method and a false answer never sets it, so it is never called here.
-OneTiltingEntries := function(A, indecs, pairs, n)
-  local out, r, M, t;
-  out := [];
-  for r in Filtered(pairs, x -> x.m = n) do
-    M := SumOrZero(A, indecs{r.idx});
-    t := TiltingModule(M, 1);
-    if t = false then
-      Add(out, rec(dimvecs := r.dimvecs, tilting := false));
-    else
-      Add(out, rec(dimvecs := r.dimvecs, tilting := true, pd := t[1],
-                   coresolutions := List(t[2], ComplexTerms)));
-    fi;
-  od;
-  return out;
+TiltingCandidate := function(id, construction, M, bound)
+  local t;
+  t := TiltingModule(M, bound);
+  if t = false then
+    return rec(id := id, construction := construction, bound := bound,
+               dimvec := DimensionVector(M), tilting := false);
+  fi;
+  return rec(id := id, construction := construction, bound := bound,
+             dimvec := DimensionVector(M), tilting := true, pd := t[1],
+             coresolutions := List(t[2], ComplexTerms),
+             exact := List(t[2], IsExactSequence));
+end;
+
+ClassicalTiltingEntries := function(spec, A, simples, projs, injs)
+  if spec.family = "linear-an-3" then
+    return [TiltingCandidate("linear-a3-pd1", "S0+P0+P2",
+        SumOrZero(A, [simples[1], projs[1], projs[3]]), 1)];
+  fi;
+  if spec.family = "a3-mod-ab" then
+    return [TiltingCandidate("a3-mod-ab-da-pd2", "I0+I1+I2",
+        SumOrZero(A, injs), 2)];
+  fi;
+  return [];
 end;
 
 # A self-consistency check, not external truth: the graph is computed from the
@@ -572,7 +582,6 @@ SttRecord := function(spec, A, taurigid)
   r.total := Length(r.pairs);
   r.histogram := List([0 .. n], m -> Number(r.pairs, x -> x.m = m));
   r.approximations := ApproximationSample(A, L, r.pairs, APPROX_SAMPLE);
-  r.one_tilting := OneTiltingEntries(A, L, r.pairs, n);
   r.graph := ExchangeGraph(r.pairs, n);
   return r;
 end;
@@ -632,6 +641,8 @@ FixtureRecord := function(spec)
       d -> TauPeriodJson(d.module, TauPeriodBound(spec)));
   return rec(spec := spec,
              designated := designated,
+             classical_tilting := ClassicalTiltingEntries(
+                 spec, A, simples, projs, injs),
              stt := SttRecord(spec, A, taurigid),
              ar_sequences := ar,
              irreducible_maps := irr,
@@ -756,16 +767,19 @@ JsonApproximation := function(a)
       ", \"cokernel_dimvec\": ", JsonIntList(a.cokernel), "}");
 end;
 
-JsonOneTilting := function(t)
+JsonClassicalTilting := function(t)
   local s;
-  s := Concatenation("{\"module_dimvecs\": ", JsonIntMatrix(t.dimvecs),
-      ", \"tilting\": ", JsonBool(t.tilting));
+  s := Concatenation("{\"id\": \"", t.id, "\", \"construction\": \"",
+      t.construction, "\", \"bound\": ", String(t.bound),
+      ", \"module_dimvec\": ", JsonIntList(t.dimvec),
+      ", \"qpa_tilting\": ", JsonBool(t.tilting));
   if not t.tilting then
     return Concatenation(s, "}");
   fi;
   return Concatenation(s, ", \"projective_dimension\": ", String(t.pd),
       ", \"coresolutions\": ", JsonFragmentList(
-          List(t.coresolutions, JsonIntMatrix)), "}");
+          List(t.coresolutions, JsonIntMatrix)),
+      ", \"coresolutions_exact\": ", JsonBoolList(t.exact), "}");
 end;
 
 # QPA's list order is discovery order, so every emitted list is sorted by an
@@ -828,8 +842,8 @@ EmitSttList := function(out, name, items, comma)
 end;
 
 # The closure marker gates the block: without a closed walk there is no total,
-# no histogram, no pair list, no approximation sample, no one-tilting list and
-# no graph, only the marker, the cross-check status, the designated tau-rigidity
+# no histogram, no pair list, no approximation sample, and no graph. It holds
+# only the marker, the cross-check status, the designated tau-rigidity
 # flags and the typed refusal.
 EmitStt := function(out, stt)
   AppendTo(out, "      \"support_tau_tilting\": {\n");
@@ -858,8 +872,6 @@ EmitStt := function(out, stt)
       String(stt.approximations.total), ",\n");
   EmitSttList(out, "approximations",
       List(stt.approximations.entries, JsonApproximation), ",");
-  EmitSttList(out, "one_tilting",
-      SortedFragments(stt.one_tilting, t -> t.dimvecs, JsonOneTilting), ",");
   AppendTo(out, "        \"exchange_graph_self_consistency\": ",
       JsonExchangeGraph(stt.graph), "\n");
   AppendTo(out, "      }\n");
@@ -927,6 +939,8 @@ EmitFixture := function(out, fx, last)
   AppendTo(out, "      \"tau_rigid\": ", JsonBoolList(fx.tau_rigid), ",\n");
   AppendTo(out, "      \"rigid\": ", JsonBoolList(fx.rigid), ",\n");
   AppendTo(out, "      \"tau_period\": ", JsonFragmentList(fx.tau_period), ",\n");
+  EmitFragmentLines(out, "classical_tilting",
+      List(fx.classical_tilting, JsonClassicalTilting));
   EmitStt(out, fx.stt);
   if last then comma := ""; else comma := ","; fi;
   AppendTo(out, "    }", comma, "\n");
@@ -942,7 +956,7 @@ EmitJson := function(fixtures)
   out := OutputTextString(buf, true);
   SetPrintFormattingStatus(out, false);
   AppendTo(out, "{\n");
-  AppendTo(out, "  \"schema\": \"auslander-qpa-oracle-v7\",\n");
+  AppendTo(out, "  \"schema\": \"auslander-qpa-oracle-v8\",\n");
   AppendTo(out, "  \"convention\": \"right\",\n");
   AppendTo(out, "  \"max_ext_degree\": ", String(MAX_EXT), ",\n");
   AppendTo(out, "  \"projdim_bound\": ", String(PROJDIM_BOUND), ",\n");
@@ -950,7 +964,7 @@ EmitJson := function(fixtures)
   AppendTo(out, "  \"provenance\": {\n");
   AppendTo(out, "    \"gap_version\": \"", GAPInfo.Version, "\",\n");
   AppendTo(out, "    \"qpa_version\": \"", InstalledPackageVersion("qpa"), "\",\n");
-  AppendTo(out, "    \"command\": \"gap -q -T generate_fixtures.g\"\n");
+  AppendTo(out, "    \"command\": \"gap -q -T -m 1g generate_fixtures.g\"\n");
   AppendTo(out, "  },\n");
   AppendTo(out, "  \"fixtures\": [\n");
   for i in [1 .. Length(fixtures)] do
@@ -979,8 +993,12 @@ Add(Specs, Spec("dual-numbers", "f5", 5, "dual-numbers", "dual-numbers",
 Add(Specs, Spec("truncated-poly-3", "f5", 5, "truncated-poly-3", "truncated-poly-3",
     1, [[1, 1, "x"]], [[[1, [1, 1, 1]]]]));
 
+A3ModAbArrows := [[1, 2, "a1"], [2, 3, "a2"]];
+A3ModAbRelations := [[[1, [1, 2]]]];
+Add(Specs, Spec("a3-mod-ab", "f2", 2, "a3-mod-ab", "a3-mod-ab",
+    3, A3ModAbArrows, A3ModAbRelations));
 Add(Specs, Spec("a3-mod-ab", "f5", 5, "a3-mod-ab", "a3-mod-ab",
-    3, [[1, 2, "a1"], [2, 3, "a2"]], [[[1, [1, 2]]]]));
+    3, A3ModAbArrows, A3ModAbRelations));
 
 Add(Specs, Spec("kronecker-2", "f5", 5, "kronecker-2", "kronecker-2",
     2, [[1, 2, "a1"], [1, 2, "a2"]], []));

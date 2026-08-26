@@ -69,7 +69,7 @@ def test_ext_class_arithmetic_and_representatives():
     assert (-e).coordinates == [4]
     assert (3 * e).coordinates == [3]
     assert (e * 3).coordinates == [3]
-    # 5 e = 0 over F_5, and the zero class is the class of no extension.
+    # 5 e = 0 over F_5.
     assert (5 * e).is_zero
     assert space.zero_class().is_zero
     assert e == space.class_from_coordinates([1])
@@ -236,7 +236,6 @@ def test_almost_split_of_a_projective_is_an_outcome_not_an_error():
     assert outcome is auslander.AlmostSplitOutcome.PROJECTIVE
     assert outcome is not None
     assert repr(outcome) == "AlmostSplitOutcome.PROJECTIVE"
-    # The same object every time; the member is the answer, not a copy of it.
     assert P.almost_split() is outcome
 
 
@@ -334,7 +333,6 @@ def test_ar_quiver_of_linear_a3():
         [1, 1, 1],
     ]
     assert [v.residue_degree for v in vertices] == [1] * 6
-    # The three projectives P_0, P_1, P_2 and the three injectives I_0, I_1, I_2.
     assert sum(v.projective for v in vertices) == 3
     assert sum(v.injective for v in vertices) == 3
     by_id = {v.id: v.module.dims for v in vertices}
@@ -357,7 +355,6 @@ def test_ar_quiver_rejects_an_unsupported_domain():
     message = str(caught.value)
     assert "Gabriel" in message
     assert "Nakayama" in message
-    # A monomial presentation is field-free, so it needs the field.
     with pytest.raises(ValueError, match="field-free"):
         truncated(3).ar_quiver()
 
@@ -371,7 +368,6 @@ def test_exception_taxonomy():
     assert issubclass(auslander.IncompatibleSpacesError, ValueError)
     assert issubclass(auslander.UnsupportedDomainError, ValueError)
     assert issubclass(auslander.ValuedArrowError, ValueError)
-    # A budget exhaustion is a limit, never bad input.
     assert not issubclass(auslander.BudgetExhaustedError, ValueError)
     assert not issubclass(auslander.DefectError, ValueError)
 

@@ -10,8 +10,8 @@
 //! [`BasicError::NotBasic`]. An undetermined summand is
 //! [`BasicError::CertificationBlocked`], never a silent distinct value.
 //!
-//! Three constructors skip that work where a theorem already gives the
-//! answer: [`BasicDecomposition::without`] drops a summand,
+//! Three constructors skip that work when basicness is already known:
+//! [`BasicDecomposition::without`] drops a summand,
 //! [`BasicDecomposition::with_new_summand`] appends a certified one, and
 //! [`BasicDecomposition::from_catalog`] takes distinct catalog entries. Each
 //! keeps the summand values it was given, which is what a
@@ -32,19 +32,21 @@
 //! fingerprints; equal fingerprints prove nothing, so the certified test
 //! stays mandatory.
 
-use std::fmt;
 use std::sync::Arc;
 
 use crate::algebra::Algebra;
 use crate::arquiver::IndecomposableCatalog;
+use crate::context::VerificationContext;
 use crate::decompose::{
-    Certificate, KrullSchmidtOutcome, decompose, krull_schmidt, matrix_inverse,
+    Certificate, KrullSchmidtOutcome, decompose, direct_sum_or_zero, inverse_morphism,
+    krull_schmidt, krull_schmidt_with_context, mutually_inverse,
 };
 use crate::endo::EndoAlgebra;
-use crate::hom::{HomError, Morphism, hom_dim, identity};
+use crate::hom::{HomError, Morphism, hom_dim};
 use crate::indec::{IndecError, IndecomposableModule};
 use crate::iso::indecomposable_iso;
-use crate::module::{Module, direct_sum};
+use crate::module::{Module, summand_sum};
+use crate::profile::{Site, hit};
 use crate::radical::{loewy_length, socle, top};
 
 /// Rejected input, a blocked certification, or a failed internal cross-check
@@ -86,37 +88,16 @@ pub enum BasicError {
     },
 }
 
-impl fmt::Display for BasicError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::CertificationBlocked { reason } => {
-                write!(f, "certification blocked: {reason}")
-            }
-            Self::NotBasic { first, second } => write!(
-                f,
-                "summands {first} and {second} are isomorphic, so the module is not basic"
-            ),
-            Self::VertexOutOfRange {
-                vertex,
-                num_vertices,
-            } => write!(
-                f,
-                "vertex {vertex} is out of range, the quiver has {num_vertices} vertices"
-            ),
-            Self::DifferentAlgebras => f.write_str("the inputs do not share one algebra"),
-            Self::Hom(error) => write!(f, "morphism rejected: {error}"),
-            Self::Defect { reason } => write!(f, "internal cross-check failed: {reason}"),
-        }
-    }
-}
+display_error! { error BasicError {
+    Self::CertificationBlocked { reason } => "certification blocked: {reason}";
+    Self::NotBasic { first, second } => "summands {first} and {second} are isomorphic, so the module is not basic";
+    Self::VertexOutOfRange { vertex, num_vertices } => "vertex {vertex} is out of range, the quiver has {num_vertices} vertices";
+    Self::DifferentAlgebras => "the inputs do not share one algebra";
+    Self::Hom(error) => "morphism rejected: {error}";
+    Self::Defect { reason } => "internal cross-check failed: {reason}";
+} }
 
-impl std::error::Error for BasicError {}
-
-impl From<HomError> for BasicError {
-    fn from(error: HomError) -> BasicError {
-        BasicError::Hom(error)
-    }
-}
+from_variants!(BasicError { HomError => Hom });
 
 /// Certifies one summand of a decomposition that already carries an
 /// indecomposability certificate. Anything but [`IndecError::Undetermined`]
@@ -135,16 +116,6 @@ fn certified(endo: EndoAlgebra) -> Result<IndecomposableModule, BasicError> {
     })
 }
 
-/// The inverse of an isomorphism, or `None` when a vertex matrix is singular.
-fn inverse_of(f: &Morphism) -> Option<Morphism> {
-    let field = f.source().field();
-    let mut maps = Vec::new();
-    for v in 0..f.source().algebra().quiver().num_vertices() {
-        maps.push(matrix_inverse(f.map_at(v), &field)?);
-    }
-    Morphism::new(f.target(), f.source(), maps).ok()
-}
-
 fn defect_non_invertible() -> BasicError {
     BasicError::Defect {
         reason: "the radical criterion returned a non-invertible map between certified \
@@ -158,8 +129,7 @@ fn defect_non_invertible() -> BasicError {
 ///
 /// Fields are private and construction goes through
 /// [`BasicDecomposition::new`], so a value of this type proves the module
-/// basic. The zero module is a legitimate value with zero summands: it is the
-/// module part of the pair `(0, A)`.
+/// basic. The zero module has zero summands: it is the module part of `(0, A)`.
 #[derive(Clone)]
 pub struct BasicDecomposition {
     module: Module,
@@ -169,22 +139,13 @@ pub struct BasicDecomposition {
 /// The direct sum of certified summands, in the order given, and the zero
 /// module for an empty list.
 fn assemble(algebra: &Arc<Algebra>, summands: &[IndecomposableModule]) -> Module {
-    let parts: Vec<&Module> = summands.iter().map(|s| s.module()).collect();
-    if parts.is_empty() {
-        Module::zero(algebra)
-    } else {
-        direct_sum(&parts).0
-    }
+    direct_sum_or_zero(algebra, summands.iter().map(|s| s.module())).0
 }
 
-impl fmt::Debug for BasicDecomposition {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("BasicDecomposition")
-            .field("dim_vector", &self.module.dim_vector())
-            .field("summand_dim_vectors", &self.dim_vectors())
-            .finish()
-    }
-}
+debug_fields!(BasicDecomposition |this| {
+    "dim_vector" => this.module.dim_vector();
+    "summand_dim_vectors" => this.dim_vectors();
+});
 
 impl BasicDecomposition {
     /// Decomposes `m` and requires the summands pairwise non-isomorphic.
@@ -196,7 +157,23 @@ impl BasicDecomposition {
     /// [`BasicError::CertificationBlocked`]. The zero module gives zero
     /// summands.
     pub fn new(m: &Module) -> Result<BasicDecomposition, BasicError> {
-        let classes = match krull_schmidt(m) {
+        hit(Site::BasicDecompositionNew);
+        Self::from_krull_schmidt(m, krull_schmidt(m))
+    }
+
+    pub(crate) fn new_with_context(
+        m: &Module,
+        context: &VerificationContext,
+    ) -> Result<BasicDecomposition, BasicError> {
+        hit(Site::BasicDecompositionNew);
+        Self::from_krull_schmidt(m, krull_schmidt_with_context(m, context))
+    }
+
+    fn from_krull_schmidt(
+        m: &Module,
+        outcome: KrullSchmidtOutcome,
+    ) -> Result<BasicDecomposition, BasicError> {
+        let classes = match outcome {
             KrullSchmidtOutcome::Classes(classes) => classes,
             KrullSchmidtOutcome::Unknown { reason } => {
                 return Err(BasicError::CertificationBlocked { reason });
@@ -232,9 +209,7 @@ impl BasicDecomposition {
     /// [`crate::taurigid::TauCache`] keyed by module identity still hits on
     /// them.
     pub fn without(&self, slot: usize) -> Option<BasicDecomposition> {
-        if slot >= self.summands.len() {
-            return None;
-        }
+        self.summands.get(slot)?;
         let summands: Vec<IndecomposableModule> = self
             .summands
             .iter()
@@ -323,28 +298,15 @@ impl BasicDecomposition {
         })
     }
 
-    /// The decomposed module.
-    #[inline]
-    pub fn module(&self) -> &Module {
-        &self.module
-    }
-
-    /// The certified summands, in decomposition order.
-    #[inline]
-    pub fn summands(&self) -> &[IndecomposableModule] {
-        &self.summands
-    }
-
-    /// The number of indecomposable summands.
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.summands.len()
-    }
-
-    /// Whether the module is zero, which is the only case with no summands.
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.summands.is_empty()
+    accessor_methods! {
+        /// The decomposed module.
+        pub module() -> &Module = |this| &this.module;
+        /// The certified summands, in decomposition order.
+        pub summands() -> &[IndecomposableModule] = |this| &this.summands;
+        /// The number of indecomposable summands.
+        pub len() -> usize = |this| this.summands.len();
+        /// Whether the module is zero, which is the only case with no summands.
+        pub is_empty() -> bool = |this| this.summands.is_empty();
     }
 
     /// The summand dimension vectors, sorted lexicographically with
@@ -378,13 +340,9 @@ pub struct ProjectiveSupport {
     vertices: Vec<u32>,
 }
 
-impl fmt::Debug for ProjectiveSupport {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ProjectiveSupport")
-            .field("vertices", &self.vertices)
-            .finish()
-    }
-}
+debug_fields!(ProjectiveSupport |this| {
+    "vertices" => this.vertices;
+});
 
 /// Equality is exact set equality of the vertex lists, which are sorted and
 /// deduplicated at construction. It ignores the algebra.
@@ -421,58 +379,28 @@ impl ProjectiveSupport {
         })
     }
 
-    /// The algebra the projectives come from.
-    #[inline]
-    pub fn algebra(&self) -> &Arc<Algebra> {
-        &self.algebra
-    }
-
-    /// The support vertices, sorted and deduplicated.
-    #[inline]
-    pub fn vertices(&self) -> &[u32] {
-        &self.vertices
-    }
-
-    /// The number of support vertices, which is the number of indecomposable
-    /// summands of the projective.
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.vertices.len()
-    }
-
-    /// Whether the support is empty, which means the projective is zero.
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.vertices.is_empty()
-    }
-
-    /// Whether `v` lies in the support.
-    pub fn contains(&self, v: u32) -> bool {
-        self.vertices.binary_search(&v).is_ok()
-    }
-
-    /// Whether both supports come from one algebra value (the same [`Arc`]).
-    pub fn is_compatible(&self, other: &ProjectiveSupport) -> bool {
-        Arc::ptr_eq(&self.algebra, &other.algebra)
-    }
-
-    /// Rebuilds the canonical module `P_{v_1} + ... + P_{v_k}` in sorted
-    /// vertex order; the zero module when the support is empty.
-    ///
-    /// Each call builds a fresh [`Module`] value, so results of two calls are
-    /// isomorphic but never [`Module::ptr_eq`].
-    pub fn module(&self) -> Module {
-        if self.vertices.is_empty() {
-            return Module::zero(&self.algebra);
-        }
-        let parts: Vec<Module> = self
-            .vertices
-            .iter()
-            .map(|&v| Module::projective(&self.algebra, v))
-            .collect();
-        let refs: Vec<&Module> = parts.iter().collect();
-        let (sum, _, _) = direct_sum(&refs);
-        sum
+    accessor_methods! {
+        /// The algebra the projectives come from.
+        pub algebra() -> &Arc<Algebra> = |this| &this.algebra;
+        /// The support vertices, sorted and deduplicated.
+        pub vertices() -> &[u32] = |this| &this.vertices;
+        /// The number of support vertices, which is the number of indecomposable
+        /// summands of the projective.
+        pub len() -> usize = |this| this.vertices.len();
+        /// Whether the support is empty, which means the projective is zero.
+        pub is_empty() -> bool = |this| this.vertices.is_empty();
+        /// Whether `v` lies in the support.
+        pub contains(v: u32) -> bool = |this| this.vertices.binary_search(&v).is_ok();
+        /// Whether both supports come from one algebra value (the same [`Arc`]).
+        pub is_compatible(other: &ProjectiveSupport) -> bool = |this|
+            Arc::ptr_eq(&this.algebra, &other.algebra);
+        /// Rebuilds the canonical module `P_{v_1} + ... + P_{v_k}` in sorted
+        /// vertex order; the zero module when the support is empty.
+        ///
+        /// Each call builds a fresh [`Module`] value, so results of two calls are
+        /// isomorphic but never [`Module::ptr_eq`].
+        pub module() -> Module = |this|
+            summand_sum(&this.algebra, &this.vertices, Module::projective);
     }
 }
 
@@ -517,56 +445,37 @@ pub struct SupportPairIsoWitness {
     backward: Vec<Morphism>,
 }
 
-impl fmt::Debug for SupportPairIsoWitness {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SupportPairIsoWitness")
-            .field("bijection", &self.bijection)
-            .finish()
-    }
-}
+debug_fields!(SupportPairIsoWitness |this| {
+    "bijection" => this.bijection;
+});
 
 impl SupportPairIsoWitness {
-    /// `bijection()[i]` is the summand of the second module matched to
-    /// summand `i` of the first.
-    #[inline]
-    pub fn bijection(&self) -> &[usize] {
-        &self.bijection
-    }
-
-    /// `forward()[i]` runs from summand `i` of the first module to summand
-    /// `bijection()[i]` of the second.
-    #[inline]
-    pub fn forward(&self) -> &[Morphism] {
-        &self.forward
-    }
-
-    /// `backward()[i]` is the inverse of `forward()[i]`.
-    #[inline]
-    pub fn backward(&self) -> &[Morphism] {
-        &self.backward
+    accessor_methods! {
+        /// `bijection()[i]` is the summand of the second module matched to
+        /// summand `i` of the first.
+        pub bijection() -> &[usize] = |this| &this.bijection;
+        /// `forward()[i]` runs from summand `i` of the first module to summand
+        /// `bijection()[i]` of the second.
+        pub forward() -> &[Morphism] = |this| &this.forward;
+        /// `backward()[i]` is the inverse of `forward()[i]`.
+        pub backward() -> &[Morphism] = |this| &this.backward;
     }
 
     /// Rechecks the witness: the bijection is a permutation, and each pair of
     /// stored maps multiplies to the identity in both orders.
     pub fn verify(&self) -> bool {
-        if self.forward.len() != self.bijection.len() || self.backward.len() != self.bijection.len()
-        {
-            return false;
-        }
+        hit(Site::SupportPairIsoWitnessVerify);
+        verify_guard!(
+            self.forward.len() == self.bijection.len()
+                && self.backward.len() == self.bijection.len()
+        );
         let mut seen = vec![false; self.bijection.len()];
         for &j in &self.bijection {
-            if j >= seen.len() || seen[j] {
-                return false;
-            }
+            verify_guard!(j < seen.len() && !seen[j]);
             seen[j] = true;
         }
         for (f, g) in self.forward.iter().zip(&self.backward) {
-            let (Ok(round), Ok(round_back)) = (f.then(g), g.then(f)) else {
-                return false;
-            };
-            if round != identity(f.source()) || round_back != identity(g.source()) {
-                return false;
-            }
+            verify_guard!(mutually_inverse(f, g));
         }
         true
     }
@@ -602,6 +511,7 @@ pub fn pair_iso(
     b_mod: &BasicDecomposition,
     b_proj: &ProjectiveSupport,
 ) -> Result<SupportPairIsoOutcome, BasicError> {
+    hit(Site::PairIso);
     if !a_proj.is_compatible(b_proj)
         || !Arc::ptr_eq(a_mod.module().algebra(), a_proj.algebra())
         || !Arc::ptr_eq(b_mod.module().algebra(), b_proj.algebra())
@@ -629,17 +539,15 @@ pub fn pair_iso(
     let mut backward = Vec::with_capacity(a_mod.len());
     let mut used = vec![false; b_mod.len()];
     for (i, x) in a_mod.summands().iter().enumerate() {
-        let mut matched = None;
-        for (j, y) in b_mod.summands().iter().enumerate() {
-            if used[j] {
-                continue;
-            }
-            if let Some(f) = indecomposable_iso(x.module(), y.module(), x.endo()) {
-                matched = Some((j, f));
-                break;
-            }
-        }
-        let Some((j, f)) = matched else {
+        let Some(matched) = certified_match(
+            x,
+            b_mod
+                .summands()
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| !used[*j]),
+        )?
+        else {
             return Ok(SupportPairIsoOutcome::NotIsomorphic(
                 SupportPairObstruction::UnmatchedSummand {
                     index: i,
@@ -647,13 +555,10 @@ pub fn pair_iso(
                 },
             ));
         };
-        let Some(g) = inverse_of(&f) else {
-            return Err(defect_non_invertible());
-        };
-        used[j] = true;
-        bijection.push(j);
-        forward.push(f);
-        backward.push(g);
+        used[matched.target_index] = true;
+        bijection.push(matched.target_index);
+        forward.push(matched.forward);
+        backward.push(matched.backward);
     }
     Ok(SupportPairIsoOutcome::Isomorphic(SupportPairIsoWitness {
         bijection,
@@ -680,53 +585,24 @@ pub struct SummandFingerprint {
 }
 
 impl SummandFingerprint {
-    /// The dimension vector.
-    #[inline]
-    pub fn dim_vector(&self) -> &[usize] {
-        &self.dim_vector
-    }
-
-    /// The Loewy length, from [`loewy_length`].
-    #[inline]
-    pub fn loewy_length(&self) -> usize {
-        self.loewy_length
-    }
-
-    /// The dimension vector of `top X`.
-    #[inline]
-    pub fn top_dim_vector(&self) -> &[usize] {
-        &self.top_dim_vector
-    }
-
-    /// The dimension vector of `soc X`.
-    #[inline]
-    pub fn socle_dim_vector(&self) -> &[usize] {
-        &self.socle_dim_vector
-    }
-
-    /// `dim_Fp End(X)`.
-    #[inline]
-    pub fn end_dim(&self) -> usize {
-        self.end_dim
-    }
-
-    /// The residue degree of `End(X)`, from
-    /// [`IndecomposableModule::residue_degree`].
-    #[inline]
-    pub fn residue_degree(&self) -> usize {
-        self.residue_degree
-    }
-
-    /// `hom_dim(S_v, X)` for every vertex `v`, in vertex order.
-    #[inline]
-    pub fn hom_from_simples(&self) -> &[usize] {
-        &self.hom_from_simples
-    }
-
-    /// `hom_dim(X, S_v)` for every vertex `v`, in vertex order.
-    #[inline]
-    pub fn hom_to_simples(&self) -> &[usize] {
-        &self.hom_to_simples
+    accessor_methods! {
+        /// The dimension vector.
+        pub dim_vector() -> &[usize] = |this| &this.dim_vector;
+        /// The Loewy length, from [`loewy_length`].
+        pub loewy_length() -> usize = |this| this.loewy_length;
+        /// The dimension vector of `top X`.
+        pub top_dim_vector() -> &[usize] = |this| &this.top_dim_vector;
+        /// The dimension vector of `soc X`.
+        pub socle_dim_vector() -> &[usize] = |this| &this.socle_dim_vector;
+        /// `dim_Fp End(X)`.
+        pub end_dim() -> usize = |this| this.end_dim;
+        /// The residue degree of `End(X)`, from
+        /// [`IndecomposableModule::residue_degree`].
+        pub residue_degree() -> usize = |this| this.residue_degree;
+        /// `hom_dim(S_v, X)` for every vertex `v`, in vertex order.
+        pub hom_from_simples() -> &[usize] = |this| &this.hom_from_simples;
+        /// `hom_dim(X, S_v)` for every vertex `v`, in vertex order.
+        pub hom_to_simples() -> &[usize] = |this| &this.hom_to_simples;
     }
 }
 
@@ -764,6 +640,25 @@ impl PairFingerprint {
         module: &BasicDecomposition,
         projective: &ProjectiveSupport,
     ) -> Result<PairFingerprint, BasicError> {
+        Self::new_with_hom(module, projective, hom_dim)
+    }
+
+    pub(crate) fn new_with_context(
+        module: &BasicDecomposition,
+        projective: &ProjectiveSupport,
+        context: &VerificationContext,
+    ) -> Result<PairFingerprint, BasicError> {
+        Self::new_with_hom(module, projective, |source, target| {
+            context.hom_dim_for(source, target)
+        })
+    }
+
+    fn new_with_hom(
+        module: &BasicDecomposition,
+        projective: &ProjectiveSupport,
+        hom: impl Fn(&Module, &Module) -> Result<usize, HomError>,
+    ) -> Result<PairFingerprint, BasicError> {
+        hit(Site::PairFingerprintNew);
         let algebra = module.module().algebra();
         if !Arc::ptr_eq(algebra, projective.algebra()) {
             return Err(BasicError::DifferentAlgebras);
@@ -779,8 +674,8 @@ impl PairFingerprint {
             let mut hom_from_simples = Vec::with_capacity(simples.len());
             let mut hom_to_simples = Vec::with_capacity(simples.len());
             for simple in &simples {
-                hom_from_simples.push(hom_dim(simple, m)?);
-                hom_to_simples.push(hom_dim(m, simple)?);
+                hom_from_simples.push(hom(simple, m)?);
+                hom_to_simples.push(hom(m, simple)?);
             }
             summands.push(SummandFingerprint {
                 dim_vector: m.dim_vector().to_vec(),
@@ -800,17 +695,33 @@ impl PairFingerprint {
         })
     }
 
-    /// The projective support the fingerprint was keyed on.
-    #[inline]
-    pub fn projective_support(&self) -> &[u32] {
-        &self.projective_support
+    accessor_methods! {
+        /// The projective support the fingerprint was keyed on.
+        pub projective_support() -> &[u32] = |this| &this.projective_support;
+        /// The per-summand records, sorted.
+        pub summands() -> &[SummandFingerprint] = |this| &this.summands;
     }
+}
 
-    /// The per-summand records, sorted.
-    #[inline]
-    pub fn summands(&self) -> &[SummandFingerprint] {
-        &self.summands
-    }
+/// Fingerprints items, then certifies every fingerprint collision.
+pub(crate) fn pairwise_distinct_by<T, F>(
+    items: &[T],
+    mut fingerprint: impl FnMut(&T) -> Option<F>,
+    mut distinct: impl FnMut(&T, &T) -> bool,
+) -> bool
+where
+    F: PartialEq,
+{
+    let_or_false!(
+        Some(fingerprints) = items
+            .iter()
+            .map(&mut fingerprint)
+            .collect::<Option<Vec<F>>>()
+    );
+    (0..items.len()).all(|i| {
+        (i + 1..items.len())
+            .all(|j| fingerprints[i] != fingerprints[j] || distinct(&items[i], &items[j]))
+    })
 }
 
 /// One summand of a module together with the summand of `T` it matches.
@@ -821,32 +732,37 @@ pub struct AddMatch {
     backward: Morphism,
 }
 
-impl fmt::Debug for AddMatch {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AddMatch")
-            .field("target_index", &self.target_index)
-            .finish()
+debug_fields!(AddMatch |this| {
+    "target_index" => this.target_index;
+});
+
+impl AddMatch {
+    accessor_methods! {
+        /// Index of the matched summand of `T`.
+        pub target_index() -> usize = |this| this.target_index;
+        /// The isomorphism from the module summand to the summand of `T`.
+        pub forward() -> &Morphism = |this| &this.forward;
+        /// The inverse of [`AddMatch::forward`].
+        pub backward() -> &Morphism = |this| &this.backward;
     }
 }
 
-impl AddMatch {
-    /// Index of the matched summand of `T`.
-    #[inline]
-    pub fn target_index(&self) -> usize {
-        self.target_index
+/// The first certified match for `x`, with its checked inverse.
+fn certified_match<'a>(
+    x: &IndecomposableModule,
+    candidates: impl IntoIterator<Item = (usize, &'a IndecomposableModule)>,
+) -> Result<Option<AddMatch>, BasicError> {
+    for (target_index, y) in candidates {
+        if let Some(forward) = indecomposable_iso(x.module(), y.module(), x.endo()) {
+            let backward = inverse_morphism(&forward).ok_or_else(defect_non_invertible)?;
+            return Ok(Some(AddMatch {
+                target_index,
+                forward,
+                backward,
+            }));
+        }
     }
-
-    /// The isomorphism from the module summand to the summand of `T`.
-    #[inline]
-    pub fn forward(&self) -> &Morphism {
-        &self.forward
-    }
-
-    /// The inverse of [`AddMatch::forward`].
-    #[inline]
-    pub fn backward(&self) -> &Morphism {
-        &self.backward
-    }
+    Ok(None)
 }
 
 /// A proof that a module lies in `add(T)`.
@@ -856,10 +772,8 @@ impl AddMatch {
 /// module is isomorphic to a summand of `T`, so the module is a direct sum of
 /// copies of summands of `T`.
 ///
-/// The summands are stored as [`Module`] values rather than as
-/// [`IndecomposableModule`] values, because [`IndecomposableModule`] is not
-/// [`Clone`]. The indecomposability certificates stay with the
-/// [`BasicDecomposition`] inputs the caller holds.
+/// The summands are stored as [`Module`] values. The indecomposability
+/// certificates stay with the [`BasicDecomposition`] inputs the caller holds.
 #[derive(Clone)]
 pub struct AddClosureWitness {
     module: Module,
@@ -869,15 +783,11 @@ pub struct AddClosureWitness {
     matches: Vec<AddMatch>,
 }
 
-impl fmt::Debug for AddClosureWitness {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AddClosureWitness")
-            .field("dim_vector", &self.module.dim_vector())
-            .field("target_dim_vector", &self.target.dim_vector())
-            .field("matches", &self.matches.len())
-            .finish()
-    }
-}
+debug_fields!(AddClosureWitness |this| {
+    "dim_vector" => this.module.dim_vector();
+    "target_dim_vector" => this.target.dim_vector();
+    "matches" => this.matches.len();
+});
 
 // Matches each certified summand against a summand of `t`. `Ok(None)` means
 // one summand matched nothing, so the module is outside add(T). Summands of
@@ -888,30 +798,31 @@ fn match_summands(
 ) -> Result<Option<Vec<AddMatch>>, BasicError> {
     let mut matches = Vec::with_capacity(summands.len());
     for x in summands {
-        let mut matched = None;
-        for (j, y) in t.summands().iter().enumerate() {
-            if let Some(f) = indecomposable_iso(x.module(), y.module(), x.endo()) {
-                matched = Some((j, f));
-                break;
-            }
-        }
-        let Some((target_index, forward)) = matched else {
+        let Some(matched) = certified_match(x, t.summands().iter().enumerate())? else {
             return Ok(None);
         };
-        let Some(backward) = inverse_of(&forward) else {
-            return Err(defect_non_invertible());
-        };
-        matches.push(AddMatch {
-            target_index,
-            forward,
-            backward,
-        });
+        matches.push(matched);
     }
     Ok(Some(matches))
 }
 
-fn target_summand_modules(t: &BasicDecomposition) -> Vec<Module> {
-    t.summands().iter().map(|y| y.module().clone()).collect()
+fn summand_modules(summands: &[IndecomposableModule]) -> Vec<Module> {
+    summands.iter().map(|x| x.module().clone()).collect()
+}
+
+fn add_closure_witness(
+    module: Module,
+    summands: &[IndecomposableModule],
+    target: &BasicDecomposition,
+    matches: Vec<AddMatch>,
+) -> AddClosureWitness {
+    AddClosureWitness {
+        module,
+        summands: summand_modules(summands),
+        target: target.module().clone(),
+        target_summands: summand_modules(target.summands()),
+        matches,
+    }
 }
 
 impl AddClosureWitness {
@@ -933,17 +844,12 @@ impl AddClosureWitness {
         let Some(matches) = match_summands(m.summands(), t)? else {
             return Ok(None);
         };
-        Ok(Some(AddClosureWitness {
-            module: m.module().clone(),
-            summands: m
-                .summands()
-                .iter()
-                .map(|x| x.module().clone())
-                .collect::<Vec<Module>>(),
-            target: t.module().clone(),
-            target_summands: target_summand_modules(t),
+        Ok(Some(add_closure_witness(
+            m.module().clone(),
+            m.summands(),
+            t,
             matches,
-        }))
+        )))
     }
 
     /// Places any module in `add(T)`, with multiplicities.
@@ -981,75 +887,37 @@ impl AddClosureWitness {
         let Some(matches) = match_summands(&summands, t)? else {
             return Ok(None);
         };
-        Ok(Some(AddClosureWitness {
-            module: m.clone(),
-            summands: summands
-                .iter()
-                .map(|x| x.module().clone())
-                .collect::<Vec<Module>>(),
-            target: t.module().clone(),
-            target_summands: target_summand_modules(t),
-            matches,
-        }))
+        Ok(Some(add_closure_witness(m.clone(), &summands, t, matches)))
     }
 
-    /// The module placed in `add(T)`.
-    #[inline]
-    pub fn module(&self) -> &Module {
-        &self.module
-    }
-
-    /// The indecomposable summands of the module, in decomposition order.
-    #[inline]
-    pub fn summands(&self) -> &[Module] {
-        &self.summands
-    }
-
-    /// `T` itself.
-    #[inline]
-    pub fn target(&self) -> &Module {
-        &self.target
-    }
-
-    /// The indecomposable summands of `T`, in decomposition order.
-    #[inline]
-    pub fn target_summands(&self) -> &[Module] {
-        &self.target_summands
-    }
-
-    /// One match per summand of the module, in summand order.
-    #[inline]
-    pub fn matches(&self) -> &[AddMatch] {
-        &self.matches
+    accessor_methods! {
+        /// The module placed in `add(T)`.
+        pub module() -> &Module = |this| &this.module;
+        /// The indecomposable summands of the module, in decomposition order.
+        pub summands() -> &[Module] = |this| &this.summands;
+        /// `T` itself.
+        pub target() -> &Module = |this| &this.target;
+        /// The indecomposable summands of `T`, in decomposition order.
+        pub target_summands() -> &[Module] = |this| &this.target_summands;
+        /// One match per summand of the module, in summand order.
+        pub matches() -> &[AddMatch] = |this| &this.matches;
     }
 
     /// Rechecks the witness: one match per summand, endpoints as recorded,
     /// and each pair of stored maps multiplies to the identity in both
     /// orders.
     pub fn verify(&self) -> bool {
-        if self.matches.len() != self.summands.len() {
-            return false;
-        }
+        hit(Site::AddClosureWitnessVerify);
+        verify_guard!(self.matches.len() == self.summands.len());
         for (x, entry) in self.summands.iter().zip(&self.matches) {
-            let Some(y) = self.target_summands.get(entry.target_index) else {
-                return false;
-            };
-            if !entry.forward.source().ptr_eq(x)
-                || !entry.forward.target().ptr_eq(y)
-                || !entry.backward.source().ptr_eq(y)
-                || !entry.backward.target().ptr_eq(x)
-            {
-                return false;
-            }
-            let (Ok(round), Ok(round_back)) = (
-                entry.forward.then(&entry.backward),
-                entry.backward.then(&entry.forward),
-            ) else {
-                return false;
-            };
-            if round != identity(x) || round_back != identity(y) {
-                return false;
-            }
+            let_or_false!(Some(y) = self.target_summands.get(entry.target_index));
+            verify_guard!(
+                entry.forward.source().ptr_eq(x)
+                    && entry.forward.target().ptr_eq(y)
+                    && entry.backward.source().ptr_eq(y)
+                    && entry.backward.target().ptr_eq(x)
+            );
+            verify_guard!(mutually_inverse(&entry.forward, &entry.backward));
         }
         true
     }
@@ -1063,6 +931,7 @@ mod tests {
     use crate::dynkin::{DynkinType, dynkin_quiver};
     use crate::field::PrimeField;
     use crate::linalg::DenseMat;
+    use crate::module::direct_sum;
     use crate::quiver::{ArrowId, Quiver};
     use crate::supporttau::enumerate_over_catalog;
 

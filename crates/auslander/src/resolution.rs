@@ -13,8 +13,9 @@
 use crate::field::Fp;
 use crate::hom::{Morphism, kernel, zero_morphism};
 use crate::linalg::DenseMat;
-use crate::module::{Module, direct_sum};
+use crate::module::{Module, direct_sum, same_morphism_data, same_representation, same_slice};
 use crate::opposite::ElementMatrix;
+use crate::profile::{Site, hit};
 use crate::radical::top;
 
 /// How a computed resolution prefix ends.
@@ -53,6 +54,16 @@ pub struct ProjectiveResolution {
     pub maps: Vec<Morphism>,
     pub augmentation: Morphism,
     pub end: ResolutionEnd,
+}
+
+impl ProjectiveResolution {
+    /// Whether two resolution prefixes have the same end, terms, and maps.
+    pub(crate) fn agrees_with(&self, other: &ProjectiveResolution) -> bool {
+        self.end == other.end
+            && same_slice(&self.terms, &other.terms, same_representation)
+            && same_slice(&self.maps, &other.maps, same_morphism_data)
+            && same_morphism_data(&self.augmentation, &other.augmentation)
+    }
 }
 
 /// The projective cover `P = ⊕_v P_v^{dim (top M)_v} ↠ M`.
@@ -107,7 +118,6 @@ pub fn projective_cover(m: &Module) -> (Module, Morphism) {
     for (v, lift) in &generators {
         for w in 0..n {
             for &b in algebra.paths_between(*v, w) {
-                // Row for basis path p: v → w of this summand is lift · M(p).
                 let row = m
                     .word_action(&algebra.basis()[b])
                     .expect("algebra basis words are valid in their own quiver")
@@ -184,16 +194,14 @@ pub fn resolve(m: &Module, steps: usize) -> ProjectiveResolution {
 /// is infinite. Convention: the zero module is projective (the empty sum), so
 /// `pd 0 = Exact(0)`.
 pub fn projective_dimension(m: &Module, bound: usize) -> Bounded<usize> {
-    match resolve(m, bound) {
-        ProjectiveResolution {
-            end: ResolutionEnd::Finite,
-            terms,
-            ..
-        } => Bounded::Exact(terms.len() - 1),
-        ProjectiveResolution {
-            end: ResolutionEnd::Cut { at },
-            ..
-        } => Bounded::AtLeast(at + 1),
+    let resolution = resolve(m, bound);
+    bounded_dimension(resolution.end, resolution.terms.len())
+}
+
+pub(crate) fn bounded_dimension(end: ResolutionEnd, terms: usize) -> Bounded<usize> {
+    match end {
+        ResolutionEnd::Finite => Bounded::Exact(terms - 1),
+        ResolutionEnd::Cut { at } => Bounded::AtLeast(at + 1),
     }
 }
 
@@ -206,6 +214,7 @@ pub fn projective_dimension(m: &Module, bound: usize) -> Bounded<usize> {
 /// multiplication is the `(k, l)` component of `d_1`. A projective `m` has no source
 /// summands.
 pub fn minimal_presentation_matrix(m: &Module) -> ElementMatrix {
+    hit(Site::MinimalPresentation);
     let resolution = resolve(m, 1);
     let targets = cover_summands(m);
     match resolution.maps.first() {
@@ -225,13 +234,9 @@ pub fn minimal_presentation_matrix(m: &Module) -> ElementMatrix {
 /// summand vertices of the cover of `m`.
 fn cover_summands(m: &Module) -> Vec<u32> {
     let (top_m, _) = top(m);
-    let mut vertices = Vec::new();
-    for v in 0..m.algebra().quiver().num_vertices() {
-        for _ in 0..top_m.dim_at(v) {
-            vertices.push(v);
-        }
-    }
-    vertices
+    (0..m.algebra().quiver().num_vertices())
+        .flat_map(|v| std::iter::repeat_n(v, top_m.dim_at(v)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -305,7 +310,7 @@ mod tests {
         }
     }
 
-    // Over kA_3/(ab) with arrows a: 0 → 1, b: 1 → 2 (right modules): P_0 = e_0 A has
+    // Over kA_3/(ab) with arrows a: 0 → 1, b: 1 → 2: P_0 = e_0 A has
     // basis {e_0, a}, so rad P_0 = S_1; the cover of S_1 is P_1 with rad P_1 = S_2 =
     // P_2. Hence 0 → P_2 → P_1 → P_0 → S_0 → 0 and pd S_0 = 2.
     #[test]

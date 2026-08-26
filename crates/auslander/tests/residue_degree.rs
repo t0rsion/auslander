@@ -45,17 +45,6 @@
 //! path. The two walk tests below are that statement in executable form, and
 //! one of them runs over an algebra whose module category does hold a `d = 2`
 //! brick.
-//!
-//! Tier: everything here is always-on. Measured on this branch in the dev
-//! profile (`opt-level = 2`) on the development host, `--test-threads=1`:
-//!
-//! ```text
-//! the whole binary        0.07 s to 0.11 s over three runs
-//! ```
-//!
-//! A range, not a median, because the host runs other work. The per-test
-//! breakdown that once stood here is not restated: it was measured before the
-//! closure gate landed, and a stale number reads as a current one.
 
 use std::sync::Arc;
 

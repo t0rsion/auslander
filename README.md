@@ -11,6 +11,34 @@ Scope: finite-dimensional basic algebras kQ/I over a checked prime field, where
 I is a general admissible ideal, and finite-dimensional right modules. Correct
 before general.
 
+## Install
+
+Install the Rust crate from crates.io:
+
+```sh
+cargo add auslander
+```
+
+Install the Python package from PyPI:
+
+```sh
+python -m pip install auslander
+```
+
+## First result
+
+Named constructors build common algebras. This example computes the dimension
+and Cartan matrix of the three-arrow Kronecker algebra over F_5:
+
+```rust
+use auslander::algebra::kronecker;
+use auslander::field::PrimeField;
+
+let algebra = kronecker(3, PrimeField::new(5).unwrap());
+assert_eq!(algebra.dim(), 5);
+assert_eq!(algebra.cartan_matrix(), vec![vec![1, 3], vec![0, 1]]);
+```
+
 A relation is a k-combination of paths of length at least 2 that all share one
 source and one target. `ab - cd` is a relation, and so is the inhomogeneous
 `ab - cde`. A monomial ideal is the case where every relation has one term.
@@ -24,7 +52,7 @@ whole claim.
 The verifier checks both ideal inclusions: each basis element expands to a
 two-sided combination of the input relations, and each input relation reduces to
 zero over the basis. It re-enumerates every overlap and inclusion ambiguity
-itself, and rejects a missing entry and an extra one alike. Every reduction
+itself, and rejects a missing entry and an extra one. Every reduction
 trace replays to zero in strict order descent. The verifier rebuilds the
 normal-word automaton from the leading words with its own construction and
 requires the certificate's automaton to match. It decides finiteness by
@@ -63,16 +91,16 @@ Partial computations say so in their types: `projective_dimension` returns
 `ResolutionEnd::Finite` or `ResolutionEnd::Cut { at }`, and no
 `None`-means-infinite convention exists anywhere.
 
-Answers that are harder to certify follow the same discipline. Decomposition,
-isomorphism, and indecomposability each return a machine-checkable witness or an
-explicit statement that no witness was found. None of them returns a bare yes.
+Decomposition, isomorphism, and indecomposability each return a
+machine-checkable witness or an explicit statement that no witness was found.
+None of them returns a bare yes.
 
-The Auslander-Reiten layer carries the same discipline in its types. Every
-object holds a recheckable witness. A short exact sequence exists only after
-per-vertex exactness checks. Split status comes with a retraction and a section,
-or with a dual vector proving the retraction system unsolvable. A Yoneda product
-can return the chain lifts that computed it. Almost-split status is never a bare
-flag: `almost_split` gates its result behind an explicit `AlmostSplitWitness`,
+Every Auslander-Reiten object holds a recheckable witness. A short exact
+sequence exists only after per-vertex exactness checks. Split status comes
+with a retraction and a section, or with a dual vector proving the
+retraction system unsolvable. A Yoneda product can return the chain lifts
+that computed it. Almost-split status is never a bare flag:
+`almost_split` gates its result behind an explicit `AlmostSplitWitness`,
 and `verify` rechecks every gate from the stored data and the live modules.
 
 Enumeration carries a certificate rather than an assertion. A support
@@ -81,6 +109,15 @@ crate can build. A complete list of them exists only as a
 `ClosedSupportTauTiltingGraph`, built past a closure witness that rechecks
 every vertex and every slot. A walk that stops early keeps its certified part
 and claims nothing about completeness.
+
+Higher homological claims pass through checked finite complexes.
+`CheckedComplex` rejects a bad endpoint or nonzero consecutive composite, then
+returns either `ExactComplex` or the first `NonExactWitness`. The relative
+normalized bar construction computes Hochschild cohomology under four explicit
+ceilings. A cut retains only finished degrees and names its first rejected
+reservation. Classical tilting classification uses the same exact complex for
+the generation condition. It distinguishes a positive self-extension from a
+projective-dimension or generation bound that leaves the question open.
 
 ## Contents
 
@@ -116,6 +153,22 @@ Homological algebra:
 - Minimal injective coresolutions via injective envelopes, and injective
   dimension. These are the k-duals of the projective constructions over `A^op`
   and carry the same typed partiality.
+- `CheckedComplex`: nonempty finite complexes in display order, with checked
+  endpoints and zero composites. `exactness` returns `ExactComplex` or the
+  first `NonExactWitness`, whose homology dimension vector rechecks from the
+  stored maps. A finite `ProjectiveResolution` converts to an exact complex;
+  a cut stays typed.
+- `bar_hochschild`: relative normalized bar Hochschild cohomology through a
+  requested degree. `BarLimits` bounds tensor tuples, cochain dimensions,
+  retained matrix entries plus scratch, and deterministic work. A complete
+  result stores deterministic cocycle, coboundary, and complement bases. An
+  incomplete result stores only the exact prefix and `BarBudgetDiagnostics`.
+- `ClassicalTiltingModule::classify`: classical tilting in any finite
+  projective dimension reached by the caller's bound. Success stores the
+  complete minimal resolution, zero positive self-Ext spaces, an exact
+  `A -> T^0 -> ... -> T^n` generation complex, and one `AddClosureWitness` per
+  generated term. A positive self-extension is `NotTilting`. A bound or
+  blocked bounded generation route is `Undetermined`.
 
 Duality and the Auslander-Reiten translate:
 
@@ -248,6 +301,9 @@ so.
 | `resolve`, `coresolve` | the prefix, exact and minimal | `ResolutionEnd::Cut { at }` | no |
 | `projective_dimension`, `global_dimension`, `injective_dimension` | `Bounded::Exact` | `Bounded::AtLeast` | no |
 | `hom_dim`, `ext_dim`, `ext_table` | yes, Ext in every degree | no | no |
+| `CheckedComplex::exactness` | `ExactComplex`, or the first `NonExactWitness` with exact homology dimensions | no | no |
+| `bar_hochschild` | `Complete` through the requested degree | `Cut` with the exact completed prefix and first rejected reservation | no |
+| `ClassicalTiltingModule::classify` | `Tilting` with all three conditions, or `NotTilting` with a positive self-extension | projective dimension and generation have independent caller bounds | yes: `Undetermined` carries the bound or generation blocker |
 | `injective_envelope`, `injective` | yes | no | no |
 | `opposite`, `dual`, `nu_of_presentation_map` | yes | no | no |
 | `tau` | the translate, zero exactly on projectives, both routes cross-checked | no | yes: `TauError::AgreementUnknown` |
@@ -278,7 +334,8 @@ they inherit the same failure modes.
   spaces exist only behind an `IndecomposableCatalog`, and a catalog wraps a
   classification theorem; a plain module list never becomes one. Almost-split
   sequences through the AR-duality route run on any supported algebra.
-- Chain complexes and Hochschild cohomology, and derived categories.
+- Infinite complexes, derived categories, Hochschild cup products,
+  Gerstenhaber brackets, and arbitrary coefficient bimodules.
 - User-defined admissible orders and one-sided Groebner bases. The order is
   sealed.
 - Characteristic 0.
@@ -288,7 +345,7 @@ they inherit the same failure modes.
 
 ## Conventions
 
-Fixed crate-wide and documented on the types:
+Fixed crate-wide, and documented on the types:
 
 - Paths compose left to right: the word `a·b` means "first `a`, then `b`" and
   requires `target(a) == source(b)`.
@@ -327,8 +384,8 @@ Fixed crate-wide and documented on the types:
 
 ## Quick start
 
-The commutative square `kQ/(ab - cd)`, end to end: build it from a relation,
-resolve a simple module, and compute the translate.
+The commutative square `kQ/(ab - cd)`: build it from a relation, resolve a
+simple module, and compute the translate.
 
 ```rust
 use auslander::algebra::Algebra;
@@ -388,6 +445,27 @@ let s2 = Module::simple(&algebra, 2);
 // [dim Ext^0, ..., dim Ext^4]: the relation from 0 to 2 sits in Ext^2.
 assert_eq!(ext_table(&s0, &s2, 4).unwrap(), vec![0, 0, 1, 0, 0]);
 ```
+
+The `v06` example converts the projective resolution of `S_0` over
+`kA_3/(ab)` into an `ExactComplex`, computes
+`HH^0..HH^2(k[x]/(x^3)) = (3, 2, 2)`, checks a zero-work bar cut, and certifies
+`D(A)` as a classical tilting module of projective dimension two over F_2 and
+F_5:
+
+```sh
+cargo run -p auslander --example v06
+```
+
+The tilting certificate stores this exact generation complex:
+
+```text
+[1, 2, 2] -> [1, 3, 2] -> [1, 1, 0] -> [1, 0, 0]
+```
+
+See [`crates/auslander/examples/v06.rs`](crates/auslander/examples/v06.rs) for
+the complete Rust code. The Python acceptance path is
+`test_v06_acceptance_path` in
+[`crates/auslander-py/tests/test_v06.py`](crates/auslander-py/tests/test_v06.py).
 
 Decomposing a module and reading the certificates:
 
@@ -449,8 +527,8 @@ Every value in the first one is pinned by
 
 ## Python
 
-Python bindings live in `crates/auslander-py`; the PyPI package is `auslander`.
-With [maturin](https://www.maturin.rs/) installed:
+Bindings live in `crates/auslander-py`; the PyPI package is `auslander`.
+For a source build, install [maturin](https://www.maturin.rs/) and run:
 
 ```sh
 cd crates/auslander-py
@@ -462,14 +540,15 @@ The Python surface covers general relations
 (`Algebra.from_relations(quiver, relations, field)`), the certificate workflow
 (`algebra.certificate_json()` and `Algebra.from_certificate(json)`), the
 witnessed AR layer (`ext_space`, `extension`, `almost_split`,
-`category_radical`, `ar_quiver`), and the same decision surface as the Rust
-crate. See `crates/auslander-py/README.md`.
+`category_radical`, `ar_quiver`), checked finite complexes, budgeted Hochschild
+cohomology, classical tilting, and the same decision surface as the Rust crate.
+See `crates/auslander-py/README.md`.
 
 ## Building and testing
 
 MSRV 1.88; development is pinned to Rust 1.92 via `rust-toolchain.toml`:
 
-```
+```sh
 cargo test
 ```
 

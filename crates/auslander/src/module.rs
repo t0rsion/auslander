@@ -1,20 +1,19 @@
-//! Finite-dimensional right modules over an [`Algebra`].
+//! Finite-dimensional modules over an [`Algebra`].
 //!
-//! A module assigns to each vertex `v` the row-vector space `k^{dims[v]}`, and to each
-//! arrow `a` a `dims[source(a)] × dims[target(a)]` matrix. A path acts by the product
-//! of its arrow matrices in word order, so `M(p·q) = M(p) M(q)` under the left-to-right
-//! convention of [`crate::quiver`]. The field comes from the algebra.
+//! A module assigns to each vertex `v` the space `k^{dims[v]}`, and to each
+//! arrow `a` a `dims[source(a)] × dims[target(a)]` matrix. A path acts by the
+//! product of its arrow matrices in word order.
 //!
-//! [`Module::new`] checks that every relation of the reduced Groebner basis acts as the
-//! zero matrix. That covers the whole ideal, because the action of `u·r·v` factors
-//! through the matrix of `r`. A `Module` value is therefore always a `kQ/I`-module.
+//! [`Module::new`] checks that every relation of the reduced Groebner basis
+//! acts as the zero matrix. That covers the whole ideal: the action of
+//! `u·r·v` factors through the matrix of `r`. A `Module` is always a
+//! `kQ/I`-module.
 
-use std::fmt;
 use std::sync::Arc;
 
 use crate::algebra::{Algebra, BasisIdx};
 use crate::field::{Fp, PrimeField};
-use crate::hom::Morphism;
+use crate::hom::{Morphism, matrix_is_zero};
 use crate::linalg::DenseMat;
 use crate::profile::{Site, hit};
 use crate::quiver::{ArrowId, PathWord, QuiverError};
@@ -32,9 +31,7 @@ pub enum ModuleError {
         expected: (usize, usize),
         got: (usize, usize),
     },
-    /// `maps[arrow]` holds an entry at `(row, col)` whose representative is not
-    /// canonical for the algebra's field, meaning it is not below the modulus.
-    /// Such an entry comes from arithmetic over some other field.
+    /// `maps[arrow]` has an entry at `(row, col)` not below the field modulus.
     NonCanonicalEntry {
         arrow: ArrowId,
         row: usize,
@@ -45,45 +42,20 @@ pub enum ModuleError {
     RelationActsNonzero { index: usize },
 }
 
-impl fmt::Display for ModuleError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::DimsLengthMismatch { expected, got } => {
-                write!(f, "dims has {got} entries, quiver has {expected} vertices")
-            }
-            Self::MapCountMismatch { expected, got } => {
-                write!(f, "maps has {got} matrices, quiver has {expected} arrows")
-            }
-            Self::MapShapeMismatch {
-                arrow,
-                expected,
-                got,
-            } => write!(
-                f,
-                "map for arrow {} is {}x{}, expected {}x{}",
-                arrow.0, got.0, got.1, expected.0, expected.1
-            ),
-            Self::NonCanonicalEntry { arrow, row, col } => write!(
-                f,
-                "map for arrow {} has a non-canonical entry at ({row}, {col}) for the algebra's field",
-                arrow.0
-            ),
-            Self::RelationActsNonzero { index } => {
-                write!(f, "relation {index} acts as a nonzero matrix")
-            }
-        }
-    }
-}
+display_error! { error ModuleError {
+    Self::DimsLengthMismatch { expected, got } => "dims has {got} entries, quiver has {expected} vertices";
+    Self::MapCountMismatch { expected, got } => "maps has {got} matrices, quiver has {expected} arrows";
+    Self::MapShapeMismatch { arrow, expected, got } => "map for arrow {} is {}x{}, expected {}x{}", arrow.0, got.0, got.1, expected.0, expected.1;
+    Self::NonCanonicalEntry { arrow, row, col } => "map for arrow {} has a non-canonical entry at ({row}, {col}) for the algebra's field", arrow.0;
+    Self::RelationActsNonzero { index } => "relation {index} acts as a nonzero matrix";
+} }
 
-impl std::error::Error for ModuleError {}
-
-/// A finite-dimensional right `kQ/I`-module, validated at construction.
+/// A finite-dimensional `kQ/I`-module, validated at construction.
 ///
-/// Identity is nominal, matching the algebra [`Arc`] policy. Clones share the
-/// underlying representation and compare equal under [`Module::ptr_eq`]. Two
-/// modules constructed separately stay distinct even when entrywise identical.
-/// Morphism endpoints use this identity; there is no structural equality.
-/// Cloning is a reference count bump.
+/// Identity is nominal, matching the algebra [`Arc`] policy. Clones share one
+/// representation and compare equal under [`Module::ptr_eq`]. Two modules built
+/// separately stay distinct even when entrywise identical. Morphism endpoints
+/// use this identity.
 #[derive(Clone, Debug)]
 pub struct Module(Arc<ModuleInner>);
 
@@ -91,12 +63,67 @@ pub struct Module(Arc<ModuleInner>);
 struct ModuleInner {
     algebra: Arc<Algebra>,
     dims: Vec<usize>,
-    // One matrix per arrow, dims[source] × dims[target], acting on row vectors.
+    // One matrix per arrow, dims[source] × dims[target].
     maps: Vec<DenseMat>,
 }
 
-fn is_zero_mat(m: &DenseMat) -> bool {
-    (0..m.rows()).all(|r| m.row(r).iter().all(|v| v.is_zero()))
+fn zero_maps(algebra: &Algebra, dims: &[usize]) -> Vec<DenseMat> {
+    let quiver = algebra.quiver();
+    (0..quiver.num_arrows())
+        .map(|i| {
+            let arrow = ArrowId(i as u32);
+            DenseMat::zero(
+                dims[quiver.source(arrow) as usize],
+                dims[quiver.target(arrow) as usize],
+            )
+        })
+        .collect()
+}
+
+fn basis_data(
+    algebra: &Arc<Algebra>,
+    vertex: u32,
+    incoming: bool,
+    kind: &str,
+) -> (Vec<usize>, Vec<usize>) {
+    let quiver = algebra.quiver();
+    assert!(
+        vertex < quiver.num_vertices(),
+        "{kind}: vertex {vertex} out of range"
+    );
+    let mut positions = vec![usize::MAX; algebra.dim()];
+    let mut dims = vec![0usize; quiver.num_vertices() as usize];
+    for w in 0..quiver.num_vertices() {
+        let component = if incoming {
+            algebra.paths_between(w, vertex)
+        } else {
+            algebra.paths_between(vertex, w)
+        };
+        dims[w as usize] = component.len();
+        for (index, &basis) in component.iter().enumerate() {
+            positions[basis] = index;
+        }
+    }
+    (dims, positions)
+}
+
+/// Whether two modules over one algebra have the same representation data.
+pub(crate) fn same_representation(a: &Module, b: &Module) -> bool {
+    Arc::ptr_eq(a.algebra(), b.algebra())
+        && a.dim_vector() == b.dim_vector()
+        && a.0.maps == b.0.maps
+}
+
+/// Whether two morphisms have the same endpoint and vertex-matrix data.
+pub(crate) fn same_morphism_data(a: &Morphism, b: &Morphism) -> bool {
+    same_representation(a.source(), b.source())
+        && same_representation(a.target(), b.target())
+        && (0..a.source().algebra().quiver().num_vertices()).all(|v| a.map_at(v) == b.map_at(v))
+}
+
+/// Whether two slices have equal length and match entry by entry.
+pub(crate) fn same_slice<T>(left: &[T], right: &[T], same: impl Fn(&T, &T) -> bool) -> bool {
+    left.len() == right.len() && left.iter().zip(right).all(|(a, b)| same(a, b))
 }
 
 impl Module {
@@ -137,14 +164,8 @@ impl Module {
                     got,
                 });
             }
-        }
-        for (i, map) in maps.iter().enumerate() {
             if let Some((row, col)) = map.first_noncanonical(&field) {
-                return Err(ModuleError::NonCanonicalEntry {
-                    arrow: ArrowId(i as u32),
-                    row,
-                    col,
-                });
+                return Err(ModuleError::NonCanonicalEntry { arrow, row, col });
             }
         }
         for (index, relation) in algebra.relations().iter().enumerate() {
@@ -157,14 +178,9 @@ impl Module {
                 for &a in word.arrows() {
                     action = action.mul(&maps[a.index()], &field);
                 }
-                for r in 0..acc.rows() {
-                    for c in 0..acc.cols() {
-                        let scaled = field.mul(*coeff, action.get(r, c));
-                        acc.set(r, c, field.add(acc.get(r, c), scaled));
-                    }
-                }
+                acc.add_scaled_assign(&action, *coeff, &field);
             }
-            if !is_zero_mat(&acc) {
+            if !matrix_is_zero(&acc) {
                 return Err(ModuleError::RelationActsNonzero { index });
             }
         }
@@ -175,30 +191,22 @@ impl Module {
         })))
     }
 
-    /// Whether `self` and `other` are the same module value (clones of one
-    /// construction), the identity used for morphism endpoints.
-    #[inline]
-    pub fn ptr_eq(&self, other: &Module) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-
-    /// The address of the shared representation, as a hash key for nominal
-    /// identity.
-    ///
-    /// Equal addresses mean [`Module::ptr_eq`], and clones share one address.
-    /// Two modules built separately never share one, even when entrywise
-    /// identical. The address is only a key while a clone stays alive: a
-    /// dropped module frees it for the next allocation, so a map keyed by it
-    /// has to hold the module too.
-    #[inline]
-    pub(crate) fn addr(&self) -> usize {
-        Arc::as_ptr(&self.0) as usize
+    accessor_methods! {
+        /// Whether `self` and `other` are clones of one construction, the
+        /// identity used for morphism endpoints.
+        pub ptr_eq(other: &Module) -> bool = |this| Arc::ptr_eq(&this.0, &other.0);
+        /// Address of the shared representation, a hash key for nominal identity.
+        ///
+        /// Equal addresses mean [`Module::ptr_eq`]. The address is valid only
+        /// while a clone stays alive: dropping the last clone frees it for the
+        /// next allocation, so a map keyed by it has to hold the module too.
+        pub(crate) addr() -> usize = |this| Arc::as_ptr(&this.0) as usize;
     }
 
     /// The zero module.
     pub fn zero(algebra: &Arc<Algebra>) -> Module {
         let dims = vec![0; algebra.quiver().num_vertices() as usize];
-        let maps = vec![DenseMat::zero(0, 0); algebra.quiver().num_arrows()];
+        let maps = zero_maps(algebra, &dims);
         Module::new(algebra.clone(), dims, maps).expect("the zero module is a module")
     }
 
@@ -213,15 +221,7 @@ impl Module {
         let dims: Vec<usize> = (0..quiver.num_vertices())
             .map(|w| usize::from(w == v))
             .collect();
-        let maps = (0..quiver.num_arrows())
-            .map(|i| {
-                let a = ArrowId(i as u32);
-                DenseMat::zero(
-                    dims[quiver.source(a) as usize],
-                    dims[quiver.target(a) as usize],
-                )
-            })
-            .collect();
+        let maps = zero_maps(algebra, &dims);
         Module::new(algebra.clone(), dims, maps).expect("S_v is a module")
     }
 
@@ -234,20 +234,7 @@ impl Module {
     pub fn projective(algebra: &Arc<Algebra>, v: u32) -> Module {
         hit(Site::ModuleProjective);
         let quiver = algebra.quiver();
-        assert!(
-            v < quiver.num_vertices(),
-            "projective: vertex {v} out of range"
-        );
-        // pos[b] = position of basis word b inside its component's ordered basis.
-        let mut pos = vec![usize::MAX; algebra.dim()];
-        let mut dims = vec![0usize; quiver.num_vertices() as usize];
-        for w in 0..quiver.num_vertices() {
-            let component = algebra.paths_between(v, w);
-            dims[w as usize] = component.len();
-            for (i, &b) in component.iter().enumerate() {
-                pos[b] = i;
-            }
-        }
+        let (dims, pos) = basis_data(algebra, v, false, "projective");
         let maps = (0..quiver.num_arrows())
             .map(|i| {
                 let a = ArrowId(i as u32);
@@ -276,19 +263,7 @@ impl Module {
     pub fn injective(algebra: &Arc<Algebra>, v: u32) -> Module {
         hit(Site::ModuleInjective);
         let quiver = algebra.quiver();
-        assert!(
-            v < quiver.num_vertices(),
-            "injective: vertex {v} out of range"
-        );
-        let mut pos = vec![usize::MAX; algebra.dim()];
-        let mut dims = vec![0usize; quiver.num_vertices() as usize];
-        for w in 0..quiver.num_vertices() {
-            let component = algebra.paths_between(w, v);
-            dims[w as usize] = component.len();
-            for (i, &b) in component.iter().enumerate() {
-                pos[b] = i;
-            }
-        }
+        let (dims, pos) = basis_data(algebra, v, true, "injective");
         let maps = (0..quiver.num_arrows())
             .map(|i| {
                 let a = ArrowId(i as u32);
@@ -305,55 +280,32 @@ impl Module {
         Module::new(algebra.clone(), dims, maps).expect("I_v is a module")
     }
 
-    /// The algebra the module lives over.
-    #[inline]
-    pub fn algebra(&self) -> &Arc<Algebra> {
-        &self.0.algebra
+    accessor_methods! {
+        /// The algebra the module lives over.
+        pub algebra() -> &Arc<Algebra> = |this| &this.0.algebra;
+        /// The algebra's field.
+        pub field() -> PrimeField = |this| this.0.algebra.field();
+        /// The dimension vector, indexed by vertex.
+        pub dim_vector() -> &[usize] = |this| &this.0.dims;
+        /// `dim_k M_v`.
+        ///
+        /// # Panics
+        /// Panics if `v` is not a vertex of the algebra's quiver.
+        pub dim_at(v: u32) -> usize = |this| this.0.dims[v as usize];
+        /// `dim_k M`.
+        pub total_dim() -> usize = |this| this.0.dims.iter().sum();
+        /// Whether every vertex dimension is zero.
+        pub is_zero() -> bool = |this| this.0.dims.iter().all(|&d| d == 0);
+        /// The matrix of `a`, `dims[source] × dims[target]`.
+        ///
+        /// # Panics
+        /// Panics if `a` is not an arrow of the algebra's quiver.
+        pub map(a: ArrowId) -> &DenseMat = |this| &this.0.maps[a.index()];
     }
 
-    /// The algebra's field.
-    #[inline]
-    pub fn field(&self) -> PrimeField {
-        self.0.algebra.field()
-    }
-
-    /// The dimension vector, indexed by vertex.
-    #[inline]
-    pub fn dim_vector(&self) -> &[usize] {
-        &self.0.dims
-    }
-
-    /// `dim_k M_v`.
-    ///
-    /// # Panics
-    /// Panics if `v` is not a vertex of the algebra's quiver.
-    #[inline]
-    pub fn dim_at(&self, v: u32) -> usize {
-        self.0.dims[v as usize]
-    }
-
-    /// `dim_k M`.
-    pub fn total_dim(&self) -> usize {
-        self.0.dims.iter().sum()
-    }
-
-    /// Whether every vertex dimension is zero.
-    pub fn is_zero(&self) -> bool {
-        self.0.dims.iter().all(|&d| d == 0)
-    }
-
-    /// The matrix of `a` acting on row vectors, `dims[source] × dims[target]`.
-    ///
-    /// # Panics
-    /// Panics if `a` is not an arrow of the algebra's quiver.
-    #[inline]
-    pub fn map(&self, a: ArrowId) -> &DenseMat {
-        &self.0.maps[a.index()]
-    }
-
-    /// The matrix of `word` acting on row vectors: the identity for a trivial path,
-    /// otherwise the product of the arrow matrices in word order. Errors when
-    /// `word` is not a path of this algebra's quiver (see [`PathWord::validate_in`]).
+    /// The matrix of `word`: the identity for a trivial path, otherwise the
+    /// product of the arrow matrices in word order. Errors when `word` is not a
+    /// path of this algebra's quiver (see [`PathWord::validate_in`]).
     pub fn word_action(&self, word: &PathWord) -> Result<DenseMat, QuiverError> {
         hit(Site::WordAction);
         word.validate_in(self.0.algebra.quiver())?;
@@ -365,9 +317,8 @@ impl Module {
         Ok(acc)
     }
 
-    /// The matrix of the uniform element `Σ c_i · basis[i]` acting on row
-    /// vectors, `dims[u] × dims[v]` for the shared source `u` and target `v`
-    /// of the named basis words.
+    /// The matrix of the uniform element `Σ c_i · basis[i]`, `dims[u] × dims[v]`
+    /// for the shared source `u` and target `v` of the named basis words.
     ///
     /// # Panics
     /// Panics when `terms` is empty, names a basis index out of range, or
@@ -389,12 +340,7 @@ impl Module {
             let action = self
                 .word_action(word)
                 .expect("algebra basis words are valid in their own quiver");
-            for r in 0..acc.rows() {
-                for c in 0..acc.cols() {
-                    let scaled = field.mul(coeff, action.get(r, c));
-                    acc.set(r, c, field.add(acc.get(r, c), scaled));
-                }
-            }
+            acc.add_scaled_assign(&action, coeff, &field);
         }
         acc
     }
@@ -411,12 +357,12 @@ pub fn direct_sum(summands: &[&Module]) -> (Module, Vec<Morphism>, Vec<Morphism>
     hit(Site::DirectSum);
     assert!(!summands.is_empty(), "direct_sum: needs a summand");
     let first = summands[0];
-    for s in &summands[1..] {
-        assert!(
-            Arc::ptr_eq(first.algebra(), s.algebra()),
-            "direct_sum: mixed algebras"
-        );
-    }
+    assert!(
+        summands[1..]
+            .iter()
+            .all(|s| Arc::ptr_eq(first.algebra(), s.algebra())),
+        "direct_sum: mixed algebras"
+    );
     let quiver = first.algebra().quiver();
     let n = quiver.num_vertices() as usize;
     let field = first.field();
@@ -468,6 +414,22 @@ pub fn direct_sum(summands: &[&Module]) -> (Module, Vec<Morphism>, Vec<Morphism>
         projections.push(Morphism::new_unchecked(&sum, s, proj));
     }
     (sum, inclusions, projections)
+}
+
+/// The ordered sum of modules built at the listed vertices, or zero when empty.
+pub(crate) fn summand_sum(
+    algebra: &Arc<Algebra>,
+    vertices: &[u32],
+    build: fn(&Arc<Algebra>, u32) -> Module,
+) -> Module {
+    match vertices {
+        [] => Module::zero(algebra),
+        [vertex] => build(algebra, *vertex),
+        _ => {
+            let parts: Vec<Module> = vertices.iter().map(|&v| build(algebra, v)).collect();
+            direct_sum(&parts.iter().collect::<Vec<_>>()).0
+        }
+    }
 }
 
 #[cfg(test)]

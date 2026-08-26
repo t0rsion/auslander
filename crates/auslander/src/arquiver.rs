@@ -21,9 +21,8 @@
 //!     f in basis rad(X, Z), g in basis rad(Z, Y) }
 //! ```
 //!
-//! The composite `f.then(g)` is first `f`, then `g`, the crate-wide
-//! left-to-right order. The sum runs over `C` in catalog order; it is a span,
-//! so the order does not change it.
+//! The sum runs over `C` in catalog order. The result is a span, so the
+//! order does not change it.
 //!
 //! Lemma: when `C` is exhaustive, this is the true `rad^2(X, Y)`. Any element
 //! of `rad^2(X, Y)` factors as `X -> M -> Y` through some module `M` with both
@@ -52,15 +51,14 @@
 //! crate offers no bare multiplicity accessor, so no caller can read one
 //! number where two are needed.
 
-use std::fmt;
 use std::sync::Arc;
 
 use crate::algebra::{Algebra, AlgebraBuildError};
-use crate::decompose::{Certificate, matrix_inverse};
+use crate::decompose::{Certificate, inverse_morphism};
 use crate::dynkin::{DynkinError, dynkin_indecomposables};
 use crate::endo::EndoAlgebra;
 use crate::enumerate::{EnumerateError, nakayama_indecomposables};
-use crate::field::{Fp, PrimeField};
+use crate::field::{Fp, unit_vector};
 use crate::hom::{HomError, Morphism};
 use crate::homspace::{HomQuotient, HomSpace, HomSpaceError, HomSubspace};
 use crate::indec::IndecomposableModule;
@@ -111,59 +109,19 @@ pub enum ArQuiverError {
     },
 }
 
-impl fmt::Display for ArQuiverError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Hom(error) => write!(f, "morphism rejected: {error}"),
-            Self::Space(error) => write!(f, "hom space rejected the input: {error}"),
-            Self::Injective(error) => {
-                write!(f, "the opposite algebra could not be built: {error}")
-            }
-            Self::UnsupportedDomain { dynkin, nakayama } => write!(
-                f,
-                "no complete enumeration applies: the Dynkin route reports {dynkin}, \
-                 the Nakayama route reports {nakayama}"
-            ),
-            Self::RadicalSquareNotContained { source, target } => write!(
-                f,
-                "the radical square of ({source:?}, {target:?}) left the radical; crate defect"
-            ),
-            Self::ResidueDegreeDoesNotDivide {
-                dim_vector,
-                base_dim,
-                residue_degree,
-            } => write!(
-                f,
-                "residue degree {residue_degree} of {dim_vector:?} does not divide \
-                 the base dimension {base_dim}; crate defect"
-            ),
-        }
-    }
-}
+display_error! { error ArQuiverError {
+    Self::Hom(error) => "morphism rejected: {error}";
+    Self::Space(error) => "hom space rejected the input: {error}";
+    Self::Injective(error) => "the opposite algebra could not be built: {error}";
+    Self::UnsupportedDomain { dynkin, nakayama } => "no complete enumeration applies: the Dynkin route reports {dynkin}, the Nakayama route reports {nakayama}";
+    Self::RadicalSquareNotContained { source, target } => "the radical square of ({source:?}, {target:?}) left the radical; crate defect";
+    Self::ResidueDegreeDoesNotDivide { dim_vector, base_dim, residue_degree } => "residue degree {residue_degree} of {dim_vector:?} does not divide the base dimension {base_dim}; crate defect";
+} }
 
-impl std::error::Error for ArQuiverError {}
-
-impl From<HomError> for ArQuiverError {
-    fn from(error: HomError) -> ArQuiverError {
-        ArQuiverError::Hom(error)
-    }
-}
-
-impl From<HomSpaceError> for ArQuiverError {
-    fn from(error: HomSpaceError) -> ArQuiverError {
-        ArQuiverError::Space(error)
-    }
-}
-
-/// The inverse of an isomorphism, vertex by vertex.
-fn inverse_of(f: &Morphism) -> Option<Morphism> {
-    let field = f.source().field();
-    let mut maps = Vec::new();
-    for v in 0..f.source().algebra().quiver().num_vertices() {
-        maps.push(matrix_inverse(f.map_at(v), &field)?);
-    }
-    Morphism::new(f.target(), f.source(), maps).ok()
-}
+from_variants! { ArQuiverError {
+    HomError => Hom,
+    HomSpaceError => Space,
+} }
 
 /// The morphisms `f` in `space` with `f.then(u)` in the radical of `endo`.
 ///
@@ -184,11 +142,7 @@ fn radical_against_iso(
     for r in 0..radical.rows() {
         rows.push(radical.row(r).to_vec());
     }
-    let stacked = if rows.is_empty() {
-        DenseMat::zero(0, endo.dim())
-    } else {
-        DenseMat::from_rows(&rows)
-    };
+    let stacked = DenseMat::from_rows_with_cols(&rows, endo.dim());
     // The stacked matrix holds one row per composite and then the radical
     // basis. A row (l | m) of its left null space says that the composite
     // combined by l equals the radical element combined by -m, so l runs
@@ -219,7 +173,7 @@ pub fn category_radical(
     let Some(h) = indecomposable_iso(x.module(), y.module(), x.endo()) else {
         return Ok(space.full_subspace());
     };
-    let u = inverse_of(&h).expect("the radical criterion returns an isomorphism");
+    let u = inverse_morphism(&h).expect("the radical criterion returns an isomorphism");
     radical_against_iso(&space, x.endo(), &u)
 }
 
@@ -234,14 +188,10 @@ pub enum CatalogProvenance {
     DynkinZeroIdeal,
 }
 
-impl fmt::Display for CatalogProvenance {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Nakayama => f.write_str("Nakayama classification"),
-            Self::DynkinZeroIdeal => f.write_str("Gabriel's theorem"),
-        }
-    }
-}
+display_error! { CatalogProvenance {
+    Self::Nakayama => "Nakayama classification";
+    Self::DynkinZeroIdeal => "Gabriel's theorem";
+} }
 
 /// A complete list of the indecomposable modules of one algebra, each
 /// certified by its local endomorphism algebra.
@@ -262,14 +212,10 @@ pub struct IndecomposableCatalog {
     entries: Vec<Arc<IndecomposableModule>>,
 }
 
-impl fmt::Debug for IndecomposableCatalog {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("IndecomposableCatalog")
-            .field("provenance", &self.provenance)
-            .field("entries", &self.entries.len())
-            .finish()
-    }
-}
+debug_fields!(IndecomposableCatalog |this| {
+    "provenance" => this.provenance;
+    "entries" => this.entries.len();
+});
 
 /// Puts every listed module through the indecomposability gate.
 ///
@@ -323,36 +269,19 @@ impl IndecomposableCatalog {
         })
     }
 
-    /// The algebra the entries are modules over.
-    #[inline]
-    pub fn algebra(&self) -> &Arc<Algebra> {
-        &self.algebra
-    }
-
-    /// The classification theorem that makes the list complete.
-    #[inline]
-    pub fn provenance(&self) -> CatalogProvenance {
-        self.provenance
-    }
-
-    /// The entries in enumerator order. An entry's index is its identifier.
-    #[inline]
-    pub fn entries(&self) -> &[Arc<IndecomposableModule>] {
-        &self.entries
-    }
-
-    /// The number of entries.
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Whether the catalog has no entries. An algebra with at least one
-    /// vertex has at least one simple module, so both enumerators return a
-    /// nonempty list.
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+    accessor_methods! {
+        /// The algebra the entries are modules over.
+        pub algebra() -> &Arc<Algebra> = |this| &this.algebra;
+        /// The classification theorem that makes the list complete.
+        pub provenance() -> CatalogProvenance = |this| this.provenance;
+        /// The entries in enumerator order. An entry's index is its identifier.
+        pub entries() -> &[Arc<IndecomposableModule>] = |this| &this.entries;
+        /// The number of entries.
+        pub len() -> usize = |this| this.entries.len();
+        /// Whether the catalog has no entries. An algebra with at least one
+        /// vertex has at least one simple module, so both enumerators return a
+        /// nonempty list.
+        pub is_empty() -> bool = |this| this.entries.is_empty();
     }
 }
 
@@ -445,36 +374,19 @@ pub struct ArVertex {
 }
 
 impl ArVertex {
-    /// The identifier of the vertex: its index in the catalog and in
-    /// [`ArQuiver::vertices`].
-    #[inline]
-    pub fn id(&self) -> usize {
-        self.id
-    }
-
-    /// The module at the vertex.
-    #[inline]
-    pub fn module(&self) -> &IndecomposableModule {
-        &self.module
-    }
-
-    /// The residue degree `d` of the module: the residue field of its local
-    /// endomorphism algebra is `F_{p^d}`.
-    #[inline]
-    pub fn residue_degree(&self) -> usize {
-        self.residue_degree
-    }
-
-    /// Whether the module is projective.
-    #[inline]
-    pub fn projective(&self) -> bool {
-        self.projective
-    }
-
-    /// Whether the module is injective.
-    #[inline]
-    pub fn injective(&self) -> bool {
-        self.injective
+    accessor_methods! {
+        /// The identifier of the vertex: its index in the catalog and in
+        /// [`ArQuiver::vertices`].
+        pub id() -> usize = |this| this.id;
+        /// The module at the vertex.
+        pub module() -> &IndecomposableModule = |this| &this.module;
+        /// The residue degree `d` of the module: the residue field of its local
+        /// endomorphism algebra is `F_{p^d}`.
+        pub residue_degree() -> usize = |this| this.residue_degree;
+        /// Whether the module is projective.
+        pub projective() -> bool = |this| this.projective;
+        /// Whether the module is injective.
+        pub injective() -> bool = |this| this.injective;
     }
 }
 
@@ -510,41 +422,20 @@ pub struct ArArrow {
 }
 
 impl ArArrow {
-    /// The identifier of the source vertex.
-    #[inline]
-    pub fn source(&self) -> usize {
-        self.source
-    }
-
-    /// The identifier of the target vertex.
-    #[inline]
-    pub fn target(&self) -> usize {
-        self.target
-    }
-
-    /// `dim_Fp Irr(X, Y)`, always positive.
-    #[inline]
-    pub fn base_dim(&self) -> usize {
-        self.base_dim
-    }
-
-    /// The dimension of `Irr(X, Y)` over the residue field of the source.
-    #[inline]
-    pub fn over_source_residue(&self) -> usize {
-        self.over_source_residue
-    }
-
-    /// The dimension of `Irr(X, Y)` over the residue field of the target.
-    #[inline]
-    pub fn over_target_residue(&self) -> usize {
-        self.over_target_residue
-    }
-
-    /// One irreducible map per complement basis row of `Irr(X, Y)`, in the
-    /// order of that basis.
-    #[inline]
-    pub fn representatives(&self) -> &[Morphism] {
-        &self.representatives
+    accessor_methods! {
+        /// The identifier of the source vertex.
+        pub source() -> usize = |this| this.source;
+        /// The identifier of the target vertex.
+        pub target() -> usize = |this| this.target;
+        /// `dim_Fp Irr(X, Y)`, always positive.
+        pub base_dim() -> usize = |this| this.base_dim;
+        /// The dimension of `Irr(X, Y)` over the residue field of the source.
+        pub over_source_residue() -> usize = |this| this.over_source_residue;
+        /// The dimension of `Irr(X, Y)` over the residue field of the target.
+        pub over_target_residue() -> usize = |this| this.over_target_residue;
+        /// One irreducible map per complement basis row of `Irr(X, Y)`, in the
+        /// order of that basis.
+        pub representatives() -> &[Morphism] = |this| &this.representatives;
     }
 
     /// The valuation: [`ArrowValuation::Plain`] when both endpoints have
@@ -578,23 +469,14 @@ pub struct ArQuiver {
 }
 
 impl ArQuiver {
-    /// The catalog the vertices come from. Vertex `i` carries the same module
-    /// as catalog entry `i`.
-    #[inline]
-    pub fn catalog(&self) -> &IndecomposableCatalog {
-        &self.catalog
-    }
-
-    /// The vertices in catalog order.
-    #[inline]
-    pub fn vertices(&self) -> &[ArVertex] {
-        &self.vertices
-    }
-
-    /// The arrows, ordered by source identifier then target identifier.
-    #[inline]
-    pub fn arrows(&self) -> &[ArArrow] {
-        &self.arrows
+    accessor_methods! {
+        /// The catalog the vertices come from. Vertex `i` carries the same module
+        /// as catalog entry `i`.
+        pub catalog() -> &IndecomposableCatalog = |this| &this.catalog;
+        /// The vertices in catalog order.
+        pub vertices() -> &[ArVertex] = |this| &this.vertices;
+        /// The arrows, ordered by source identifier then target identifier.
+        pub arrows() -> &[ArArrow] = |this| &this.arrows;
     }
 }
 
@@ -620,12 +502,6 @@ fn over_residue(
     Ok(base_dim / residue_degree)
 }
 
-fn unit(dim: usize, k: usize, field: &PrimeField) -> Vec<Fp> {
-    let mut coords = vec![field.zero(); dim];
-    coords[k] = field.one();
-    coords
-}
-
 fn vertices_of(catalog: &IndecomposableCatalog) -> Result<Vec<ArVertex>, ArQuiverError> {
     let mut vertices = Vec::with_capacity(catalog.len());
     for (id, entry) in catalog.entries().iter().enumerate() {
@@ -635,7 +511,7 @@ fn vertices_of(catalog: &IndecomposableCatalog) -> Result<Vec<ArVertex>, ArQuive
             projective: entry.is_projective(),
             injective: entry.is_injective().map_err(ArQuiverError::Injective)?,
             module: entry.clone(),
-        });
+        })
     }
     Ok(vertices)
 }
@@ -663,7 +539,6 @@ fn quiver_of(catalog: IndecomposableCatalog) -> Result<ArQuiver, ArQuiverError> 
             if base_dim == 0 {
                 continue;
             }
-            let field = x.field();
             arrows.push(ArArrow {
                 source: i,
                 target: j,
@@ -671,7 +546,7 @@ fn quiver_of(catalog: IndecomposableCatalog) -> Result<ArQuiver, ArQuiverError> 
                 over_source_residue: over_residue(base_dim, vertices[i].residue_degree, x)?,
                 over_target_residue: over_residue(base_dim, vertices[j].residue_degree, y)?,
                 representatives: (0..base_dim)
-                    .map(|k| quotient.representative(&unit(base_dim, k, &field)))
+                    .map(|k| quotient.representative(&unit_vector(base_dim, k)))
                     .collect(),
             });
         }
@@ -712,6 +587,7 @@ mod tests {
         truncated_poly,
     };
     use crate::dynkin::{DynkinType, dynkin_quiver};
+    use crate::field::PrimeField;
     use crate::hom::hom;
     use crate::module::Module;
     use crate::quiver::Quiver;
@@ -841,7 +717,7 @@ mod tests {
             let space = HomSpace::new(x.module(), y.module()).unwrap();
             assert_eq!(space.dim(), 3);
 
-            let first = inverse_of(
+            let first = inverse_morphism(
                 &indecomposable_iso(x.module(), y.module(), x.endo())
                     .expect("the two copies are isomorphic"),
             )
@@ -902,10 +778,10 @@ mod tests {
         );
     }
 
-    // No cheap fixture yields a nonzero valued Irr, and the two catalog
-    // domains provably cannot (every entry has residue degree 1), so the
-    // Valued arithmetic is pinned here on directly built arrows through
-    // the same division routine `quiver_of` calls.
+    // No fixture in this file yields a nonzero valued Irr, and the two catalog
+    // domains cannot (every entry has residue degree 1), so the Valued
+    // arithmetic is pinned here on directly built arrows through the same
+    // division routine `quiver_of` calls.
     #[test]
     fn valued_arrow_arithmetic_and_the_division_gate_are_pinned() {
         let w = f8_module();

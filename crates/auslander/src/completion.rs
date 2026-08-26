@@ -1,7 +1,7 @@
 //! Bergman-style completion for two-sided ideals in the path algebra.
 //!
-//! [`complete`] runs plain Buchberger/Bergman completion over the sealed
-//! order of [`crate::order`] and emits a [`Certificate`] for the
+//! [`complete`] runs Buchberger/Bergman completion over the admissible
+//! order [`crate::order::ORDER_ID`] and emits a [`Certificate`] for the
 //! independent verifier. The engine carries provenance through every
 //! operation. Each certificate `origin` entry expands to its basis
 //! element.
@@ -27,11 +27,12 @@
 //! `membership` and `ambiguities` traces are recomputed against this
 //! final basis, so the certificate is self-consistent.
 //!
-//! `normal_words` lists every word irreducible by the final leading
-//! words, in the fixed basis order of the design, section 6: trivial
-//! paths in vertex order, then length, then source, then the
-//! lexicographic arrow word. Each emitted word costs one work unit of
-//! `max_steps`, so a huge finite normal-word language truncates honestly.
+//! A normal word is a path that contains no leading word of the final
+//! basis as a factor. `normal_words` lists every such word, in the fixed
+//! basis order of the design, section 6: trivial paths in vertex order,
+//! then length, then source, then the lexicographic arrow word. Each
+//! emitted word costs one work unit of `max_steps`, so a huge finite
+//! normal-word language truncates.
 //!
 //! Two sizes grow on their own budgets, because `max_steps` does not
 //! bound them. Provenance compounds: one reduction step costs one unit
@@ -49,7 +50,6 @@
 //! witness from its own automaton and `normal_words` stays empty. The
 //! verifier re-checks the automaton, the decision, and the witness.
 
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::certificate::{
@@ -57,6 +57,7 @@ use crate::certificate::{
     OriginTerm, QuiverData, RelationData, Trace, TraceStep,
 };
 use crate::field::{Fp, PrimeField};
+use crate::linalg::merge_scaled_terms;
 use crate::order::{ORDER_ID, word_cmp};
 use crate::quiver::{ArrowId, Quiver};
 use crate::relation::{Presentation, Relation};
@@ -72,7 +73,7 @@ pub struct CompletionLimits {
     /// Maximum number of work units across the whole run. Each reduction
     /// step and each emitted normal word costs one unit. The budget is
     /// checked before the next word is allocated, so a huge finite
-    /// normal-word language truncates instead of exhausting memory.
+    /// normal-word language truncates rather than exhausting memory.
     pub max_steps: usize,
     /// Maximum number of provenance terms in one origin. One reduction step
     /// adds up to the whole origin of the basis element it uses, so
@@ -145,16 +146,12 @@ pub enum Outcome {
 type Word = Vec<ArrowId>;
 
 /// Terms descend strictly under the sealed order.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct Poly {
     terms: Vec<(Fp, Word)>,
 }
 
 impl Poly {
-    fn zero() -> Poly {
-        Poly { terms: Vec::new() }
-    }
-
     fn is_zero(&self) -> bool {
         self.terms.is_empty()
     }
@@ -217,33 +214,18 @@ fn add_scaled(
     let addend: Vec<(Fp, Word)> = src
         .terms
         .iter()
-        .map(|(k, w)| (field.mul(c, *k), concat3(left, w, right)))
+        .map(|(k, w)| (*k, concat3(left, w, right)))
         .collect();
-    let mut merged = Vec::with_capacity(base.terms.len() + addend.len());
-    let mut i = 0;
-    let mut j = 0;
-    while i < base.terms.len() && j < addend.len() {
-        match word_cmp(&base.terms[i].1, &addend[j].1) {
-            Ordering::Greater => {
-                merged.push(base.terms[i].clone());
-                i += 1;
-            }
-            Ordering::Less => {
-                merged.push(addend[j].clone());
-                j += 1;
-            }
-            Ordering::Equal => {
-                let sum = field.add(base.terms[i].0, addend[j].0);
-                if !sum.is_zero() {
-                    merged.push((sum, base.terms[i].1.clone()));
-                }
-                i += 1;
-                j += 1;
-            }
-        }
-    }
-    merged.extend_from_slice(&base.terms[i..]);
-    merged.extend(addend.into_iter().skip(j));
+    let mut merged = Vec::new();
+    merge_scaled_terms(
+        &base.terms,
+        &addend,
+        (c, &field),
+        |a, b| word_cmp(&b.1, &a.1),
+        |term| term.0,
+        |term, value| (value, term.1.clone()),
+        &mut merged,
+    );
     Poly { terms: merged }
 }
 
@@ -355,7 +337,6 @@ fn superposition_len(basis: &[BasisElem], key: AmbKey) -> usize {
     if kind == KIND_OVERLAP {
         offset + lead_word(&basis[j]).len()
     } else {
-        let _ = j;
         lead_word(&basis[i]).len()
     }
 }
@@ -500,7 +481,7 @@ impl Engine<'_> {
         } else {
             (&[], v)
         };
-        let poly = add_scaled(self.field, &Poly::zero(), one, &[], &basis[i].poly, vi);
+        let poly = add_scaled(self.field, &Poly::default(), one, &[], &basis[i].poly, vi);
         let poly = add_scaled(self.field, &poly, neg_one, u, &basis[j].poly, vj);
         if let Some(target) = origin {
             let max = self.limits.max_origin_terms;
@@ -650,50 +631,49 @@ impl Engine<'_> {
         })
     }
 
-    /// All words irreducible by the final leading words, in the fixed
-    /// basis order. Each emitted word costs one work unit, checked before
-    /// the word is allocated.
+    /// Every normal word of the final basis, in the fixed basis order.
+    /// Each emitted word costs one work unit, checked before the word is
+    /// allocated.
     fn normal_words(
         &mut self,
         quiver: &Quiver,
         automaton: &PrefixAutomaton,
         basis_len: usize,
     ) -> Result<Vec<Vec<u32>>, TruncationDiagnostics> {
-        let mut rows: Vec<(u32, u32, Word)> = Vec::new();
-        let mut states: Vec<usize> = Vec::new();
+        let mut rows: Vec<(u32, u32, Word, usize)> = Vec::new();
         for v in 0..quiver.num_vertices() {
             if self.steps >= self.limits.max_steps {
                 return Err(self.diag(basis_len, 0, TruncationReason::StepBudget));
             }
             self.steps += 1;
-            rows.push((v, v, Vec::new()));
-            states.push(v as usize);
+            rows.push((v, v, Vec::new(), v as usize));
         }
         let mut level_start = 0;
         while level_start < rows.len() {
             let level_end = rows.len();
             for i in level_start..level_end {
-                let (source, target, word) = rows[i].clone();
-                let s = states[i];
+                let (source, target, word, state) = rows[i].clone();
                 for &a in quiver.arrows_from(target) {
-                    if let Some(next) = automaton.step(s, a) {
+                    if let Some(next) = automaton.step(state, a) {
                         if self.steps >= self.limits.max_steps {
                             return Err(self.diag(basis_len, 0, TruncationReason::StepBudget));
                         }
                         self.steps += 1;
                         let mut extended = word.clone();
                         extended.push(a);
-                        rows.push((source, quiver.target(a), extended));
-                        states.push(next);
+                        rows.push((source, quiver.target(a), extended, next));
                     }
                 }
             }
             level_start = level_end;
         }
-        rows.sort_by(|(sa, _, wa), (sb, _, wb)| {
+        rows.sort_by(|(sa, _, wa, _), (sb, _, wb, _)| {
             wa.len().cmp(&wb.len()).then(sa.cmp(sb)).then(wa.cmp(wb))
         });
-        Ok(rows.into_iter().map(|(_, _, w)| raw_word(&w)).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(_, _, word, _)| raw_word(&word))
+            .collect())
     }
 }
 
@@ -710,15 +690,11 @@ fn origin_terms(elem: &BasisElem) -> Vec<OriginTerm> {
 }
 
 /// Completes `presentation` into the unique reduced Groebner basis of its
-/// ideal and emits a certificate, or reports honest truncation when a
-/// budget of `limits` runs out. See the module documentation for the
-/// composition formulas, the processing order, and the `normal_words`
-/// contract.
+/// ideal and emits a certificate, or reports truncation when a budget of
+/// `limits` runs out. See the module documentation for the composition
+/// formulas, the processing order, and the `normal_words` contract.
 pub fn complete(presentation: &Presentation, limits: &CompletionLimits) -> Outcome {
-    match run(presentation, limits) {
-        Ok(certificate) => Outcome::Complete(certificate),
-        Err(diagnostics) => Outcome::Truncated(diagnostics),
-    }
+    run(presentation, limits).map_or_else(Outcome::Truncated, Outcome::Complete)
 }
 
 fn run(
@@ -807,6 +783,58 @@ fn run(
     engine.emit(presentation, &basis)
 }
 
+/// Builds the shared normal-word automaton states and transitions.
+///
+/// `forbidden` must be factor-minimal. Then a prefix match cannot hide a
+/// shorter forbidden suffix.
+pub(crate) fn normal_word_transitions<W: AsRef<[ArrowId]>>(
+    quiver: &Quiver,
+    forbidden: &[W],
+) -> (Vec<Word>, Vec<Vec<Option<usize>>>) {
+    let n = quiver.num_vertices() as usize;
+    let mut prefix_set = BTreeSet::new();
+    for word in forbidden {
+        let word = word.as_ref();
+        for len in 1..word.len() {
+            prefix_set.insert(word[..len].to_vec());
+        }
+    }
+    let mut words = vec![Word::new(); n];
+    let mut prefix_index = BTreeMap::new();
+    for prefix in prefix_set {
+        prefix_index.insert(prefix.clone(), words.len());
+        words.push(prefix);
+    }
+    let forbidden_set: BTreeSet<&[ArrowId]> = forbidden.iter().map(|word| word.as_ref()).collect();
+    let mut trans = vec![vec![None; quiver.num_arrows()]; words.len()];
+    for (state, row) in trans.iter_mut().enumerate() {
+        let (word, vertex) = if state < n {
+            (&[][..], state as u32)
+        } else {
+            let word = words[state].as_slice();
+            (word, quiver.target(word[word.len() - 1]))
+        };
+        for &arrow in quiver.arrows_from(vertex) {
+            let mut extended = word.to_vec();
+            extended.push(arrow);
+            let mut next = Some(quiver.target(arrow) as usize);
+            for start in 0..extended.len() {
+                let suffix = &extended[start..];
+                if forbidden_set.contains(suffix) {
+                    next = None;
+                    break;
+                }
+                if let Some(&index) = prefix_index.get(suffix) {
+                    next = Some(index);
+                    break;
+                }
+            }
+            row[arrow.index()] = next;
+        }
+    }
+    (words, trans)
+}
+
 /// The normal-word automaton over the final leading words. States `0..n`
 /// are the vertices. The rest are the proper nonempty prefixes of leading
 /// words, sorted lexicographically. Reading a normal word from its
@@ -821,54 +849,11 @@ struct PrefixAutomaton {
 
 impl PrefixAutomaton {
     fn build(quiver: &Quiver, forbidden: &[&Word]) -> PrefixAutomaton {
-        let n = quiver.num_vertices() as usize;
-        let mut prefix_set: BTreeSet<Word> = BTreeSet::new();
-        for word in forbidden {
-            for len in 1..word.len() {
-                prefix_set.insert(word[..len].to_vec());
-            }
-        }
-        let mut words: Vec<Word> = vec![Word::new(); n];
-        let mut prefix_index: BTreeMap<Word, usize> = BTreeMap::new();
-        for prefix in prefix_set {
-            prefix_index.insert(prefix.clone(), words.len());
-            words.push(prefix);
-        }
-        let forbidden_set: BTreeSet<&[ArrowId]> = forbidden.iter().map(|w| w.as_slice()).collect();
-        let mut trans = vec![vec![None; quiver.num_arrows()]; words.len()];
-        for (s, row) in trans.iter_mut().enumerate() {
-            let (word, vertex): (&[ArrowId], u32) = if s < n {
-                (&[], s as u32)
-            } else {
-                let w = words[s].as_slice();
-                (w, quiver.target(w[w.len() - 1]))
-            };
-            for &a in quiver.arrows_from(vertex) {
-                let mut extended = word.to_vec();
-                extended.push(a);
-                // The longest suffix in (forbidden ∪ prefixes) decides.
-                // The leading words of a reduced basis are minimal, so
-                // the two sets are disjoint and no shorter forbidden
-                // suffix hides under a prefix match.
-                let mut next = Some(quiver.target(a) as usize);
-                for start in 0..extended.len() {
-                    let suffix = &extended[start..];
-                    if forbidden_set.contains(suffix) {
-                        next = None;
-                        break;
-                    }
-                    if let Some(&k) = prefix_index.get(suffix) {
-                        next = Some(k);
-                        break;
-                    }
-                }
-                row[a.index()] = next;
-            }
-        }
+        let (words, trans) = normal_word_transitions(quiver, forbidden);
         PrefixAutomaton {
             words,
             trans,
-            starts: n,
+            starts: quiver.num_vertices() as usize,
         }
     }
 

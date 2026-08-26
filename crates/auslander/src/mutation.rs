@@ -3,11 +3,11 @@
 //! A vertex is a pair `(M, P)` with module summands `X_1, ..., X_m`. Slot `j`
 //! addresses `X_j`. Only module summands have slots. Mutation at a summand of
 //! the projective part is always a right mutation, so a walk that descends
-//! from `(A, 0)` never performs one; `docs/v0.5-design.md` section 8 records
+//! from `(A, 0)` never performs one. `docs/v0.5-design.md` section 8 records
 //! that as a deviation from the earlier signed-slot design.
 //!
 //! Exactly one of two branches holds at a slot, and [`mutate_at`] decides
-//! which by computation, never by guessing.
+//! which by computation.
 //!
 //! 1. `X_j` lies in `Fac(M/X_j)`. The mutation at slot `j` is then a right
 //!    mutation and there is no left mutation. [`FacWitness`] proves the
@@ -15,7 +15,7 @@
 //! 2. Otherwise the left mutation exists. [`Mutation`] carries the target pair
 //!    and a [`MutationWitness`].
 //!
-//! # Adjacency is proved theorem-level
+//! # Proof of adjacency
 //!
 //! The construction does not prove that the built pair is the mutation. The
 //! proof runs through the almost complete pair:
@@ -47,14 +47,14 @@
 //! `docs/v0.5-design.md` section 8.
 //!
 //! The exchange sequence `X_j -> B -> Y -> 0` is stored as a construction
-//! witness. It records how the target was built and it is not the proof of
+//! witness. It records how the target was built. It is not the proof of
 //! adjacency.
 //!
-//! # Degenerate outputs are typed
+//! # Shapes
 //!
-//! The two shapes of a left mutation are [`ExchangeShape`], and the
-//! construction decides between them by comparing supports, as in AIR Theorem
-//! 2.30(a) and (b):
+//! The two shapes of a left mutation are [`ExchangeShape`]. The construction
+//! decides between them by comparing supports, as in AIR Theorem 2.30(a) and
+//! (b):
 //!
 //! - `supp(U)` is smaller than `supp(M)`: the cokernel is zero, `X_j` leaves
 //!   the module part, and the one vertex of `supp(M) \ supp(U)` joins the
@@ -62,10 +62,7 @@
 //! - `supp(U)` equals `supp(M)`: the cokernel is a sum of copies of one
 //!   indecomposable `Y_1`, and `M' = U + Y_1` with the projective support
 //!   unchanged.
-//!
-//! Neither shape is an error, and neither is silent.
 
-use std::fmt;
 use std::sync::Arc;
 
 use crate::approx::{ApproxError, MinimalLeftApproximation, left_approximation};
@@ -73,14 +70,15 @@ use crate::basic::{
     AddClosureWitness, BasicDecomposition, BasicError, ProjectiveSupport, SupportPairIsoOutcome,
     SupportPairObstruction, pair_iso,
 };
-use crate::decompose::{Certificate, decompose};
+use crate::context::VerificationContext;
+use crate::decompose::{Certificate, decompose, direct_sum_or_zero};
 use crate::field::Fp;
 use crate::hom::{HomError, Morphism, cokernel, hom};
 use crate::indec::{IndecError, IndecomposableModule};
 use crate::iso::indecomposable_iso;
 use crate::linalg::DenseMat;
-use crate::module::{Module, direct_sum};
-use crate::quiver::ArrowId;
+use crate::module::{Module, same_representation};
+use crate::profile::{Site, hit};
 use crate::supporttau::{
     AlmostCompleteClassification, AlmostCompletePair, PairRejection, SupportTauError,
     SupportTauTiltingClassification, SupportTauTiltingPair,
@@ -96,14 +94,10 @@ pub enum Endpoint {
     Target,
 }
 
-impl fmt::Display for Endpoint {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Source => f.write_str("source"),
-            Self::Target => f.write_str("target"),
-        }
-    }
-}
+display_error! { Endpoint {
+    Self::Source => "source";
+    Self::Target => "target";
+} }
 
 /// A failed internal cross-check of the mutation layer.
 ///
@@ -162,56 +156,20 @@ pub enum MutationDefect {
     EndpointsIsomorphic,
 }
 
-impl fmt::Display for MutationDefect {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::AlmostCompleteRejected(rejection) => write!(
-                f,
-                "dropping the slot summand left condition {} unmet: {rejection}; crate defect",
-                rejection.condition()
-            ),
-            Self::TargetRejected(rejection) => write!(
-                f,
-                "the built pair left condition {} unmet: {rejection}; crate defect",
-                rejection.condition()
-            ),
-            Self::DroppedVertexCount { dropped } => write!(
-                f,
-                "dropping the slot summand lost {} vertices, not one; crate defect",
-                dropped.len()
-            ),
-            Self::CokernelNonzero { dim_vector } => write!(
-                f,
-                "the approximation has cokernel of dimension vector {dim_vector:?} where the \
-                 support test says zero; crate defect"
-            ),
-            Self::CokernelZero => f.write_str(
-                "the approximation has zero cokernel where the support test says nonzero; \
-                 crate defect",
-            ),
-            Self::CokernelSummandsDiffer { summand } => write!(
-                f,
-                "cokernel summand {summand} is not isomorphic to the first one; crate defect"
-            ),
-            Self::ReplacementRepeatsSummand { summand } => write!(
-                f,
-                "the cokernel summand repeats summand {summand} of the module part; crate defect"
-            ),
-            Self::AddClosureMissing { endpoint } => {
-                write!(f, "the {endpoint} pair does not contain U; crate defect")
-            }
-            Self::ProjectiveSupportNotExtended { endpoint } => write!(
-                f,
-                "the {endpoint} projective support does not contain Q; crate defect"
-            ),
-            Self::EndpointsIsomorphic => {
-                f.write_str("the two completions are isomorphic; crate defect")
-            }
-        }
-    }
-}
-
-impl std::error::Error for MutationDefect {}
+display_error! { error MutationDefect {
+    Self::AlmostCompleteRejected(rejection) => "dropping the slot summand left condition {} unmet: {rejection}; crate defect", rejection.condition();
+    Self::TargetRejected(rejection) => "the built pair left condition {} unmet: {rejection}; crate defect", rejection.condition();
+    Self::DroppedVertexCount { dropped } => "dropping the slot summand lost {} vertices, not one; crate defect", dropped.len();
+    Self::CokernelNonzero { dim_vector } => "the approximation has cokernel of dimension vector {dim_vector:?} where the \
+                                             support test says zero; crate defect";
+    Self::CokernelZero => "the approximation has zero cokernel where the support test says nonzero; \
+                          crate defect";
+    Self::CokernelSummandsDiffer { summand } => "cokernel summand {summand} is not isomorphic to the first one; crate defect";
+    Self::ReplacementRepeatsSummand { summand } => "the cokernel summand repeats summand {summand} of the module part; crate defect";
+    Self::AddClosureMissing { endpoint } => "the {endpoint} pair does not contain U; crate defect";
+    Self::ProjectiveSupportNotExtended { endpoint } => "the {endpoint} projective support does not contain Q; crate defect";
+    Self::EndpointsIsomorphic => "the two completions are isomorphic; crate defect";
+} }
 
 /// Rejected input, a blocked certification, or a failed internal cross-check
 /// of the mutation layer.
@@ -251,57 +209,32 @@ pub enum MutationError {
     Defect(MutationDefect),
 }
 
-impl fmt::Display for MutationError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::SlotOutOfRange { slot, summands } => write!(
-                f,
-                "slot {slot} is out of range, the module part has {summands} summands"
-            ),
-            Self::SummandIndexCount { indices, summands } => {
-                write!(f, "{indices} summand indices for {summands} summands")
-            }
-            Self::Basic(error) => write!(f, "basic layer: {error}"),
-            Self::SupportTau(error) => write!(f, "support tau-tilting layer: {error}"),
-            Self::Approx(error) => write!(f, "approximation layer: {error}"),
-            Self::Hom(error) => write!(f, "hom: {error}"),
-            Self::Indec(error) => write!(f, "cokernel summand: {error}"),
-            Self::Defect(defect) => write!(f, "{defect}"),
-        }
-    }
-}
+display_error! { MutationError {
+    Self::SlotOutOfRange { slot, summands } => "slot {slot} is out of range, the module part has {summands} summands";
+    Self::SummandIndexCount { indices, summands } => "{indices} summand indices for {summands} summands";
+    Self::Basic(error) => "basic layer: {error}";
+    Self::SupportTau(error) => "support tau-tilting layer: {error}";
+    Self::Approx(error) => "approximation layer: {error}";
+    Self::Hom(error) => "hom: {error}";
+    Self::Indec(error) => "cokernel summand: {error}";
+    Self::Defect(defect) => "{defect}";
+} }
 
-impl std::error::Error for MutationError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Basic(error) => Some(error),
-            Self::SupportTau(error) => Some(error),
-            Self::Approx(error) => Some(error),
-            Self::Hom(error) => Some(error),
-            Self::Indec(error) => Some(error),
-            Self::Defect(defect) => Some(defect),
-            Self::SlotOutOfRange { .. } | Self::SummandIndexCount { .. } => None,
-        }
-    }
-}
+error_source!(MutationError {
+    Self::Basic(error) => Some(error),
+    Self::SupportTau(error) => Some(error),
+    Self::Approx(error) => Some(error),
+    Self::Hom(error) => Some(error),
+    Self::Indec(error) => Some(error),
+    Self::Defect(defect) => Some(defect),
+    Self::SlotOutOfRange { .. } | Self::SummandIndexCount { .. } => None,
+});
 
-impl From<BasicError> for MutationError {
-    fn from(error: BasicError) -> MutationError {
-        MutationError::Basic(error)
-    }
-}
-
-impl From<SupportTauError> for MutationError {
-    fn from(error: SupportTauError) -> MutationError {
-        MutationError::SupportTau(error)
-    }
-}
-
-impl From<HomError> for MutationError {
-    fn from(error: HomError) -> MutationError {
-        MutationError::Hom(error)
-    }
-}
+from_variants!(MutationError {
+    BasicError => Basic,
+    SupportTauError => SupportTau,
+    HomError => Hom,
+});
 
 fn defect(defect: MutationDefect) -> MutationError {
     MutationError::Defect(defect)
@@ -312,8 +245,7 @@ fn support(m: &Module) -> Vec<u32> {
     m.dim_vector()
         .iter()
         .enumerate()
-        .filter(|&(_, &d)| d > 0)
-        .map(|(v, _)| v as u32)
+        .filter_map(|(v, &d)| (d > 0).then_some(v as u32))
         .collect()
 }
 
@@ -322,15 +254,7 @@ fn support(m: &Module) -> Vec<u32> {
 /// Reassembles the sum and compares every arrow matrix. Dimension vectors
 /// would not decide it: they are isomorphism invariants and not identifiers.
 fn is_direct_sum(m: &Module, parts: &[Module]) -> bool {
-    let refs: Vec<&Module> = parts.iter().collect();
-    let rebuilt = if refs.is_empty() {
-        Module::zero(m.algebra())
-    } else {
-        direct_sum(&refs).0
-    };
-    rebuilt.dim_vector() == m.dim_vector()
-        && (0..m.algebra().quiver().num_arrows())
-            .all(|i| rebuilt.map(ArrowId(i as u32)) == m.map(ArrowId(i as u32)))
+    same_representation(&direct_sum_or_zero(m.algebra(), parts).0, m)
 }
 
 /// The dimension of the sum of the images of `maps` at each vertex.
@@ -345,18 +269,14 @@ fn trace_dims(maps: &[Morphism], x: &Module) -> Vec<usize> {
             if x.dim_at(v) == 0 {
                 return 0;
             }
-            let mut rows: Vec<Vec<Fp>> = Vec::new();
-            for f in maps {
-                let block = f.map_at(v);
-                for r in 0..block.rows() {
-                    rows.push(block.row(r).to_vec());
-                }
-            }
-            if rows.is_empty() {
-                0
-            } else {
-                DenseMat::from_rows(&rows).rank(&field)
-            }
+            let rows: Vec<Vec<Fp>> = maps
+                .iter()
+                .flat_map(|f| {
+                    let block = f.map_at(v);
+                    (0..block.rows()).map(move |r| block.row(r).to_vec())
+                })
+                .collect();
+            DenseMat::from_rows(&rows).rank(&field)
         })
         .collect()
 }
@@ -367,15 +287,9 @@ fn trace_dims(maps: &[Morphism], x: &Module) -> Vec<usize> {
 /// `dim Y_v + rank f_v = dim B_v` at every vertex. Together those say
 /// `im f = ker g` and `g` epi, which is the cokernel property.
 fn is_cokernel(f: &Morphism, g: &Morphism) -> bool {
-    if !g.source().ptr_eq(f.target()) {
-        return false;
-    }
-    let Ok(composite) = f.then(g) else {
-        return false;
-    };
-    if !composite.is_zero() {
-        return false;
-    }
+    verify_guard!(g.source().ptr_eq(f.target()));
+    let_or_false!(Ok(composite) = f.then(g));
+    verify_guard!(composite.is_zero());
     let field = f.source().field();
     (0..f.source().algebra().quiver().num_vertices()).all(|v| {
         let dim_y = g.target().dim_at(v);
@@ -391,10 +305,10 @@ fn is_cokernel(f: &Morphism, g: &Morphism) -> bool {
 /// summing to all of `X`, which is to say the induced `U^r -> X` is onto. The
 /// witness is that family. It does not claim the family spans `Hom(U, X)`:
 /// spanning is stronger than the definition of `Fac` and nothing here needs
-/// it. Fields are private and the only constructor is [`mutate_at`].
+/// it. The only constructor is [`mutate_at`].
 ///
-/// By AIR Definition-Proposition 2.28 the mutation at this slot is then a right
-/// mutation. This is a statement about the slot, not a failure.
+/// By AIR Definition-Proposition 2.28 the mutation at this slot is then a
+/// right mutation. This is a statement about the slot, not a failure.
 #[derive(Clone, Debug)]
 pub struct FacWitness {
     module: Module,
@@ -405,64 +319,45 @@ pub struct FacWitness {
 }
 
 impl FacWitness {
-    /// `U = M/X_j`, the module part with the slot summand dropped.
-    #[inline]
-    pub fn module(&self) -> &Module {
-        &self.module
-    }
-
-    /// The summands of `U`, in the order they hold in the source pair.
-    ///
-    /// These are the module values of the source decomposition, not copies,
-    /// so a caller binds the witness to its pair by [`Module::ptr_eq`] on each
-    /// one. A dimension vector does not bind: two non-isomorphic modules can
-    /// share one, as three of the `kronecker(2)` indecomposables do.
-    #[inline]
-    pub fn summands(&self) -> &[Module] {
-        &self.summands
-    }
-
-    /// `X_j`, the summand the slot addresses.
-    #[inline]
-    pub fn summand(&self) -> &Module {
-        &self.summand
-    }
-
-    /// The maps `U -> X_j` whose images were summed.
-    #[inline]
-    pub fn maps(&self) -> &[Morphism] {
-        &self.maps
-    }
-
-    /// The dimension of the sum of the images at each vertex, recomputed from
-    /// the stored maps. On a witness that verifies it is the dimension vector
-    /// of `X_j`.
-    pub fn image_dims(&self) -> Vec<usize> {
-        trace_dims(&self.maps, &self.summand)
+    accessor_methods! {
+        /// `U = M/X_j`, the module part with the slot summand dropped.
+        pub module() -> &Module = |this| &this.module;
+        /// The summands of `U`, in the order they hold in the source pair.
+        ///
+        /// These are the module values of the source decomposition, not copies,
+        /// so a caller binds the witness to its pair by [`Module::ptr_eq`] on each
+        /// one. A dimension vector does not bind: two non-isomorphic modules can
+        /// share one, as three of the `kronecker(2)` indecomposables do.
+        pub summands() -> &[Module] = |this| &this.summands;
+        /// `X_j`, the summand the slot addresses.
+        pub summand() -> &Module = |this| &this.summand;
+        /// The maps `U -> X_j` whose images were summed.
+        pub maps() -> &[Morphism] = |this| &this.maps;
+        /// The dimension of the sum of the images at each vertex, recomputed from
+        /// the stored maps. On a witness that verifies it is the dimension vector
+        /// of `X_j`.
+        pub image_dims() -> Vec<usize> = |this| trace_dims(&this.maps, &this.summand);
     }
 
     /// Recomputes the rank equality from the stored maps.
     ///
-    /// The checks: `U` is the direct sum of the stored summands in order,
-    /// entry for entry; every stored map runs from `U` to `X_j`; and the
-    /// images sum to the dimension vector of `X_j` at every vertex. A dropped
-    /// map fails the rank check as soon as the remaining images stop covering
-    /// `X_j`, and no [`crate::homspace::HomSpace`] is rebuilt.
+    /// `U` must be the direct sum of the stored summands in order, entry for
+    /// entry. Every stored map must run from `U` to `X_j`. The images must
+    /// sum to the dimension vector of `X_j` at every vertex. A dropped map
+    /// fails the rank check as soon as the remaining images stop covering
+    /// `X_j`. No [`crate::homspace::HomSpace`] is rebuilt.
     ///
-    /// The first check is what binds `U` to the summands: a caller that also
-    /// compares [`FacWitness::summands`] against its own pair by
-    /// [`Module::ptr_eq`] knows which module the rank equality was proved
-    /// over.
+    /// The first check binds `U` to the summands. A caller that also compares
+    /// [`FacWitness::summands`] against its own pair by [`Module::ptr_eq`]
+    /// knows which module the rank equality was proved over.
     pub fn verify(&self) -> bool {
-        if !is_direct_sum(&self.module, &self.summands) {
-            return false;
-        }
-        for f in &self.maps {
-            if !f.source().ptr_eq(&self.module) || !f.target().ptr_eq(&self.summand) {
-                return false;
-            }
-        }
-        trace_dims(&self.maps, &self.summand) == self.summand.dim_vector()
+        hit(Site::FacWitnessVerify);
+        is_direct_sum(&self.module, &self.summands)
+            && self
+                .maps
+                .iter()
+                .all(|f| f.source().ptr_eq(&self.module) && f.target().ptr_eq(&self.summand))
+            && trace_dims(&self.maps, &self.summand) == self.summand.dim_vector()
     }
 }
 
@@ -491,14 +386,14 @@ pub enum ExchangeShape {
 /// The five checks that identify the target as the mutation, plus the exchange
 /// sequence that built it.
 ///
-/// Fields are private and the only constructor is [`mutate_at`], so a value of
-/// this type carries a certified almost complete pair, an `add` closure witness
-/// per endpoint, a proof that the endpoints differ, and a certified target
-/// pair. [`MutationWitness::verify`] recomputes all of it.
+/// The only constructor is [`mutate_at`], so a value of this type carries a
+/// certified almost complete pair, an `add` closure witness per endpoint, a
+/// proof that the endpoints differ, and a certified target pair.
+/// [`MutationWitness::verify`] recomputes all of it.
 ///
 /// The approximation and the cokernel map are construction data. They record
-/// how the target was built. AIR Theorem 2.18 is what proves the target is the
-/// mutation; see the module documentation.
+/// how the target was built. AIR Theorem 2.18 is what proves the target is
+/// the mutation. See the module documentation.
 #[derive(Debug)]
 pub struct MutationWitness {
     slot: usize,
@@ -520,166 +415,101 @@ pub struct MutationWitness {
 }
 
 impl MutationWitness {
-    /// The slot the mutation was taken at.
-    #[inline]
-    pub fn slot(&self) -> usize {
-        self.slot
+    accessor_methods! {
+        /// The slot the mutation was taken at.
+        pub slot() -> usize = |this| this.slot;
+        /// `X_j`, the summand the slot addresses.
+        pub exchanged() -> &Module = |this| &this.exchanged;
+        /// The almost complete pair `(U, Q) = (M/X_j, P)` both endpoints extend.
+        pub almost_complete() -> &AlmostCompletePair = |this| &this.almost_complete;
+        /// The proof that `U` is a direct summand of the source module part.
+        pub source_extension() -> &AddClosureWitness = |this| &this.source_extension;
+        /// The proof that `U` is a direct summand of the target module part.
+        pub target_extension() -> &AddClosureWitness = |this| &this.target_extension;
+        /// The proof that the two completions are not isomorphic.
+        pub distinct() -> &SupportPairObstruction = |this| &this.distinct;
+        /// The minimal left `add(U)`-approximation `f: X_j -> B`.
+        pub approximation() -> &MinimalLeftApproximation = |this| &this.approximation;
+        /// The cokernel map `g: B -> Y` of the approximation.
+        ///
+        /// With [`MutationWitness::approximation`] this is the exchange sequence
+        /// `X_j -> B -> Y -> 0`.
+        pub exchange() -> &Morphism = |this| &this.exchange;
+        /// Which of the two shapes the mutation took.
+        pub shape() -> &ExchangeShape = |this| &this.shape;
+        /// `Y_1`, the indecomposable that enters the module part, or `None` when
+        /// the slot moved to the projective part.
+        pub replacement() -> Option<&Module> = |this| this.replacement.as_ref();
+        /// The module part of the source pair.
+        pub source_module() -> &Module = |this| &this.source_module;
+        /// The projective support of the source pair.
+        pub source_projective() -> &[u32] = |this| &this.source_projective;
+        /// The module part of the target pair.
+        pub target_module() -> &Module = |this| &this.target_module;
+        /// The projective support of the target pair.
+        pub target_projective() -> &[u32] = |this| &this.target_projective;
     }
 
-    /// `X_j`, the summand the slot addresses.
-    #[inline]
-    pub fn exchanged(&self) -> &Module {
-        &self.exchanged
-    }
-
-    /// The almost complete pair `(U, Q) = (M/X_j, P)` both endpoints extend.
-    #[inline]
-    pub fn almost_complete(&self) -> &AlmostCompletePair {
-        &self.almost_complete
-    }
-
-    /// The proof that `U` is a direct summand of the source module part.
-    #[inline]
-    pub fn source_extension(&self) -> &AddClosureWitness {
-        &self.source_extension
-    }
-
-    /// The proof that `U` is a direct summand of the target module part.
-    #[inline]
-    pub fn target_extension(&self) -> &AddClosureWitness {
-        &self.target_extension
-    }
-
-    /// The proof that the two completions are not isomorphic.
-    #[inline]
-    pub fn distinct(&self) -> &SupportPairObstruction {
-        &self.distinct
-    }
-
-    /// The minimal left `add(U)`-approximation `f: X_j -> B`.
-    #[inline]
-    pub fn approximation(&self) -> &MinimalLeftApproximation {
-        &self.approximation
-    }
-
-    /// The cokernel map `g: B -> Y` of the approximation.
-    ///
-    /// With [`MutationWitness::approximation`] this is the exchange sequence
-    /// `X_j -> B -> Y -> 0`.
-    #[inline]
-    pub fn exchange(&self) -> &Morphism {
-        &self.exchange
-    }
-
-    /// Which of the two shapes the mutation took.
-    #[inline]
-    pub fn shape(&self) -> &ExchangeShape {
-        &self.shape
-    }
-
-    /// `Y_1`, the indecomposable that enters the module part, or `None` when
-    /// the slot moved to the projective part.
-    #[inline]
-    pub fn replacement(&self) -> Option<&Module> {
-        self.replacement.as_ref()
-    }
-
-    /// The module part of the source pair.
-    #[inline]
-    pub fn source_module(&self) -> &Module {
-        &self.source_module
-    }
-
-    /// The projective support of the source pair.
-    #[inline]
-    pub fn source_projective(&self) -> &[u32] {
-        &self.source_projective
-    }
-
-    /// The module part of the target pair.
-    #[inline]
-    pub fn target_module(&self) -> &Module {
-        &self.target_module
-    }
-
-    /// The projective support of the target pair.
-    #[inline]
-    pub fn target_projective(&self) -> &[u32] {
-        &self.target_projective
-    }
-
-    /// Recomputes every claim from the stored modules and maps.
-    ///
-    /// Nothing stored is taken on trust. Both endpoints are decomposed again,
-    /// the almost complete pair reruns all four of its conditions, the `add`
-    /// closures are rebuilt as well as rechecked, the endpoints are compared
-    /// again, the target is classified again from its parts, and the exchange
-    /// sequence is recomputed from the approximation. A witness borrowed from
-    /// another slot fails, because its approximation does not start at the
-    /// stored `X_j`.
-    pub fn verify(&self) -> bool {
-        if !self.almost_complete.verify() {
-            return false;
-        }
+    verify_methods!(pub(crate), { hit(Site::MutationWitnessVerify); },
+        /// Recomputes every claim from the stored modules and maps.
+        ///
+        /// Both endpoints are decomposed again. The almost complete pair
+        /// reruns all four of its conditions. The `add` closures are rebuilt
+        /// as well as rechecked. The endpoints are compared again. The target
+        /// is classified again from its parts. The exchange sequence is
+        /// recomputed from the approximation. A witness borrowed from another
+        /// slot fails, because its approximation does not start at the stored
+        /// `X_j`.
+        |self, context| {
+        verify_guard!(self.almost_complete.verify_with_context(context));
         let u = self.almost_complete.module();
         let algebra = u.module().algebra();
-        if !Arc::ptr_eq(algebra, self.source_module.algebra())
-            || !Arc::ptr_eq(algebra, self.target_module.algebra())
-        {
-            return false;
-        }
-        let (Ok(source_dec), Ok(target_dec)) = (
-            BasicDecomposition::new(&self.source_module),
-            BasicDecomposition::new(&self.target_module),
-        ) else {
-            return false;
-        };
-        let (Ok(source_proj), Ok(target_proj)) = (
+        verify_guard!(Arc::ptr_eq(algebra, self.source_module.algebra())
+            && Arc::ptr_eq(algebra, self.target_module.algebra()));
+        let_or_false!((Ok(source_dec), Ok(target_dec)) = (
+            BasicDecomposition::new_with_context(&self.source_module, context),
+            BasicDecomposition::new_with_context(&self.target_module, context),
+        ));
+        let_or_false!((Ok(source_proj), Ok(target_proj)) = (
             ProjectiveSupport::new(algebra, &self.source_projective),
             ProjectiveSupport::new(algebra, &self.target_projective),
-        ) else {
-            return false;
-        };
+        ));
         // Check 2. The source keeps the projective part of the almost complete
         // pair, since a left mutation at a module slot leaves it alone.
-        if self.almost_complete.projective().vertices() != source_proj.vertices() {
-            return false;
-        }
-        if !extends(u, &source_dec, &self.source_extension) {
-            return false;
-        }
+        verify_guard!(self.almost_complete.projective().vertices() == source_proj.vertices()
+            && extends(u, &source_dec, &self.source_extension));
         // Check 3.
-        if !self
+        verify_guard!(self
             .almost_complete
             .projective()
             .vertices()
             .iter()
             .all(|&v| target_proj.contains(v))
-        {
-            return false;
-        }
-        if !extends(u, &target_dec, &self.target_extension) {
-            return false;
-        }
+            && extends(u, &target_dec, &self.target_extension));
         // Check 4.
-        match pair_iso(&source_dec, &source_proj, &target_dec, &target_proj) {
-            Ok(SupportPairIsoOutcome::NotIsomorphic(_)) => {}
-            _ => return false,
-        }
+        verify_guard!(matches!(
+            context.pair_iso_for(&source_dec, &source_proj, &target_dec, &target_proj),
+            Ok(outcome)
+                if matches!(outcome.as_ref(), SupportPairIsoOutcome::NotIsomorphic(found) if found == &self.distinct)
+        ));
         // Check 5. The decomposition and the support are rebuilt once more,
         // because classification takes them by value.
-        let (Ok(fresh_dec), Ok(fresh_proj)) = (
-            BasicDecomposition::new(&self.target_module),
+        let_or_false!((Ok(fresh_dec), Ok(fresh_proj)) = (
+            BasicDecomposition::new_with_context(&self.target_module, context),
             ProjectiveSupport::new(algebra, &self.target_projective),
-        ) else {
-            return false;
-        };
-        match SupportTauTiltingPair::classify(fresh_dec, fresh_proj) {
-            Ok(classification) if classification.is_pair() => {}
-            _ => return false,
-        }
-        self.exchange_holds(u, &source_dec, &target_dec, &source_proj, &target_proj)
-    }
+        ));
+        matches!(
+            SupportTauTiltingPair::classify_with_context(fresh_dec, fresh_proj, context),
+            Ok(classification) if classification.is_pair()
+        ) && self.exchange_holds(
+                u,
+                &source_dec,
+                &target_dec,
+                &source_proj,
+                &target_proj,
+                context,
+            )
+    });
 
     /// Rechecks the construction data: the approximation, the exchange
     /// sequence, and the shape.
@@ -690,85 +520,73 @@ impl MutationWitness {
         target_dec: &BasicDecomposition,
         source_proj: &ProjectiveSupport,
         target_proj: &ProjectiveSupport,
+        context: &VerificationContext,
     ) -> bool {
         let f = self.approximation.map();
-        if !f.source().ptr_eq(&self.exchanged) {
-            return false;
-        }
-        if self.approximation.summands().len() != u.len()
-            || !self
-                .approximation
-                .summands()
-                .iter()
-                .zip(u.summands())
-                .all(|(a, b)| a.module().ptr_eq(b.module()))
-        {
-            return false;
-        }
-        if !self.approximation.verify() || !is_cokernel(f, &self.exchange) {
-            return false;
-        }
+        verify_guard!(f.source().ptr_eq(&self.exchanged));
+        verify_guard!(
+            self.approximation.summands().len() == u.len()
+                && self
+                    .approximation
+                    .summands()
+                    .iter()
+                    .zip(u.summands())
+                    .all(|(a, b)| a.module().ptr_eq(b.module()))
+        );
+        verify_guard!(
+            self.approximation.verify_with_context(context) && is_cokernel(f, &self.exchange)
+        );
         // The slot summand is a summand of the source module part, and the
         // slot is its position there.
-        let Some(slot_summand) = source_dec.summands().get(self.slot) else {
-            return false;
-        };
-        if indecomposable_iso(slot_summand.module(), &self.exchanged, slot_summand.endo()).is_none()
-        {
-            return false;
-        }
+        let_or_false!(Some(slot_summand) = source_dec.summands().get(self.slot));
+        verify_guard!(
+            indecomposable_iso(slot_summand.module(), &self.exchanged, slot_summand.endo())
+                .is_some()
+        );
         let y = self.exchange.target();
         match &self.shape {
             ExchangeShape::MovesToProjective { vertex } => {
-                if !y.is_zero() || self.replacement.is_some() {
-                    return false;
-                }
-                if source_proj.contains(*vertex) || !target_proj.contains(*vertex) {
-                    return false;
-                }
                 let mut expected = source_proj.vertices().to_vec();
                 expected.push(*vertex);
                 expected.sort_unstable();
-                expected == target_proj.vertices() && target_dec.len() == u.len()
+                y.is_zero()
+                    && self.replacement.is_none()
+                    && !source_proj.contains(*vertex)
+                    && target_proj.contains(*vertex)
+                    && expected == target_proj.vertices()
+                    && target_dec.len() == u.len()
             }
             ExchangeShape::ReplacedByModule { multiplicity } => {
-                let Some(replacement) = &self.replacement else {
-                    return false;
-                };
-                if y.is_zero() || source_proj.vertices() != target_proj.vertices() {
-                    return false;
-                }
-                if target_dec.len() != u.len() + 1 {
-                    return false;
-                }
-                let split = decompose(y);
-                if split.summands().len() != *multiplicity
-                    || split
-                        .certificates()
+                let_or_false!(Some(replacement) = &self.replacement);
+                verify_guard!(!y.is_zero() && source_proj.vertices() == target_proj.vertices());
+                verify_guard!(target_dec.len() == u.len() + 1);
+                let split = context.decompose_for(y);
+                verify_guard!(
+                    split.summands().len() == *multiplicity
+                        && !split
+                            .certificates()
+                            .iter()
+                            .any(|c| *c != Certificate::Indecomposable)
+                );
+                let_or_false!(
+                    Ok(y1) = IndecomposableModule::new_with_context(replacement, context)
+                );
+                verify_guard!(
+                    split
+                        .summands()
                         .iter()
-                        .any(|c| *c != Certificate::Indecomposable)
-                {
-                    return false;
-                }
-                let Ok(y1) = IndecomposableModule::new(replacement) else {
-                    return false;
-                };
-                if !split
-                    .summands()
-                    .iter()
-                    .all(|s| indecomposable_iso(y1.module(), s, y1.endo()).is_some())
-                {
-                    return false;
-                }
+                        .all(|s| indecomposable_iso(y1.module(), s, y1.endo()).is_some())
+                );
                 // AIR Theorem 2.30(b): Y_1 is outside add(T), so in particular
                 // it repeats no summand of the source.
-                if source_dec
-                    .summands()
-                    .iter()
-                    .any(|s| indecomposable_iso(y1.module(), s.module(), y1.endo()).is_some())
-                {
-                    return false;
-                }
+                verify_guard!(
+                    !source_dec.summands().iter().any(|s| indecomposable_iso(
+                        y1.module(),
+                        s.module(),
+                        y1.endo()
+                    )
+                    .is_some())
+                );
                 target_dec
                     .summands()
                     .iter()
@@ -781,15 +599,12 @@ impl MutationWitness {
 /// Whether `whole` contains `u` as a direct summand, both by a rebuilt match
 /// and by the stored witness.
 fn extends(u: &BasicDecomposition, whole: &BasicDecomposition, stored: &AddClosureWitness) -> bool {
-    let Ok(Some(live)) = AddClosureWitness::new(u, whole) else {
-        return false;
-    };
-    if live.matches().len() != stored.matches().len() {
-        return false;
-    }
-    if !stored.module().ptr_eq(u.module()) || !stored.target().ptr_eq(whole.module()) {
-        return false;
-    }
+    let_or_false!(Ok(Some(live)) = AddClosureWitness::new(u, whole));
+    verify_guard!(
+        live.matches().len() == stored.matches().len()
+            && stored.module().ptr_eq(u.module())
+            && stored.target().ptr_eq(whole.module())
+    );
     let mut seen: Vec<usize> = stored.matches().iter().map(|m| m.target_index()).collect();
     seen.sort_unstable();
     let distinct = seen.windows(2).all(|w| w[0] != w[1]);
@@ -805,16 +620,11 @@ pub struct Mutation {
 }
 
 impl Mutation {
-    /// The slot the mutation was taken at.
-    #[inline]
-    pub fn slot(&self) -> usize {
-        self.slot
-    }
-
-    /// The pair the mutation lands on.
-    #[inline]
-    pub fn target(&self) -> &SupportTauTiltingPair {
-        &self.target
+    accessor_methods! {
+        /// The slot the mutation was taken at.
+        pub slot() -> usize = |this| this.slot;
+        /// The pair the mutation lands on.
+        pub target() -> &SupportTauTiltingPair = |this| &this.target;
     }
 
     /// The pair the mutation lands on, by value.
@@ -823,29 +633,25 @@ impl Mutation {
         self.target
     }
 
-    /// The five checks and the exchange sequence.
-    #[inline]
-    pub fn witness(&self) -> &MutationWitness {
-        &self.witness
+    accessor_methods! {
+        /// The five checks and the exchange sequence.
+        pub witness() -> &MutationWitness = |this| &this.witness;
+        /// Which of the two shapes the mutation took.
+        pub shape() -> &ExchangeShape = |this| this.witness.shape();
     }
 
-    /// Which of the two shapes the mutation took.
-    #[inline]
-    pub fn shape(&self) -> &ExchangeShape {
-        self.witness.shape()
-    }
-
-    /// Recomputes the witness and the target pair, and binds the two.
-    ///
-    /// The binding is [`Module::ptr_eq`] between the module part of the target
-    /// pair and the target module the witness proves things about, plus
-    /// equality of the two projective supports. Without it a witness for one
-    /// target would pass next to a target pair for another.
-    ///
-    /// The slot is bound as well. The witness proves a statement about one
-    /// slot, so a mutation carrying its own slot label could otherwise present
-    /// a witness for a different one and still verify.
-    pub fn verify(&self) -> bool {
+    verify_methods!(pub(crate), { hit(Site::MutationVerify); },
+        /// Recomputes the witness and the target pair, and binds the two.
+        ///
+        /// The binding is [`Module::ptr_eq`] between the module part of the
+        /// target pair and the target module the witness proves things about,
+        /// plus equality of the two projective supports. Without it a witness
+        /// for one target would pass next to a target pair for another.
+        ///
+        /// The slot is bound as well. The witness proves a statement about one
+        /// slot, so a mutation carrying its own slot label could otherwise
+        /// present a witness for a different one and still verify.
+        |self, context| {
         self.slot == self.witness.slot()
             && self
                 .target
@@ -853,9 +659,9 @@ impl Mutation {
                 .module()
                 .ptr_eq(self.witness.target_module())
             && self.target.projective().vertices() == self.witness.target_projective()
-            && self.witness.verify()
-            && self.target.verify()
-    }
+            && self.witness.verify_with_context(context)
+            && self.target.verify_with_context(context)
+    });
 }
 
 /// What slot `j` of a pair admits.
@@ -867,44 +673,23 @@ pub enum SlotOutcome {
     /// The left mutation at this slot, with its target.
     ///
     /// The mutation is boxed because it carries the whole target pair and
-    /// every witness, which is an order of magnitude larger than a
-    /// [`FacWitness`].
+    /// every witness, which is much larger than a [`FacWitness`].
     LeftMutation(Box<Mutation>),
 }
 
 impl SlotOutcome {
-    /// Whether the slot admits a left mutation.
-    #[inline]
-    pub fn is_left_mutation(&self) -> bool {
-        matches!(self, Self::LeftMutation(_))
-    }
-
-    /// The mutation, or `None` when the slot admits no left mutation.
-    #[inline]
-    pub fn mutation(&self) -> Option<&Mutation> {
-        match self {
-            Self::LeftMutation(mutation) => Some(mutation),
-            Self::NoLeftMutation(_) => None,
-        }
-    }
-
-    /// The `Fac` witness, or `None` when the slot admits a left mutation.
-    #[inline]
-    pub fn fac_witness(&self) -> Option<&FacWitness> {
-        match self {
-            Self::NoLeftMutation(witness) => Some(witness),
-            Self::LeftMutation(_) => None,
-        }
-    }
-
-    /// The mutation by value, or `None` when the slot admits no left mutation.
-    #[inline]
-    pub fn into_mutation(self) -> Option<Mutation> {
-        match self {
-            Self::LeftMutation(mutation) => Some(*mutation),
-            Self::NoLeftMutation(_) => None,
-        }
-    }
+    binary_outcome_accessors!(
+        LeftMutation,
+        NoLeftMutation,
+        mutation -> Mutation = |value| value.as_ref(),
+        fac_witness -> FacWitness = |value| value,
+        is_left_mutation,
+        into_mutation -> Mutation = |value| *value;
+        flag = "Whether the slot admits a left mutation.";
+        positive = "The mutation, or `None` when the slot admits no left mutation.";
+        negative = "The `Fac` witness, or `None` when the slot admits a left mutation.";
+        into = "The mutation by value, or `None` when the slot admits no left mutation.";
+    );
 }
 
 /// The parts of the target pair the shape decision produces.
@@ -932,8 +717,8 @@ fn build_target(
     y: &Module,
     dropped: &[u32],
 ) -> Result<BuiltTarget, MutationError> {
-    if !dropped.is_empty() {
-        if dropped.len() != 1 {
+    if let Some((&vertex, rest)) = dropped.split_first() {
+        if !rest.is_empty() {
             return Err(defect(MutationDefect::DroppedVertexCount {
                 dropped: dropped.to_vec(),
             }));
@@ -943,7 +728,6 @@ fn build_target(
                 dim_vector: y.dim_vector().to_vec(),
             }));
         }
-        let vertex = dropped[0];
         let mut vertices = pair.projective().vertices().to_vec();
         vertices.push(vertex);
         vertices.sort_unstable();
@@ -1019,9 +803,9 @@ pub fn mutate_at(pair: &SupportTauTiltingPair, slot: usize) -> Result<SlotOutcom
 /// module part, and `fresh_index` labels the cokernel summand of a
 /// [`ExchangeShape::ReplacedByModule`] mutation. The labels travel to the
 /// witnesses of the target pair and to
-/// [`crate::taurigid::NonTauRigidWitness`]; they are not cache keys, so a
-/// repeated label costs nothing but a confusing report. [`TauCache`] answers
-/// from the identity of the module value.
+/// [`crate::taurigid::NonTauRigidWitness`]. They are not cache keys, so a
+/// repeated label costs nothing but a confusing report. [`TauCache`] keys on
+/// the identity of the module value.
 ///
 /// The plain [`mutate_at`] labels summands by position because it builds and
 /// drops its own cache. A caller that shares one cache usually has its own
@@ -1115,9 +899,7 @@ pub fn mutate_at_with_cache(
     let built = build_target(pair, &u_dec, &y, &dropped)?;
 
     let mut target_indices = u_indices.clone();
-    if built.replacement.is_some() {
-        target_indices.push(fresh_index);
-    }
+    target_indices.extend(built.replacement.is_some().then_some(fresh_index));
     let target_proj = ProjectiveSupport::new(&algebra, &built.vertices)?;
     let target = match SupportTauTiltingPair::classify_with_cache(
         built.decomposition,
@@ -1197,11 +979,7 @@ mod tests {
 
     /// The direct sum of `parts`, and the zero module when `parts` is empty.
     fn assemble(algebra: &Arc<Algebra>, parts: &[&Module]) -> Module {
-        if parts.is_empty() {
-            Module::zero(algebra)
-        } else {
-            direct_sum(parts).0
-        }
+        direct_sum_or_zero(algebra, parts.iter().copied()).0
     }
 
     fn f2() -> PrimeField {
@@ -1305,6 +1083,37 @@ mod tests {
         assert!(mutation.witness().verify(), "the witness recomputes");
         assert!(mutation.verify(), "the mutation recomputes");
         mutation
+    }
+
+    #[test]
+    fn mutation_witness_reuses_context_for_nested_approximation() {
+        let _reset_guard = crate::profile::tests::reset_lock();
+        let algebra = linear_an(2, f5());
+        let p0 = Module::projective(&algebra, 0);
+        let p1 = Module::projective(&algebra, 1);
+        let pair = pair_of(&algebra, &[&p0, &p1], &[]);
+        let mutation = left(&pair, &[1, 1]);
+        let context = VerificationContext::new();
+
+        crate::profile::reset();
+        assert!(mutation.witness().verify_with_context(&context));
+        let first_counts = crate::profile::snapshot();
+        let first_memo = context.memo_stats();
+        assert!(first_memo.1 > 0, "the first verification has memo misses");
+
+        assert!(mutation.witness().verify_with_context(&context));
+        let second_counts = crate::profile::snapshot();
+        let second_memo = context.memo_stats();
+        assert_eq!(second_memo.1, first_memo.1);
+        assert!(
+            second_memo.0 > first_memo.0,
+            "the second verification has memo hits"
+        );
+        assert_eq!(
+            second_counts[Site::EndoNew as usize],
+            first_counts[Site::EndoNew as usize],
+            "the nested approximation reuses its cached endomorphism"
+        );
     }
 
     fn no_left(pair: &SupportTauTiltingPair, dim: &[usize]) -> FacWitness {
@@ -1608,8 +1417,8 @@ mod tests {
     }
 
     // One cache across several mutations answers repeated translates from the
-    // store. The point here is only that the hit count rises, which is what
-    // shows the cache is shared rather than rebuilt per call.
+    // store. The hit count rising is what shows the cache is shared rather
+    // than rebuilt per call.
     #[test]
     fn one_cache_serves_several_mutations() {
         let algebra = linear_an(3, f5());
@@ -1742,7 +1551,7 @@ mod tests {
         assert!(!at_p0.verify());
     }
 
-    // A witness proves a statement about ONE slot, so relabelling the
+    // A witness proves a statement about one slot, so relabelling the
     // mutation must not survive verification. Both halves still pass alone.
     #[test]
     fn a_mutation_relabelled_to_another_slot_fails_verification() {

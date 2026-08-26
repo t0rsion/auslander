@@ -1,8 +1,8 @@
-//! The sealed admissible order on path words.
+//! The sealed admissible order `deglex-arrowid-v1` on path words.
 //!
 //! The crate has exactly one order, identified by [`ORDER_ID`]. Completion,
-//! certificates, and verification all use it. No user-supplied comparators
-//! exist.
+//! certificates, and the verifier all use it. There is no user-supplied
+//! comparator.
 //!
 //! The order is admissible:
 //!

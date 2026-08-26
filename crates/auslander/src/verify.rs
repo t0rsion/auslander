@@ -2,8 +2,8 @@
 //!
 //! The verifier accepts a certificate only when it reproduces every claim
 //! itself, from the certificate and nothing else. It reuses four modules:
-//! [`crate::field`] arithmetic, [`crate::quiver`] paths, the sealed
-//! comparison of [`crate::order`], and the [`crate::certificate`] data
+//! [`crate::field`] arithmetic, [`crate::quiver`] paths, the admissible
+//! order [`crate::order::ORDER_ID`], and the [`crate::certificate`] data
 //! model. Every replay routine, the ambiguity enumeration, and the
 //! normal-word automaton are written here from the definitions, so a
 //! defect in the completion engine cannot make a bad certificate pass.
@@ -47,11 +47,10 @@
 //!   size.
 //!
 //! [`VerifiedCompletion`] has no public constructor. Holding one proves
-//! the bytes passed every check in this module.
+//! the certificate passed every check in this module.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fmt;
 
 use crate::certificate::{
     AmbiguityKind, CERT_SCHEMA, CertParseError, Certificate, FinitenessData, RelationData,
@@ -79,14 +78,10 @@ pub enum TraceSite {
     Ambiguity { index: usize },
 }
 
-impl fmt::Display for TraceSite {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Membership { input } => write!(f, "membership trace {input}"),
-            Self::Ambiguity { index } => write!(f, "ambiguity trace {index}"),
-        }
-    }
-}
+display_error! { TraceSite {
+    Self::Membership { input } => "membership trace {input}";
+    Self::Ambiguity { index } => "ambiguity trace {index}";
+} }
 
 /// A defect in one term of relation data.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,22 +104,16 @@ pub enum TermDefect {
     NotDescending,
 }
 
-impl fmt::Display for TermDefect {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty => f.write_str("relation has no terms"),
-            Self::ZeroCoefficient => f.write_str("coefficient is zero"),
-            Self::NonCanonicalCoefficient { coeff } => {
-                write!(f, "coefficient {coeff} is not in 0..p")
-            }
-            Self::WordTooShort { len } => write!(f, "word has length {len}, below 2"),
-            Self::InvalidWord(error) => write!(f, "word is not a path: {error}"),
-            Self::MixedSource => f.write_str("word starts at a different vertex than term 0"),
-            Self::MixedTarget => f.write_str("word ends at a different vertex than term 0"),
-            Self::NotDescending => f.write_str("word is not strictly below the word before it"),
-        }
-    }
-}
+display_error! { TermDefect {
+    Self::Empty => "relation has no terms";
+    Self::ZeroCoefficient => "coefficient is zero";
+    Self::NonCanonicalCoefficient { coeff } => "coefficient {coeff} is not in 0..p";
+    Self::WordTooShort { len } => "word has length {len}, below 2";
+    Self::InvalidWord(error) => "word is not a path: {error}";
+    Self::MixedSource => "word starts at a different vertex than term 0";
+    Self::MixedTarget => "word ends at a different vertex than term 0";
+    Self::NotDescending => "word is not strictly below the word before it";
+} }
 
 /// A defect in the witness of an infinite-dimensional claim.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,430 +136,192 @@ pub enum WitnessDefect {
     CycleDoesNotReturn { reached: usize, back: usize },
 }
 
-impl fmt::Display for WitnessDefect {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptyCycle => f.write_str("the cycle word is empty"),
-            Self::NotAPath(error) => {
-                write!(f, "prefix and two cycles do not spell a path: {error}")
-            }
-            Self::ContainsLeadingWord { lead, position } => write!(
-                f,
-                "the leading word of basis element {lead} occurs at position {position}"
-            ),
-            Self::PrefixLeaves { at } => {
-                write!(f, "the prefix leaves the automaton at position {at}")
-            }
-            Self::CycleLeaves { at } => {
-                write!(f, "the cycle leaves the automaton at position {at}")
-            }
-            Self::CycleDoesNotReturn { reached, back } => write!(
-                f,
-                "the cycle starts at state {reached} but ends at state {back}"
-            ),
+display_error! { WitnessDefect {
+    Self::EmptyCycle => "the cycle word is empty";
+    Self::NotAPath(error) => "prefix and two cycles do not spell a path: {error}";
+    Self::ContainsLeadingWord { lead, position } => "the leading word of basis element {lead} occurs at position {position}";
+    Self::PrefixLeaves { at } => "the prefix leaves the automaton at position {at}";
+    Self::CycleLeaves { at } => "the cycle leaves the automaton at position {at}";
+    Self::CycleDoesNotReturn { reached, back } => "the cycle starts at state {reached} but ends at state {back}";
+} }
+
+macro_rules! verify_error_enum {
+    (
+        $(#[$enum_meta:meta])*
+        $name:ident {
+            $(
+                $(#[$meta:meta])*
+                $variant:ident $(($inner:ty))?
+                $( { $($field:ident : $ty:ty),* $(,)? } )? ;
+            )*
         }
+    ) => {
+        $(#[$enum_meta])*
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        pub enum $name {
+            $(
+                $(#[$meta])*
+                $variant $(($inner))? $( { $($field : $ty),* } )?,
+            )*
+        }
+    };
+}
+
+verify_error_enum! {
+    /// A rejected certificate. Each variant names one failed check and carries
+    /// the indices needed to locate the defect.
+    VerifyError {
+        /// The bytes do not parse as a certificate.
+        Parse(CertParseError);
+        /// The schema string is not [`CERT_SCHEMA`].
+        Schema { found: String };
+        /// The order string is not [`ORDER_ID`].
+        Order { found: String };
+        /// The field modulus is rejected.
+        Field(FieldError);
+        /// The quiver data is rejected.
+        Quiver(QuiverError);
+        /// `input_relations[index]` has a defect at term `term`.
+        InputRelation { index: usize, term: usize, defect: TermDefect };
+        /// `basis[index]` has a defect at term `term`.
+        BasisRelation { index: usize, term: usize, defect: TermDefect };
+        /// `basis[index]` has leading coefficient `coeff`, not 1.
+        BasisNotMonic { index: usize, coeff: u64 };
+        /// The leading word of `basis[lead]` occurs in word `term` of
+        /// `basis[element]` at `position`.
+        BasisNotReduced { lead: usize, element: usize, term: usize, position: usize };
+        /// `origin` does not have one entry per basis element.
+        OriginCount { basis: usize, origin: usize };
+        /// An origin term of `basis[element]` has a zero or non-canonical
+        /// coefficient.
+        OriginCoefficient { element: usize, term: usize, coeff: u64 };
+        /// An origin term of `basis[element]` names an input index out of range.
+        OriginInputIndex { element: usize, term: usize, input_index: usize, inputs: usize };
+        /// An origin term of `basis[element]` expands to a non-path word.
+        OriginNotComposable { element: usize, term: usize, error: QuiverError };
+        /// The origin of `basis[element]` does not expand to it; `word` is a
+        /// word where the two sides differ.
+        OriginMismatch { element: usize, word: Vec<u32> };
+        /// `membership` does not have one trace per input relation.
+        MembershipCount { inputs: usize, traces: usize };
+        /// `membership[input].start` is not `input_relations[input]`.
+        MembershipStart { input: usize };
+        /// A trace step names a basis index out of range.
+        TraceStepBasisIndex { site: TraceSite, step: usize, basis_index: usize, basis: usize };
+        /// A trace step's word is not `left · leading word · right`.
+        TraceStepWord { site: TraceSite, step: usize };
+        /// A trace step's word or one of its expansions is not a path.
+        TraceStepPath { site: TraceSite, step: usize, error: QuiverError };
+        /// A trace step names a word the current polynomial does not contain.
+        TraceStepAbsent { site: TraceSite, step: usize, word: Vec<u32> };
+        /// A trace step's coefficient does not eliminate the named word.
+        TraceStepCoefficient { site: TraceSite, step: usize, expected: u64, found: u64 };
+        /// A trace step expands to a word that is not strictly below the
+        /// eliminated word.
+        TraceStepAscending { site: TraceSite, step: usize, word: Vec<u32> };
+        /// The polynomial is not zero after the last step; `word` is the
+        /// largest remaining word.
+        TraceRemainder { site: TraceSite, word: Vec<u32> };
+        /// The basis has this ambiguity but the certificate does not list it.
+        AmbiguityMissing { i: usize, j: usize, kind: AmbiguityKind, offset: usize };
+        /// The certificate lists an entry that is not an ambiguity of the basis.
+        AmbiguityExtra { i: usize, j: usize, kind: AmbiguityKind, offset: usize };
+        /// The certificate lists the same ambiguity twice.
+        AmbiguityDuplicate { i: usize, j: usize, kind: AmbiguityKind, offset: usize };
+        /// `ambiguities[index]` skips this ambiguity: the list must follow
+        /// the canonical `(i, j, kind, offset)` order, overlap before
+        /// inclusion.
+        AmbiguityOrder { index: usize, i: usize, j: usize, kind: AmbiguityKind, offset: usize };
+        /// `ambiguities[index].trace.start` has a defect at term `term`.
+        AmbiguityStart { index: usize, term: usize, defect: TermDefect };
+        /// `ambiguities[index].trace.start` is not the composition or its
+        /// negation.
+        AmbiguityStartMismatch { index: usize };
+        /// The automaton declares fewer states than the quiver has vertices.
+        /// Checked before the quiver is built, so a huge declared vertex
+        /// count cannot force a large allocation.
+        AutomatonStateCount { vertices: u32, states: usize };
+        /// The automaton state lists differ first at `position`. `None` means
+        /// the list ends there.
+        AutomatonStates { position: usize, expected: Option<Vec<u32>>, found: Option<Vec<u32>> };
+        /// The automaton transition lists differ first at `position`. `None`
+        /// means the list ends there.
+        AutomatonTransitions {
+            position: usize,
+            expected: Option<(usize, u32, usize)>,
+            found: Option<(usize, u32, usize)>,
+        };
+        /// The finiteness claim contradicts the verifier's own cycle
+        /// decision.
+        FinitenessClaim { claimed_finite: bool };
+        /// The witness of an infinite claim fails a check.
+        InfiniteWitness { defect: WitnessDefect };
+        /// The normal-word lists differ first at `position`. `None` means the
+        /// list ends there.
+        NormalWords {
+            position: usize,
+            expected: Option<Vec<u32>>,
+            found: Option<Vec<u32>>,
+        };
+        /// The set of normal words is infinite. The witness is the
+        /// certificate's own, fully verified.
+        InfiniteDimensional { witness: CycleWitness };
     }
 }
 
-/// A rejected certificate. Each variant names one failed check and carries
-/// the indices needed to locate the defect.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum VerifyError {
-    /// The bytes do not parse as a certificate.
-    Parse(CertParseError),
-    /// The schema string is not [`CERT_SCHEMA`].
-    Schema { found: String },
-    /// The order string is not [`ORDER_ID`].
-    Order { found: String },
-    /// The field modulus is rejected.
-    Field(FieldError),
-    /// The quiver data is rejected.
-    Quiver(QuiverError),
-    /// `input_relations[index]` has a defect at term `term`.
-    InputRelation {
-        index: usize,
-        term: usize,
-        defect: TermDefect,
-    },
-    /// `basis[index]` has a defect at term `term`.
-    BasisRelation {
-        index: usize,
-        term: usize,
-        defect: TermDefect,
-    },
-    /// `basis[index]` has leading coefficient `coeff`, not 1.
-    BasisNotMonic { index: usize, coeff: u64 },
-    /// The leading word of `basis[lead]` occurs in word `term` of
-    /// `basis[element]` at `position`.
-    BasisNotReduced {
-        lead: usize,
-        element: usize,
-        term: usize,
-        position: usize,
-    },
-    /// `origin` does not have one entry per basis element.
-    OriginCount { basis: usize, origin: usize },
-    /// An origin term of `basis[element]` has a zero or non-canonical
-    /// coefficient.
-    OriginCoefficient {
-        element: usize,
-        term: usize,
-        coeff: u64,
-    },
-    /// An origin term of `basis[element]` names an input index out of range.
-    OriginInputIndex {
-        element: usize,
-        term: usize,
-        input_index: usize,
-        inputs: usize,
-    },
-    /// An origin term of `basis[element]` expands to a non-path word.
-    OriginNotComposable {
-        element: usize,
-        term: usize,
-        error: QuiverError,
-    },
-    /// The origin of `basis[element]` does not expand to it; `word` is a
-    /// word where the two sides differ.
-    OriginMismatch { element: usize, word: Vec<u32> },
-    /// `membership` does not have one trace per input relation.
-    MembershipCount { inputs: usize, traces: usize },
-    /// `membership[input].start` is not `input_relations[input]`.
-    MembershipStart { input: usize },
-    /// A trace step names a basis index out of range.
-    TraceStepBasisIndex {
-        site: TraceSite,
-        step: usize,
-        basis_index: usize,
-        basis: usize,
-    },
-    /// A trace step's word is not `left · leading word · right`.
-    TraceStepWord { site: TraceSite, step: usize },
-    /// A trace step's word or one of its expansions is not a path.
-    TraceStepPath {
-        site: TraceSite,
-        step: usize,
-        error: QuiverError,
-    },
-    /// A trace step names a word the current polynomial does not contain.
-    TraceStepAbsent {
-        site: TraceSite,
-        step: usize,
-        word: Vec<u32>,
-    },
-    /// A trace step's coefficient does not eliminate the named word.
-    TraceStepCoefficient {
-        site: TraceSite,
-        step: usize,
-        expected: u64,
-        found: u64,
-    },
-    /// A trace step expands to a word that is not strictly below the
-    /// eliminated word.
-    TraceStepAscending {
-        site: TraceSite,
-        step: usize,
-        word: Vec<u32>,
-    },
-    /// The polynomial is not zero after the last step; `word` is the
-    /// largest remaining word.
-    TraceRemainder { site: TraceSite, word: Vec<u32> },
-    /// The basis has this ambiguity but the certificate does not list it.
-    AmbiguityMissing {
-        i: usize,
-        j: usize,
-        kind: AmbiguityKind,
-        offset: usize,
-    },
-    /// The certificate lists an entry that is not an ambiguity of the basis.
-    AmbiguityExtra {
-        i: usize,
-        j: usize,
-        kind: AmbiguityKind,
-        offset: usize,
-    },
-    /// The certificate lists the same ambiguity twice.
-    AmbiguityDuplicate {
-        i: usize,
-        j: usize,
-        kind: AmbiguityKind,
-        offset: usize,
-    },
-    /// `ambiguities[index]` skips this ambiguity: the list must follow
-    /// the canonical `(i, j, kind, offset)` order, overlap before
-    /// inclusion.
-    AmbiguityOrder {
-        index: usize,
-        i: usize,
-        j: usize,
-        kind: AmbiguityKind,
-        offset: usize,
-    },
-    /// `ambiguities[index].trace.start` has a defect at term `term`.
-    AmbiguityStart {
-        index: usize,
-        term: usize,
-        defect: TermDefect,
-    },
-    /// `ambiguities[index].trace.start` is not the composition or its
-    /// negation.
-    AmbiguityStartMismatch { index: usize },
-    /// The automaton declares fewer states than the quiver has vertices.
-    /// Checked before the quiver is built, so a huge declared vertex
-    /// count cannot force a large allocation.
-    AutomatonStateCount { vertices: u32, states: usize },
-    /// The automaton state lists differ first at `position`. `None` means
-    /// the list ends there.
-    AutomatonStates {
-        position: usize,
-        expected: Option<Vec<u32>>,
-        found: Option<Vec<u32>>,
-    },
-    /// The automaton transition lists differ first at `position`. `None`
-    /// means the list ends there.
-    AutomatonTransitions {
-        position: usize,
-        expected: Option<(usize, u32, usize)>,
-        found: Option<(usize, u32, usize)>,
-    },
-    /// The finiteness claim contradicts the verifier's own cycle
-    /// decision.
-    FinitenessClaim { claimed_finite: bool },
-    /// The witness of an infinite claim fails a check.
-    InfiniteWitness { defect: WitnessDefect },
-    /// The normal-word lists differ first at `position`. `None` means the
-    /// list ends there.
-    NormalWords {
-        position: usize,
-        expected: Option<Vec<u32>>,
-        found: Option<Vec<u32>>,
-    },
-    /// The set of normal words is infinite. The witness is the
-    /// certificate's own, fully verified.
-    InfiniteDimensional { witness: CycleWitness },
-}
+display_error! { VerifyError {
+    Self::Parse(error) => "certificate rejected: {error}";
+    Self::Schema { found } => "schema is {found:?}, expected {CERT_SCHEMA:?}";
+    Self::Order { found } => "order is {found:?}, expected {ORDER_ID:?}";
+    Self::Field(error) => "field rejected: {error}";
+    Self::Quiver(error) => "quiver rejected: {error}";
+    Self::InputRelation { index, term, defect } => "input relation {index}, term {term}: {defect}";
+    Self::BasisRelation { index, term, defect } => "basis element {index}, term {term}: {defect}";
+    Self::BasisNotMonic { index, coeff } => "basis element {index} has leading coefficient {coeff}, not 1";
+    Self::BasisNotReduced { lead, element, term, position } => "leading word of basis element {lead} occurs in word {term} of basis element {element} at position {position}";
+    Self::OriginCount { basis, origin } => "origin has {origin} entries for {basis} basis elements";
+    Self::OriginCoefficient { element, term, coeff } => "origin of basis element {element}, term {term}: coefficient {coeff} is zero or not in 0..p";
+    Self::OriginInputIndex { element, term, input_index, inputs } => "origin of basis element {element}, term {term}: input index {input_index} outside 0..{inputs}";
+    Self::OriginNotComposable { element, term, error } => "origin of basis element {element}, term {term}: expansion is not a path: {error}";
+    Self::OriginMismatch { element, word } => "origin of basis element {element} does not expand to it; the sides differ at word {word:?}";
+    Self::MembershipCount { inputs, traces } => "membership has {traces} traces for {inputs} inputs";
+    Self::MembershipStart { input } => "membership trace {input} does not start at input relation {input}";
+    Self::TraceStepBasisIndex { site, step, basis_index, basis } => "{site}, step {step}: basis index {basis_index} outside 0..{basis}";
+    Self::TraceStepWord { site, step } => "{site}, step {step}: word is not left, leading word, right concatenated";
+    Self::TraceStepPath { site, step, error } => "{site}, step {step}: not a path: {error}";
+    Self::TraceStepAbsent { site, step, word } => "{site}, step {step}: word {word:?} has coefficient zero";
+    Self::TraceStepCoefficient { site, step, expected, found } => "{site}, step {step}: the word has coefficient {expected}, the step says {found}";
+    Self::TraceStepAscending { site, step, word } => "{site}, step {step}: expanded word {word:?} is not strictly below the eliminated word";
+    Self::TraceRemainder { site, word } => "{site}: not zero after the last step; largest remaining word {word:?}";
+    Self::AmbiguityMissing { i, j, kind, offset } => "ambiguity ({i}, {j}, {}, {offset}) is missing", kind.as_str();
+    Self::AmbiguityExtra { i, j, kind, offset } => "({i}, {j}, {}, {offset}) is not an ambiguity of the basis", kind.as_str();
+    Self::AmbiguityDuplicate { i, j, kind, offset } => "ambiguity ({i}, {j}, {}, {offset}) is listed twice", kind.as_str();
+    Self::AmbiguityOrder { index, i, j, kind, offset } => "ambiguity entry {index} skips ({i}, {j}, {}, {offset}); the list must follow the canonical key order", kind.as_str();
+    Self::AmbiguityStart { index, term, defect } => "ambiguity {index}, start term {term}: {defect}";
+    Self::AmbiguityStartMismatch { index } => "ambiguity {index}: start is not the composition or its negation";
+    Self::AutomatonStateCount { vertices, states } => "the automaton has {states} states for {vertices} vertices";
+    Self::AutomatonStates { position, expected, found } => "automaton states differ at position {position}: expected {expected:?}, found {found:?}";
+    Self::AutomatonTransitions { position, expected, found } => "automaton transitions differ at position {position}: expected {expected:?}, found {found:?}";
+    Self::FinitenessClaim { claimed_finite: true } => "the certificate claims a finite language but the automaton has a cycle";
+    Self::FinitenessClaim { claimed_finite: false } => "the certificate claims an infinite language but the automaton is acyclic";
+    Self::InfiniteWitness { defect } => "the infinite-dimension witness is rejected: {defect}";
+    Self::NormalWords { position, expected, found } => "normal words differ at position {position}: expected {expected:?}, found {found:?}";
+    Self::InfiniteDimensional { witness } => "the quotient is infinite dimensional: prefix {:?}, cycle {:?}", witness.prefix, witness.cycle;
+} }
 
-impl fmt::Display for VerifyError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Parse(error) => write!(f, "certificate rejected: {error}"),
-            Self::Schema { found } => {
-                write!(f, "schema is {found:?}, expected {CERT_SCHEMA:?}")
-            }
-            Self::Order { found } => write!(f, "order is {found:?}, expected {ORDER_ID:?}"),
-            Self::Field(error) => write!(f, "field rejected: {error}"),
-            Self::Quiver(error) => write!(f, "quiver rejected: {error}"),
-            Self::InputRelation {
-                index,
-                term,
-                defect,
-            } => write!(f, "input relation {index}, term {term}: {defect}"),
-            Self::BasisRelation {
-                index,
-                term,
-                defect,
-            } => write!(f, "basis element {index}, term {term}: {defect}"),
-            Self::BasisNotMonic { index, coeff } => write!(
-                f,
-                "basis element {index} has leading coefficient {coeff}, not 1"
-            ),
-            Self::BasisNotReduced {
-                lead,
-                element,
-                term,
-                position,
-            } => write!(
-                f,
-                "leading word of basis element {lead} occurs in word {term} of \
-                 basis element {element} at position {position}"
-            ),
-            Self::OriginCount { basis, origin } => {
-                write!(f, "origin has {origin} entries for {basis} basis elements")
-            }
-            Self::OriginCoefficient {
-                element,
-                term,
-                coeff,
-            } => write!(
-                f,
-                "origin of basis element {element}, term {term}: coefficient {coeff} \
-                 is zero or not in 0..p"
-            ),
-            Self::OriginInputIndex {
-                element,
-                term,
-                input_index,
-                inputs,
-            } => write!(
-                f,
-                "origin of basis element {element}, term {term}: input index \
-                 {input_index} outside 0..{inputs}"
-            ),
-            Self::OriginNotComposable {
-                element,
-                term,
-                error,
-            } => write!(
-                f,
-                "origin of basis element {element}, term {term}: expansion is not \
-                 a path: {error}"
-            ),
-            Self::OriginMismatch { element, word } => write!(
-                f,
-                "origin of basis element {element} does not expand to it; the \
-                 sides differ at word {word:?}"
-            ),
-            Self::MembershipCount { inputs, traces } => {
-                write!(f, "membership has {traces} traces for {inputs} inputs")
-            }
-            Self::MembershipStart { input } => write!(
-                f,
-                "membership trace {input} does not start at input relation {input}"
-            ),
-            Self::TraceStepBasisIndex {
-                site,
-                step,
-                basis_index,
-                basis,
-            } => write!(
-                f,
-                "{site}, step {step}: basis index {basis_index} outside 0..{basis}"
-            ),
-            Self::TraceStepWord { site, step } => write!(
-                f,
-                "{site}, step {step}: word is not left, leading word, right \
-                 concatenated"
-            ),
-            Self::TraceStepPath { site, step, error } => {
-                write!(f, "{site}, step {step}: not a path: {error}")
-            }
-            Self::TraceStepAbsent { site, step, word } => {
-                write!(f, "{site}, step {step}: word {word:?} has coefficient zero")
-            }
-            Self::TraceStepCoefficient {
-                site,
-                step,
-                expected,
-                found,
-            } => write!(
-                f,
-                "{site}, step {step}: the word has coefficient {expected}, the \
-                 step says {found}"
-            ),
-            Self::TraceStepAscending { site, step, word } => write!(
-                f,
-                "{site}, step {step}: expanded word {word:?} is not strictly \
-                 below the eliminated word"
-            ),
-            Self::TraceRemainder { site, word } => write!(
-                f,
-                "{site}: not zero after the last step; largest remaining word {word:?}"
-            ),
-            Self::AmbiguityMissing { i, j, kind, offset } => write!(
-                f,
-                "ambiguity ({i}, {j}, {}, {offset}) is missing",
-                kind.as_str()
-            ),
-            Self::AmbiguityExtra { i, j, kind, offset } => write!(
-                f,
-                "({i}, {j}, {}, {offset}) is not an ambiguity of the basis",
-                kind.as_str()
-            ),
-            Self::AmbiguityDuplicate { i, j, kind, offset } => write!(
-                f,
-                "ambiguity ({i}, {j}, {}, {offset}) is listed twice",
-                kind.as_str()
-            ),
-            Self::AmbiguityOrder {
-                index,
-                i,
-                j,
-                kind,
-                offset,
-            } => write!(
-                f,
-                "ambiguity entry {index} skips ({i}, {j}, {}, {offset}); the list \
-                 must follow the canonical key order",
-                kind.as_str()
-            ),
-            Self::AmbiguityStart {
-                index,
-                term,
-                defect,
-            } => write!(f, "ambiguity {index}, start term {term}: {defect}"),
-            Self::AmbiguityStartMismatch { index } => write!(
-                f,
-                "ambiguity {index}: start is not the composition or its negation"
-            ),
-            Self::AutomatonStateCount { vertices, states } => write!(
-                f,
-                "the automaton has {states} states for {vertices} vertices"
-            ),
-            Self::AutomatonStates {
-                position,
-                expected,
-                found,
-            } => write!(
-                f,
-                "automaton states differ at position {position}: expected \
-                 {expected:?}, found {found:?}"
-            ),
-            Self::AutomatonTransitions {
-                position,
-                expected,
-                found,
-            } => write!(
-                f,
-                "automaton transitions differ at position {position}: expected \
-                 {expected:?}, found {found:?}"
-            ),
-            Self::FinitenessClaim { claimed_finite } => {
-                if *claimed_finite {
-                    f.write_str(
-                        "the certificate claims a finite language but the automaton has a cycle",
-                    )
-                } else {
-                    f.write_str(
-                        "the certificate claims an infinite language but the automaton is acyclic",
-                    )
-                }
-            }
-            Self::InfiniteWitness { defect } => {
-                write!(f, "the infinite-dimension witness is rejected: {defect}")
-            }
-            Self::NormalWords {
-                position,
-                expected,
-                found,
-            } => write!(
-                f,
-                "normal words differ at position {position}: expected {expected:?}, \
-                 found {found:?}"
-            ),
-            Self::InfiniteDimensional { witness } => write!(
-                f,
-                "the quotient is infinite dimensional: prefix {:?}, cycle {:?}",
-                witness.prefix, witness.cycle
-            ),
-        }
-    }
-}
+error_source!(VerifyError {
+    Self::Parse(error) => Some(error),
+    Self::Field(error) => Some(error),
+    Self::Quiver(error) => Some(error),
+    _ => None,
+});
 
-impl std::error::Error for VerifyError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Parse(error) => Some(error),
-            Self::Field(error) => Some(error),
-            Self::Quiver(error) => Some(error),
-            _ => None,
-        }
-    }
-}
-
-/// A certificate that passed every check. Only [`verify`] builds one, and
-/// the fields stay private, so holding the value is proof the bytes
-/// verified. Every constructor of [`crate::algebra::Algebra`] consumes
-/// one, so verification is the only route to an algebra.
+/// A certificate that passed every check.
+///
+/// Only [`verify`] and [`verify_certificate`] build one, and the fields
+/// stay private, so holding the value is proof the certificate verified.
+/// Every constructor of [`crate::algebra::Algebra`] consumes one, so
+/// verification is the only route to an algebra.
 #[derive(Clone, Debug)]
 pub struct VerifiedCompletion {
     certificate: Certificate,
@@ -581,36 +332,19 @@ pub struct VerifiedCompletion {
 }
 
 impl VerifiedCompletion {
-    /// The verified certificate.
-    #[inline]
-    pub fn certificate(&self) -> &Certificate {
-        &self.certificate
-    }
-
-    /// The quiver rebuilt from the certificate.
-    #[inline]
-    pub fn quiver(&self) -> &Quiver {
-        &self.quiver
-    }
-
-    /// The prime field of the certificate.
-    #[inline]
-    pub fn field(&self) -> PrimeField {
-        self.field
-    }
-
-    /// The reduced Groebner basis, each element as descending
-    /// `(coefficient, word)` terms.
-    #[inline]
-    pub fn basis(&self) -> &[Vec<(Fp, PathWord)>] {
-        &self.basis
-    }
-
-    /// The normal words in the fixed basis order: trivial paths by vertex,
-    /// then by length, source, and lexicographic arrow word.
-    #[inline]
-    pub fn normal_words(&self) -> &[PathWord] {
-        &self.normal_words
+    accessor_methods! {
+        /// The verified certificate.
+        pub certificate() -> &Certificate = |this| &this.certificate;
+        /// The quiver rebuilt from the certificate.
+        pub quiver() -> &Quiver = |this| &this.quiver;
+        /// The prime field of the certificate.
+        pub field() -> PrimeField = |this| this.field;
+        /// The reduced Groebner basis, each element as descending
+        /// `(coefficient, word)` terms.
+        pub basis() -> &[Vec<(Fp, PathWord)>] = |this| &this.basis;
+        /// The normal words in the fixed basis order: trivial paths by vertex,
+        /// then by length, source, and lexicographic arrow word.
+        pub normal_words() -> &[PathWord] = |this| &this.normal_words;
     }
 }
 
@@ -618,6 +352,10 @@ type Poly = BTreeMap<Vec<u32>, Fp>;
 
 fn ids(word: &[u32]) -> Vec<ArrowId> {
     word.iter().copied().map(ArrowId).collect()
+}
+
+fn concatenate(parts: &[&[u32]]) -> Vec<u32> {
+    parts.iter().flat_map(|part| part.iter()).copied().collect()
 }
 
 fn cmp_words(a: &[u32], b: &[u32]) -> Ordering {
@@ -676,6 +414,16 @@ fn first_difference(a: &Poly, b: &Poly) -> Vec<u32> {
         .map(|(word, _)| word.clone())
         .or_else(|| b.keys().find(|word| !a.contains_key(*word)).cloned())
         .unwrap_or_default()
+}
+
+fn first_mismatch<T: Clone + Eq>(
+    mut expected: impl Iterator<Item = T>,
+    found: &[T],
+) -> Option<(usize, Option<T>, Option<T>)> {
+    (0..)
+        .map(|position| (position, expected.next(), found.get(position).cloned()))
+        .take_while(|(_, expected, found)| expected.is_some() || found.is_some())
+        .find(|(_, expected, found)| expected != found)
 }
 
 fn validate_relation_data(
@@ -785,9 +533,7 @@ fn check_origin(
             };
             let scale = field.elem(origin_term.coeff as i64);
             for (coeff, word) in relation {
-                let mut expanded = origin_term.left.clone();
-                expanded.extend_from_slice(word);
-                expanded.extend_from_slice(&origin_term.right);
+                let expanded = concatenate(&[&origin_term.left, word, &origin_term.right]);
                 PathWord::from_arrows(quiver, &ids(&expanded)).map_err(|error| {
                     VerifyError::OriginNotComposable {
                         element,
@@ -828,9 +574,7 @@ fn replay(
             });
         };
         let lead = &element[0].1;
-        let mut factored = step.left.clone();
-        factored.extend_from_slice(lead);
-        factored.extend_from_slice(&step.right);
+        let factored = concatenate(&[&step.left, lead, &step.right]);
         if step.word != factored {
             return Err(VerifyError::TraceStepWord {
                 site,
@@ -860,9 +604,7 @@ fn replay(
             });
         }
         for (term, (coeff, word)) in element.iter().enumerate() {
-            let mut expanded = step.left.clone();
-            expanded.extend_from_slice(word);
-            expanded.extend_from_slice(&step.right);
+            let expanded = concatenate(&[&step.left, word, &step.right]);
             PathWord::from_arrows(quiver, &ids(&expanded)).map_err(|error| {
                 VerifyError::TraceStepPath {
                     site,
@@ -922,17 +664,13 @@ fn check_membership(
 }
 
 fn kind_tag(kind: AmbiguityKind) -> u8 {
-    match kind {
-        AmbiguityKind::Overlap => 0,
-        AmbiguityKind::Inclusion => 1,
-    }
+    u8::from(matches!(kind, AmbiguityKind::Inclusion))
 }
 
 fn tag_kind(tag: u8) -> AmbiguityKind {
-    if tag == 0 {
-        AmbiguityKind::Overlap
-    } else {
-        AmbiguityKind::Inclusion
+    match tag {
+        0 => AmbiguityKind::Overlap,
+        _ => AmbiguityKind::Inclusion,
     }
 }
 
@@ -1006,13 +744,9 @@ impl<'a> AmbiguityKeyGen<'a> {
 /// enumeration order that [`AmbiguityKeyGen`] follows.
 fn is_ambiguity(leads: &[&Vec<u32>], key: AmbKey) -> bool {
     let (i, j, kind, offset) = key;
-    let (Some(lead_i), Some(lead_j)) = (leads.get(i), leads.get(j)) else {
-        return false;
-    };
+    let_or_false!((Some(lead_i), Some(lead_j)) = (leads.get(i), leads.get(j)));
     if kind == kind_tag(AmbiguityKind::Overlap) {
-        if offset == 0 || offset >= lead_i.len() {
-            return false;
-        }
+        verify_guard!(offset > 0 && offset < lead_i.len());
         let shared = lead_i.len() - offset;
         shared < lead_j.len() && lead_i[offset..] == lead_j[..shared]
     } else {
@@ -1036,35 +770,28 @@ fn composition(
     let lead_i = &basis[i][0].1;
     let lead_j = &basis[j][0].1;
     let mut poly = Poly::new();
+    let mut add = |relation: &RelationData, parts: &[&[u32]], scale: Fp| {
+        for (coeff, word) in relation {
+            poly_add(
+                field,
+                &mut poly,
+                concatenate(&[parts[0], word, parts[1]]),
+                field.mul(scale, field.elem(*coeff as i64)),
+            );
+        }
+    };
     match kind {
         AmbiguityKind::Overlap => {
             let left = &lead_i[..offset];
             let tail = &lead_j[lead_i.len() - offset..];
-            for (coeff, word) in &basis[i] {
-                let mut expanded = word.clone();
-                expanded.extend_from_slice(tail);
-                poly_add(field, &mut poly, expanded, field.elem(*coeff as i64));
-            }
-            for (coeff, word) in &basis[j] {
-                let mut expanded = left.to_vec();
-                expanded.extend_from_slice(word);
-                let value = field.neg(field.elem(*coeff as i64));
-                poly_add(field, &mut poly, expanded, value);
-            }
+            add(&basis[i], &[&[][..], tail], field.one());
+            add(&basis[j], &[left, &[][..]], field.neg(field.one()));
         }
         AmbiguityKind::Inclusion => {
             let left = &lead_i[..offset];
             let tail = &lead_i[offset + lead_j.len()..];
-            for (coeff, word) in &basis[i] {
-                poly_add(field, &mut poly, word.clone(), field.elem(*coeff as i64));
-            }
-            for (coeff, word) in &basis[j] {
-                let mut expanded = left.to_vec();
-                expanded.extend_from_slice(word);
-                expanded.extend_from_slice(tail);
-                let value = field.neg(field.elem(*coeff as i64));
-                poly_add(field, &mut poly, expanded, value);
-            }
+            add(&basis[i], &[&[][..], &[][..]], field.one());
+            add(&basis[j], &[left, tail], field.neg(field.one()));
         }
     }
     poly
@@ -1229,35 +956,27 @@ fn build_automaton(quiver: &Quiver, leads: &[Vec<u32>]) -> Automaton {
 /// are sorted by state then arrow.
 fn check_automaton(own: &Automaton, certificate: &Certificate) -> Result<(), VerifyError> {
     let found_states = &certificate.automaton.states;
-    for position in 0..own.words.len().max(found_states.len()) {
-        if own.words.get(position) != found_states.get(position) {
-            return Err(VerifyError::AutomatonStates {
-                position,
-                expected: own.words.get(position).cloned(),
-                found: found_states.get(position).cloned(),
-            });
-        }
+    if let Some((position, expected, found)) =
+        first_mismatch(own.words.iter().cloned(), found_states)
+    {
+        return Err(VerifyError::AutomatonStates {
+            position,
+            expected,
+            found,
+        });
     }
-    let found = &certificate.automaton.transitions;
-    let mut position = 0;
-    for (state, row) in own.edges.iter().enumerate() {
-        for &(arrow, next) in row {
-            let expected = (state, arrow, next);
-            if found.get(position) != Some(&expected) {
-                return Err(VerifyError::AutomatonTransitions {
-                    position,
-                    expected: Some(expected),
-                    found: found.get(position).copied(),
-                });
-            }
-            position += 1;
-        }
-    }
-    if let Some(&extra) = found.get(position) {
+    let expected = own
+        .edges
+        .iter()
+        .enumerate()
+        .flat_map(|(state, row)| row.iter().map(move |&(arrow, next)| (state, arrow, next)));
+    if let Some((position, expected, found)) =
+        first_mismatch(expected, &certificate.automaton.transitions)
+    {
         return Err(VerifyError::AutomatonTransitions {
             position,
-            expected: None,
-            found: Some(extra),
+            expected,
+            found,
         });
     }
     Ok(())
@@ -1430,8 +1149,12 @@ impl<'a> NormalWordGen<'a> {
             dfs_active: false,
         }
     }
+}
 
-    fn next(&mut self) -> Option<Vec<u32>> {
+impl Iterator for NormalWordGen<'_> {
+    type Item = Vec<u32>;
+
+    fn next(&mut self) -> Option<Self::Item> {
         if self.trivial_emitted < self.automaton.starts {
             self.trivial_emitted += 1;
             return Some(Vec::new());
@@ -1495,24 +1218,12 @@ fn check_normal_words_lockstep(
     automaton: &Automaton,
     found: &[Vec<u32>],
 ) -> Result<(), VerifyError> {
-    let mut generator = NormalWordGen::new(automaton);
-    for (position, found_word) in found.iter().enumerate() {
-        match generator.next() {
-            Some(expected) if expected == *found_word => {}
-            expected => {
-                return Err(VerifyError::NormalWords {
-                    position,
-                    expected,
-                    found: Some(found_word.clone()),
-                });
-            }
-        }
-    }
-    if let Some(extra) = generator.next() {
+    if let Some((position, expected, found)) = first_mismatch(NormalWordGen::new(automaton), found)
+    {
         return Err(VerifyError::NormalWords {
-            position: found.len(),
-            expected: Some(extra),
-            found: None,
+            position,
+            expected,
+            found,
         });
     }
     Ok(())
@@ -1530,21 +1241,15 @@ fn check_finiteness_and_normal_words(
     let automaton = build_automaton(quiver, &leads);
     check_automaton(&automaton, certificate)?;
     let cyclic = automaton_has_cycle(&automaton);
+    let claimed_finite = matches!(&certificate.finiteness, FinitenessData::Finite);
+    if claimed_finite == cyclic {
+        return Err(VerifyError::FinitenessClaim { claimed_finite });
+    }
     match &certificate.finiteness {
         FinitenessData::Finite => {
-            if cyclic {
-                return Err(VerifyError::FinitenessClaim {
-                    claimed_finite: true,
-                });
-            }
             check_normal_words_lockstep(&automaton, &certificate.normal_words)
         }
         FinitenessData::Infinite { prefix, cycle } => {
-            if !cyclic {
-                return Err(VerifyError::FinitenessClaim {
-                    claimed_finite: false,
-                });
-            }
             let witness = check_witness(quiver, &automaton, &leads, prefix, cycle)?;
             if let Some(first) = certificate.normal_words.first() {
                 return Err(VerifyError::NormalWords {
@@ -1563,8 +1268,7 @@ fn check_finiteness_and_normal_words(
 /// This is the entry point for untrusted bytes. Parsing is strict:
 /// [`Certificate::from_json`] rejects an unknown field, a missing field,
 /// a wrong JSON type, and trailing input, each as [`VerifyError::Parse`].
-/// Everything after the parse is [`verify_certificate`], which is where
-/// the mathematics lives.
+/// Everything after the parse is [`verify_certificate`].
 pub fn verify(bytes: &str) -> Result<VerifiedCompletion, VerifyError> {
     verify_certificate(Certificate::from_json(bytes).map_err(VerifyError::Parse)?)
 }
@@ -1572,9 +1276,8 @@ pub fn verify(bytes: &str) -> Result<VerifiedCompletion, VerifyError> {
 /// Verifies a parsed certificate and returns the trust token.
 ///
 /// The checks read `certificate` and nothing else, so a caller that
-/// already holds a typed certificate skips the serialization round trip
-/// without weakening anything. Byte-level input goes through [`verify`],
-/// which adds the strict parse.
+/// already holds a typed certificate skips the serialization round trip.
+/// Byte-level input goes through [`verify`], which adds the strict parse.
 ///
 /// Checks run in this order. The first failure returns its typed error:
 ///
@@ -1879,7 +1582,7 @@ mod tests {
     }
 
     /// The two entry points differ only in transport. The byte path adds the
-    /// strict parse and nothing else, so it accepts and rejects exactly what
+    /// strict parse and nothing else. It accepts and rejects exactly what
     /// the typed path does.
     #[test]
     fn the_typed_entry_and_the_byte_entry_agree() {
@@ -2514,7 +2217,7 @@ mod tests {
     }
 
     /// The zero-vertex quiver is legal, its language is finite, and the
-    /// empty normal-word list is the honest enumeration.
+    /// empty normal-word list is the enumeration.
     #[test]
     fn zero_vertex_certificate_accepted() {
         let certificate = Certificate {

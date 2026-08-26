@@ -1,15 +1,14 @@
 # QPA oracle
 
-This harness compares the library's homological output against QPA, the GAP
-package "Quivers and Path Algebras". QPA is an independent implementation with
-two decades of use, so a disagreement points at one side or the other, not at a
-shared assumption.
+The harness compares the library against QPA, the GAP package Quivers and
+Path Algebras. QPA is an independent implementation. A disagreement points
+at one side or the other, not at a shared assumption.
 
 ## Files
 
 Two JSON files, produced by independent tool chains:
 
-- `qpa_expected.json`: committed, at schema v7, and the oracle the harness
+- `qpa_expected.json`: committed, at schema v8, and the oracle the harness
   reads. A real GAP+QPA run of `generate_fixtures.g` generated it. This library
   never writes it. The always-on test `library_matches_the_committed_qpa_truth`
   compares the library's freshly computed values against it, and a missing or
@@ -18,7 +17,7 @@ Two JSON files, produced by independent tool chains:
   library's own output, written by the test's `QPA_ORACLE_WRITE=1` mode. It is
   kept so that unintended drift in our values fails CI even without GAP
   installed. Agreement with it is self-consistency only. Correctness comes from
-  `qpa_expected.json`. It stays at v6 because the v7 block holds
+  `qpa_expected.json`. It stays at v6 because the v8 block holds
   `brute_agreement`, a GAP-internal cross-check with no library counterpart, and
   a snapshot must not invent one. The harness implements exactly these two
   schema strings and rejects every other, so neither file goes stale unnoticed.
@@ -46,13 +45,18 @@ module are computed over the opposite algebra on its dual, which is the same
 computation as the morphisms into a module: `opposite` keeps the vertex ids and
 `dual` keeps the dimension vector, so the values compare directly.
 
-The always-on modes take 2.7 s of wall clock over 92 tests, measured with
-`cargo test -p auslander --test qpa_oracle`; the v6 layer alone took 2.45 s over
-74 tests, so the whole v7 comparison costs about 0.3 s of wall clock and about
-3 s of CPU that runs beside the corruption tests. The live run takes 322 s, all
-but 3 s of it inside GAP. The workspace sets `opt-level = 2` for the dev
-profile, because at `opt-level = 0` this suite takes over ten minutes locally
-and stalls the Windows CI runner. Debug assertions and overflow checks stay on.
+The recorded always-on run passed 97 tests in 2.46 s with
+`cargo test -p auslander --test qpa_oracle`. The recorded live test passed in
+228.76 s with this command:
+
+```sh
+QPA_ORACLE=1 cargo test -p auslander --test qpa_oracle \
+  live_gap_run_agrees_with_library_and_committed_truth -- --nocapture
+```
+
+The workspace sets `opt-level = 2` for the dev profile, because at
+`opt-level = 0` this suite takes over ten minutes locally and stalls the
+Windows CI runner. Debug assertions and overflow checks stay on.
 `inclusion-ambiguity` dominates the v6 layer: its almost-split sequences run on
 modules of dimension 18 and 24 over a 6-dimensional algebra, and every value is
 computed twice, once over the algebra and once over its opposite for the
@@ -100,7 +104,7 @@ cp qpa_generated.json \
    /path/to/crates/auslander/tests/qpa-oracle/qpa_expected.json
 ```
 
-The generator emits schema v7 and the last line must read
+The generator emits schema v8 and the last line must read
 `qpa-oracle-generator-ok`. It writes `qpa_generated.json`, never
 `qpa_expected.json`, so promoting a run is the deliberate copy above.
 
@@ -109,28 +113,28 @@ It crashed on two of five runs without `-m 1g` and on none of three runs with
 it; the flag asks for a large initial workspace. The flag changes nothing in
 the output: every completed run, with the flag and without, wrote the same
 bytes. Raising the shell stack limit does not help; with
-`ulimit -s unlimited` GAP crashed sooner. Use `-m 1g` and expect a v7 run to
-take about 5.5 minutes. A crashed run leaves no output file, because the file is
-written in one final statement, so a crash cannot produce a truncated file.
-Repeat the run until it completes and prints the sentinel, then confirm two
-completed runs in fresh directories agree byte for byte before copying either
-one.
+`ulimit -s unlimited` GAP crashed sooner. Use `-m 1g`. The two v8 provenance
+runs below took 4:22.63 and 3:46.17. A crashed run leaves no output file,
+because the file is written in one final statement. A crash therefore cannot
+produce a truncated file. Repeat the run until it completes and prints the
+sentinel. Before copying either file, confirm two completed runs in fresh
+directories agree byte for byte.
 
 Then run the test suite and record the new provenance (below) in this README.
 `QPA_ORACLE_WRITE=1 cargo +1.92 test --test qpa_oracle` regenerates
 `native_snapshot.json` after an intentional library change. It never touches
 `qpa_expected.json`.
 
-## What reproducibility means here, and what it does not
+## Reproducibility
 
 Two claims live in `live_gap_run_agrees_with_library_and_committed_truth`, and
 they are not the same strength.
 
 The first is the mathematics: a real GAP+QPA run recomputes these values and
-must agree with the library. That runs on ANY GAP and is asserted
+must agree with the library. That runs on any GAP and is asserted
 unconditionally. It is the reason this oracle exists.
 
-The second is reproducibility of this FILE, byte for byte. That holds only
+The second is reproducibility of this file, byte for byte. That holds only
 within one GAP version. GAP 4.16dev and the Ubuntu distro package produce
 documents that differ while both agree with the library, so the test compares
 documents only when the fresh run's `gap_version` matches the one recorded
@@ -145,30 +149,33 @@ oracle run as proof that this file reproduces on the runner.
 
 ## Provenance of the committed `qpa_expected.json`
 
-- Generated: 2026-08-18, on Arch Linux, package `gap 4.16.0-2`
+- Generated: 2026-08-25, on Arch Linux, package `gap 4.16.1-1`
   (`/usr/bin/gap`, `GAPInfo.Version` = `4.16dev`).
 - QPA: version 1.36, loaded from `~/.gap/pkg/qpa`, a git clone at
   `v1.36-20-g9100462`.
 - Command: `cd "$(mktemp -d)" && /usr/bin/gap -q -T -m 1g
-  .../tests/qpa-oracle/generate_fixtures.g` (23 fixtures written; schema v7),
-  323 s and 319 s of wall clock in two fresh temp directories.
+  .../tests/qpa-oracle/generate_fixtures.g` (24 fixtures written; schema v8),
+  4:22.63 and 3:46.17 of wall clock in two fresh temp directories.
 - SHA-256:
-  `de3216e72b46c0b5cf311b8ba6219dbf5d260d1336d4b974baac516ae0f4d7b9`.
+  `894c2a11fab65897434cdf41b0a0039cb02fb853a9886b02355bf83e8621eef8`.
 - Two completed runs in fresh temp dirs produced byte-identical output. QPA's
   own list order is discovery order, so the generator sorts every emitted list
   by an explicit key first.
-- `provenance.command` inside the file reads `gap -q -T generate_fixtures.g`,
-  the v6 spelling. It is a label the generator writes, not the command the run
-  used; the command above is the run. It is left as generated, because the file
-  is GAP output and this library never edits its bytes. A future GAP run may
-  correct it.
-- The previous committed oracle was schema v6 (SHA-256
+- `provenance.command` inside the file reads
+  `gap -q -T -m 1g generate_fixtures.g`. It records the executable flags but
+  not the temporary directory or absolute generator path.
+- The previous committed oracle was schema v7 (SHA-256
+  `de3216e72b46c0b5cf311b8ba6219dbf5d260d1336d4b974baac516ae0f4d7b9`, generated
+  2026-08-18 with `GAPInfo.Version` `4.16dev` and QPA 1.36). Schema v8 removes
+  20 `one_tilting` fields, adds the `a3-mod-ab/f2` fixture, and adds 24
+  `classical_tilting` lists. Three of those lists are nonempty.
+- The schema v6 oracle had SHA-256
   `d4e3561f3d9b58111381d35da7b6c6d5174d33e3152a798f3d5724fb3a9dde0c`, generated
-  2026-08-06 by the same tool chain). Deleting the 23 `support_tau_tilting`
-  blocks from this file, dropping the comma each preceding `tau_period` line
-  gained, and restoring the schema string reproduces it byte for byte. Every v6
-  field of every fixture holds the same value, and `schema` is the only
-  top-level key that differs.
+  2026-08-06 by the same tool chain. Deleting the 23 `support_tau_tilting`
+  blocks from schema v7, dropping the comma each preceding `tau_period` line
+  gained, and restoring the schema string reproduces schema v6 byte for byte.
+  Every v6 field of every fixture holds the same value, and `schema` is the
+  only top-level key that differs.
 - The v6 file in turn differed from its 2026-08-05 predecessor (SHA-256
   `69f0c6d9e8f2505b0df4f46490df60c2c8573ac4eba8c42f2f6086cbc0b64428`) only in
   the rename of the `yoneda_products` key `rank` to `yoneda_map_rank` in all 43
@@ -179,7 +186,7 @@ oracle run as proof that this file reproduces on the runner.
 
 Schema v6 is schema v5 unchanged, plus the Auslander-Reiten fields at the end of
 every fixture, plus the schema string. The envelope keys are the same. The
-oracle is at v7 and carries the schema string `auslander-qpa-oracle-v7`; the v6
+oracle is at v8 and carries the schema string `auslander-qpa-oracle-v8`; the v6
 string below is the one `native_snapshot.json` carries, and the fields are the
 same in both.
 
@@ -399,9 +406,10 @@ Auslander-Reiten fields, new in v6. They all run over one fixed list:
 
 Schema history: v1 through v4 stored one implicit global field and untyped
 values. v5 added the per-fixture field and presentation. v6 adds the
-Auslander-Reiten fields above and changes nothing else. v7 adds the support
-tau-tilting block below and changes nothing else. The reader implements two
-schema strings, v7 for the oracle and v6 for the snapshot, and rejects every
+Auslander-Reiten fields above. v7 adds the support tau-tilting block below.
+Schema v8 replaces its unread one-tilting list with designated classical
+tilting candidates. The reader implements two schema strings, v8 for the
+oracle and v6 for the snapshot, and rejects every
 other, so a stale file fails loudly instead of silently skipping checks. Each
 file is validated against exactly one of the two.
 
@@ -489,7 +497,7 @@ on it:
   would be a silent undercount: on `kronecker-2` the length-3 truncation reports
   5 pairs.
 - `pairs`: one entry per pair, with the projective support as a sorted 0-based
-  vertex subset and the module summand dimension vectors sorted. This is a WEAK
+  vertex subset and the module summand dimension vectors sorted. This is a weak
   value field. Repetitions are preserved, never merged, and never read as
   multiplicity or identity: `cyclic-nakayama-3-3-3` has three pairwise
   non-isomorphic projectives that all have dimension vector `[1, 1, 1]`, so its
@@ -531,8 +539,8 @@ on it:
   a self-consistency check, not external truth, and the key name says so. Every
   closed fixture came out exactly `n`-regular and connected.
 
-The walk cap is a budget, not a claim, and the not-closed marker records it.
-Twenty of the 23 fixtures close, the largest at 17 indecomposables
+The walk cap is a budget, not a claim. The not-closed marker records it.
+Twenty-one of the 24 fixtures close, the largest at 17 indecomposables
 (`inhomogeneous`), so their cap of 40 never binds. `kronecker-2`,
 `self-overlap` and `inclusion-ambiguity` never close, and the cost of failing
 grows steeply: at cap 12 the walk fails after 2.0 s, 40.4 s and 4.8 s
@@ -540,7 +548,7 @@ respectively, while at cap 16 `self-overlap` alone costs 380 s. Those three
 carry cap 12. `brute_agreement` is available and true on all 20 closed
 fixtures.
 
-Values worth knowing when reading the file: `d4-star` has 50 pairs with
+`d4-star` has 50 pairs with
 histogram `[1, 4, 9, 16, 20]` over both F_2 and F_5, and its 20 tilting modules
 of projective dimension at most 1 are exactly the `m = n` entry of that
 histogram, which is two independent QPA routes agreeing. `linear-an-3` and
@@ -555,7 +563,7 @@ or skipped with a typed reason. One field is unread, `one_tilting`, and it is
 named as such below; nothing else passes by being unread.
 
 - `indecomposables`: a closed marker is compared against the catalog size where
-  an exhaustive catalog exists, which is 10 of the 23 fixtures. Where it does
+  an exhaustive catalog exists, which is 11 of the 24 fixtures. Where it does
   not, the marker gates the rest of the block and nothing else reads it. A
   not-closed marker together with a catalog of ours is a mismatch, because a
   classification theorem would then contradict a failed walk.
@@ -610,7 +618,51 @@ The mutation-graph route runs with `max_vertices = 512` and otherwise the
 default `MutationGraphLimits`. Every fixture that needs it closes: `gentle-tree`
 37 pairs in 24 ms, `preprojective-a3` 24 in 18 ms, `commutative-square` 46 in
 38 ms, `characteristic-sensitive` 56 over F_2 in 68 ms, and `inhomogeneous` 152
-in 314 ms, the largest. All ten match GAP's counts.
+in 314 ms, the largest. All eleven match GAP's counts.
+
+## Schema v8 classical tilting
+
+Schema v8 keeps every v7 value except `support_tau_tilting.one_tilting`. That
+field used dimension-vector lists as module labels, and the harness did not
+read it. Its replacement is a fixture-level `classical_tilting` list whose
+modules are named by construction.
+
+```json
+"classical_tilting": [
+  {
+    "id": "a3-mod-ab-da-pd2",
+    "construction": "I0+I1+I2",
+    "bound": 2,
+    "module_dimvec": [2, 2, 1],
+    "qpa_tilting": true,
+    "projective_dimension": 2,
+    "coresolutions": [
+      [[1, 1, 0], [1, 1, 0]],
+      [[0, 1, 1], [0, 1, 1]],
+      [[1, 0, 0], [1, 1, 0], [0, 1, 1], [0, 0, 1]]
+    ],
+    "coresolutions_exact": [true, true, true]
+  }
+]
+```
+
+The generator designates two constructions in three records. `linear-a3-pd1`
+is the F_5 control `S0+P0+P2` over linearly oriented A3.
+`a3-mod-ab-da-pd2` is `I0+I1+I2` over `A3/(ab)`, once over F_2 and once over
+F_5. QPA builds each module from those constructors, then calls
+`TiltingModule` at the recorded bound.
+
+QPA 1.36 builds a finite coresolution after checking each approximation is
+injective, but `HaveFiniteCoresolutionInAddM` does not check the last cokernel.
+The generator therefore calls `IsExactSequence` on every returned complex and
+stores `coresolutions_exact`. This includes exactness against the terminal zero
+differential. The reader rejects a QPA-positive record if any entry is false.
+
+The Rust comparison rebuilds the same candidate from its `id`, checks its
+dimension vector, and runs `ClassicalTiltingModule::classify`. It compares the
+projective dimension and the generation term dimensions. QPA lists each
+per-projective complex from its last target back to the projective, so the
+harness reverses those lists before it adds them term by term.
 
 ## Fixture manifest
 
