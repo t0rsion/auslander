@@ -5,19 +5,18 @@ kQ/I over a checked prime field, where I is an admissible ideal given by
 forbidden words or by general relations, and finite-dimensional right
 modules. Paths compose left to right; arrow matrices act on row vectors.
 
-The surface is small and algebra-owned: `PrimeField`, `Quiver`, and `Algebra`,
+The surface is algebra-owned: `PrimeField`, `Quiver`, and `Algebra`,
 plus named constructors such as `linear_an`, `kronecker`, `dual_numbers`, and
 `linear_nakayama`. `MonomialAlgebra` is an alias of the same class, kept from
 v0.2. Modules come only through `algebra.module(...)`, `simple`, `projective`,
 and `injective`. The lower-level machinery behind the decision APIs
 (endomorphism algebras with their exact radicals, opposite algebras, the
-k-dual, element matrices) stays Rust-only. Python sees its results through
-the methods below.
+k-dual, element matrices) stays Rust-only.
 
 Two kinds of algebra share the class. `Algebra(quiver, forbidden)` and the
 named constructors build a monomial algebra from forbidden words: lists of
 arrow ids, each of length >= 2 and composable left to right. A monomial
-presentation is field-independent, so one object serves every prime. A field
+presentation is field-independent, so one object works for every prime. A field
 enters only when building modules, and each field gets one verified runtime
 algebra, built on first use and cached.
 
@@ -57,9 +56,8 @@ keywords as `from_relations` to set the rebuilt algebra's downstream
 limits, and `algebra.completion_limits` reports the effective limits as a
 dict.
 
-An end-to-end non-monomial example, the commutative square with the relation
-ab - cd (dim 9 over every prime; mirrored by `test_readme_example` in
-`tests/test_v03.py`):
+The commutative square with the relation ab - cd (dim 9 over every prime;
+mirrored by `test_readme_example` in `tests/test_v03.py`):
 
 ```python
 import auslander
@@ -112,6 +110,77 @@ infinite" anywhere. The typed results that compare by value hash by value too,
 so `ResolutionStatus`, `Bounded`, `DynkinType`, `EuclideanType`,
 `ResolutionKind`, `DiagramFamily`, and `AlmostSplitOutcome` all work as dict
 keys and set elements.
+
+Checked complexes: `CheckedComplex(terms, maps)` stores a nonempty finite
+complex in display order. Construction checks each nominal endpoint and each
+consecutive composite. `homology_dimensions(index)` returns the exact
+dimension vector at one term. `exactness()` returns an `ExactComplex`, or a
+`NonExactWitness` with the first nonzero homology dimension vector. Both
+outcomes have `verify()`.
+
+Hochschild cohomology:
+`algebra.hochschild_cohomology(field, max_degree, limits)` runs the relative
+normalized bar construction. `BarLimits` requires four independent ceilings:
+tensor tuples at one degree, cochain dimension at one degree, retained matrix
+entries plus scratch, and cumulative deterministic work. A finished request
+returns `HochschildCohomology`. Its `degree(n)` returns a
+`HochschildDegree` with deterministic cocycle, coboundary, and complement
+bases. `class_from_coordinates` builds a `HochschildClass`, and `evaluate`
+takes a vertex integer in degree zero or a list of normal-word basis indices
+in positive degree.
+
+A resource cut returns `IncompleteHochschildCohomology`, not an exception.
+It exposes only `completed_degrees`, `reason`, `diagnostics`, and `verify()`.
+It has no `degree` or `requested_degree` accessor. The diagnostics record the
+first rejected reservation, including `stage`, `used`, `proposed`, and
+`ceiling`. Raising that ceiling can expose a later limit.
+
+Classical tilting:
+`ClassicalTiltingModule.classify(module, TiltingLimits(pd, generation))`
+returns `ClassicalTiltingResult`. Exactly one of `tilting`, `rejection`, and
+`blocker` is set. `is_tilting` is `True`, `False`, or `None` in that order.
+A positive self-extension is the only negative outcome. A projective-dimension
+cut or blocked bounded generation route leaves the question open and keeps its
+checked blocker. A successful certificate exposes its complete resolution,
+zero positive self-Ext spaces, exact generation complex, and `add(T)`
+witnesses.
+
+The v0.6 path over `A = kA_3/(ab)` and `k[x]/(x^3)`, also
+`test_v06_acceptance_path` in `tests/test_v06.py`:
+
+```python
+F = auslander.PrimeField(5)
+A = auslander.Algebra.an_with_relations(3, [(0, 2)])
+S0 = A.simple(F, 0)
+resolution = S0.resolve(2)
+exact = auslander.CheckedComplex(
+    [resolution.terms[2], resolution.terms[1], resolution.terms[0], S0],
+    [resolution.maps[1], resolution.maps[0], resolution.augmentation],
+).exactness()
+assert isinstance(exact, auslander.ExactComplex)
+assert exact.verify()
+
+bar_limits = auslander.BarLimits(10_000, 100_000, 10_000_000, 1_000_000_000)
+X3 = auslander.Algebra.truncated_poly(3)
+HH = X3.hochschild_cohomology(F, 2, bar_limits)
+assert HH.dimensions == [3, 2, 2]
+assert HH.verify()
+
+# D(A) = I_0 + I_1 + I_2 in block-diagonal bases.
+DA = A.module(F, [2, 2, 1], [[[0, 0], [1, 0]], [[0], [1]]])
+answer = auslander.ClassicalTiltingModule.classify(
+    DA, auslander.TiltingLimits(4, 5)
+)
+assert answer.is_tilting is True
+assert answer.tilting.projective_dimension == 2
+assert [term.dims for term in answer.tilting.generation_complex.complex.terms] == [
+    [1, 2, 2],
+    [1, 3, 2],
+    [1, 1, 0],
+    [1, 0, 0],
+]
+assert answer.verify()
+```
 
 Isomorphism and decomposition: `M.is_isomorphic(N)` returns a frozen
 `IsoResult`. Its `isomorphic` is `True` (with a `witness` Morphism verified
@@ -224,7 +293,7 @@ general-relation algebra carries its own. Both calls validate their endpoints
 before running, so a failed hom or hom-space computation inside them is a
 defect and raises `DefectError`, not `ValueError`.
 
-An end-to-end AR example over k[x]/(x^3) (mirrored by `test_readme_ar_example`
+An AR example over k[x]/(x^3) (mirrored by `test_readme_ar_example`
 in `tests/test_v04.py`):
 
 ```python
@@ -360,7 +429,7 @@ undetermined indecomposability gate, or an undecided isomorphism test inside
 the tau cross-check. It is not budget exhaustion and raising a limit does not
 help. A mutation walk reports the same condition as a value instead.
 
-An end-to-end example over linearly oriented A_2 (mirrored by
+An example over linearly oriented A_2 (mirrored by
 `test_a_two_support_tau_tilting_quiver_is_the_pentagon` in
 `tests/test_tilting.py`):
 

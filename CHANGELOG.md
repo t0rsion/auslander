@@ -1,10 +1,53 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
-
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.6.0] - 2026-08-26
+
+Checked finite complexes now carry higher homological claims. The release adds
+relative normalized bar Hochschild cohomology under four explicit ceilings and
+classical tilting classification at any finite projective dimension reached by
+the caller's bound. Rust and Python expose the same exact, negative, and
+undetermined outcomes.
+
+### Added
+
+- `CheckedComplex`, `ExactComplex`, `NonExactWitness`, and
+  `HomologyDimensions`. Terms and maps use display order. Construction checks
+  nominal endpoints and every consecutive composite. Exactness returns proof
+  data either way. A complete `ProjectiveResolution` converts to an exact
+  complex; a cut remains `ResolutionComplexError::Cut`.
+- `bar_hochschild` and `BarLimits`. The relative normalized bar complex works
+  over the separable vertex subalgebra and streams composable radical tuples.
+  Each complete degree stores deterministic cochain coordinates, the outgoing
+  differential, cocycles, coboundaries, and a complement basis. A resource cut
+  keeps only finished degrees and records its first rejected reservation in
+  `BarBudgetDiagnostics`.
+- `ClassicalTiltingModule::classify` with three outcomes. `Tilting` stores a
+  finite minimal projective resolution, zero positive self-Ext spaces, an
+  exact generation complex, and `add(T)` witnesses. `NotTilting` stores the
+  first positive self-extension. `Undetermined` stores a genuine
+  projective-dimension lower bound or a checked bounded-generation blocker.
+- Python classes for checked complexes, Hochschild degrees and classes, bar
+  limits and cuts, classical tilting results, and their witnesses. Bar and
+  tilting calls release the GIL.
+- QPA oracle schema v8 classical-tilting records. A real GAP with QPA run
+  checks designated projective-dimension-one and projective-dimension-two
+  candidates, including the last cokernel of every returned coresolution.
+- `examples/v06.rs` and `test_v06_acceptance_path`. Both certify the
+  projective-dimension-two module `D(kA_3/(ab))` over F_2 and F_5 and compute
+  `HH^0..HH^2(k[x]/(x^3))` with a typed cut.
+
+### Changed
+
+- `ClosureWitness::verify` now shares one private `VerificationContext` across
+  its nested checks. The context memoizes certified primitive computations on
+  exact nominal operands. It never memoizes a witness verdict or replaces an
+  endpoint check.
+- Production code is gated below the v0.5.0 count. Ordinary tests enforce the
+  fixed ceiling and reject production items placed below a test module.
 
 ## [0.5.0] - 2026-08-18
 
@@ -14,11 +57,11 @@ mutation walk, in the crate and in Python. A drained walk hands back a
 complete list of basic support tau-tilting pairs only after a separate
 verifier accepts its closure witness.
 
-Four correctness fixes lead the Fixed section. The tau cache could return
-another module's translate, and call a module tau-rigid when it is not. A
-closed graph was built without running its own verifier. A walk could charge
-past `max_work_units` and still report closure. And the completeness citation
-named the wrong theorem; it now names the one the obligations establish.
+The tau cache could return another module's translate, and call a module
+tau-rigid when it is not. A closed graph was built without running its own
+verifier. A walk could charge past `max_work_units` and still report
+closure. The completeness citation named the wrong theorem; it now names
+the one the obligations establish.
 
 This release is not additive. `MonomialPresentation` and the monomial
 constructors leave `algebra` for the new `monomial` module.
@@ -942,8 +985,8 @@ behavior.
 
 ## [0.3.0] - 2026-08-06
 
-General admissible ideals, end to end. Every operation the crate offers now
-works over a general relation ideal, not only a monomial one. Every algebra is
+General admissible ideals. Every operation the crate offers now works over
+a general relation ideal, not only a monomial one. Every algebra is
 built by completion into a reduced Groebner basis and independent verification
 of the emitted certificate.
 
@@ -982,7 +1025,7 @@ of the emitted certificate.
   which has no public constructor elsewhere (`verify`).
 - Completion budgets as work units: `max_steps` counts each reduction step
   and each emitted normal word, checked before the word is allocated, so a
-  huge finite normal-word language truncates honestly (`completion`).
+  huge finite normal-word language truncates (`completion`).
 - Limits propagation: `Algebra` stores its effective `CompletionLimits`
   (`completion_limits()`), and `opposite` recompletes with the stored limits,
   so tau, injective envelopes, coresolutions, and injective dimensions

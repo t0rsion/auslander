@@ -11,23 +11,17 @@ pub enum FieldError {
     ModulusTooLarge(u64),
 }
 
-impl std::fmt::Display for FieldError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FieldError::NotPrime(n) => write!(f, "modulus {n} is not prime"),
-            FieldError::ModulusTooLarge(n) => write!(f, "modulus {n} is not below 2^31"),
-        }
-    }
-}
-
-impl std::error::Error for FieldError {}
+display_error! { error FieldError {
+    FieldError::NotPrime(n) => "modulus {n} is not prime";
+    FieldError::ModulusTooLarge(n) => "modulus {n} is not below 2^31";
+} }
 
 /// An element of a prime field, stored as its canonical representative in `0..p`.
 ///
 /// Elements are opaque and always reduced. Create them with
-/// [`PrimeField::elem`], [`PrimeField::zero`], or [`PrimeField::one`], and
-/// combine them with the arithmetic methods on [`PrimeField`]. An `Fp` carries
-/// no reference to its field. Mixing elements of different fields is a logic
+/// [`PrimeField::elem`], [`PrimeField::zero`], or [`PrimeField::one`]. Combine
+/// them with the arithmetic methods on [`PrimeField`]. An `Fp` carries no
+/// reference to its field. Mixing elements of different fields is a logic
 /// error the types do not catch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Fp(u64);
@@ -36,7 +30,9 @@ impl Fp {
     pub(crate) const ZERO: Fp = Fp(0);
     pub(crate) const ONE: Fp = Fp(1);
 
-    /// Whether this is the additive identity (the same element in every field).
+    /// Whether this is the additive identity.
+    ///
+    /// Zero is the same element in every field.
     #[inline]
     pub const fn is_zero(self) -> bool {
         self.0 == 0
@@ -49,14 +45,21 @@ impl Fp {
     }
 }
 
+/// The `index`-th unit vector of the given length.
+pub(crate) fn unit_vector(length: usize, index: usize) -> Vec<Fp> {
+    let mut vector = vec![Fp::ZERO; length];
+    vector[index] = Fp::ONE;
+    vector
+}
+
 /// The field F_p = Z/pZ for a prime p < 2^31.
 ///
-/// The bound keeps sums below 2^32 and products below 2^62, so all arithmetic
-/// on reduced representatives stays within `u64`.
+/// The bound keeps sums below 2^32 and products below 2^62, so arithmetic on
+/// reduced representatives stays inside `u64`.
 ///
 /// Every arithmetic method takes elements already reduced modulo `p`. Debug
-/// builds assert that. Release builds do not check it, and an unreduced
-/// input then gives a wrong result.
+/// builds assert that. Release builds do not check it. An unreduced input
+/// then gives a wrong result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PrimeField {
     p: u64,
@@ -68,11 +71,8 @@ const MODULUS_BOUND: u64 = 1 << 31;
 /// Trial division by 2, 3, and 6k±1. Exact for every `n` below 2^62; a
 /// larger `n` can overflow `k * k`.
 fn is_prime(n: u64) -> bool {
-    if n < 2 {
-        return false;
-    }
     if n < 4 {
-        return true;
+        return n >= 2;
     }
     if n.is_multiple_of(2) || n.is_multiple_of(3) {
         return false;
@@ -88,19 +88,18 @@ fn is_prime(n: u64) -> bool {
 }
 
 impl PrimeField {
-    /// Constructs F_p after verifying that `p` is prime and below 2^31.
+    /// The field F_p for a prime `p` below 2^31.
     ///
     /// The bound is checked first: `p >= 2^31` gives
-    /// [`FieldError::ModulusTooLarge`], a smaller non-prime `p` gives
+    /// [`FieldError::ModulusTooLarge`]. A smaller non-prime `p` gives
     /// [`FieldError::NotPrime`].
     pub fn new(p: u64) -> Result<PrimeField, FieldError> {
         if p >= MODULUS_BOUND {
             return Err(FieldError::ModulusTooLarge(p));
         }
-        if !is_prime(p) {
-            return Err(FieldError::NotPrime(p));
-        }
-        Ok(PrimeField { p })
+        is_prime(p)
+            .then_some(PrimeField { p })
+            .ok_or(FieldError::NotPrime(p))
     }
 
     /// The characteristic `p`.
@@ -117,16 +116,14 @@ impl PrimeField {
 
     /// The residue class of a `u128`, reduced into `0..p`.
     ///
-    /// A dot product of reduced entries fits in `u128` for any length the
-    /// machine can hold, so a caller accumulates the whole product and reduces
-    /// once here instead of once per term. See [`crate::linalg::DenseMat::mul`].
+    /// A caller accumulates a whole dot product and reduces once here, not
+    /// once per term. See [`crate::linalg::DenseMat::mul`].
     ///
-    /// An accumulator below `2^64` takes the narrow route, one hardware
-    /// divide. The wide route is a call into the compiler runtime
-    /// (`__umodti3` on x86-64). Each product of reduced entries is below
-    /// `2^62`, so a dot product needs more than four terms before it can
-    /// leave 64 bits, and only entries near the modulus bound take it there.
-    /// Over F_5 a dot product of 78 terms reaches 1248, far below `2^64`.
+    /// Accumulators below `2^64` take a `u64` remainder. Wider values go
+    /// through a `u128` remainder. Each product of reduced entries is below
+    /// `2^62`, so a dot product leaves 64 bits only after more than four
+    /// terms, and only when entries sit near the modulus bound. Over F_5 a
+    /// dot product of 78 terms reaches 1248, far below `2^64`.
     #[inline]
     pub(crate) fn reduce_wide(self, x: u128) -> Fp {
         hit(Site::FieldReduceWide);
@@ -152,11 +149,7 @@ impl PrimeField {
     #[inline]
     pub fn add(self, a: Fp, b: Fp) -> Fp {
         hit(Site::FieldAdd);
-        debug_assert!(
-            a.0 < self.p && b.0 < self.p,
-            "unreduced input in F_{}",
-            self.p
-        );
+        self.debug_canonical(&[a, b]);
         let s = a.0 + b.0;
         Fp(if s >= self.p { s - self.p } else { s })
     }
@@ -165,22 +158,14 @@ impl PrimeField {
     #[inline]
     pub fn sub(self, a: Fp, b: Fp) -> Fp {
         hit(Site::FieldSub);
-        debug_assert!(
-            a.0 < self.p && b.0 < self.p,
-            "unreduced input in F_{}",
-            self.p
-        );
-        Fp(if a.0 >= b.0 {
-            a.0 - b.0
-        } else {
-            a.0 + self.p - b.0
-        })
+        self.debug_canonical(&[a, b]);
+        Fp((a.0 + self.p - b.0) % self.p)
     }
 
     /// The negative `-a`.
     #[inline]
     pub fn neg(self, a: Fp) -> Fp {
-        debug_assert!(a.0 < self.p, "unreduced input in F_{}", self.p);
+        self.debug_canonical(&[a]);
         if a.0 == 0 { a } else { Fp(self.p - a.0) }
     }
 
@@ -188,11 +173,7 @@ impl PrimeField {
     #[inline]
     pub fn mul(self, a: Fp, b: Fp) -> Fp {
         hit(Site::FieldMul);
-        debug_assert!(
-            a.0 < self.p && b.0 < self.p,
-            "unreduced input in F_{}",
-            self.p
-        );
+        self.debug_canonical(&[a, b]);
         Fp(a.0 * b.0 % self.p)
     }
 
@@ -202,7 +183,7 @@ impl PrimeField {
     /// Panics if `a` is zero.
     pub fn inv(self, a: Fp) -> Fp {
         hit(Site::FieldInv);
-        debug_assert!(a.0 < self.p, "unreduced input in F_{}", self.p);
+        self.debug_canonical(&[a]);
         assert!(!a.is_zero(), "inverse of zero in F_{}", self.p);
         // Bezout coefficients stay within +-p, so i64 suffices for p < 2^31.
         let (mut r0, mut r1) = (a.0 as i64, self.p as i64);
@@ -215,20 +196,21 @@ impl PrimeField {
         Fp(s0.rem_euclid(self.p as i64) as u64)
     }
 
-    /// `a` to the power `exp`, by binary exponentiation. `pow(a, 0)` is 1
-    /// for every `a`, zero included.
-    pub fn pow(self, a: Fp, mut exp: u64) -> Fp {
-        debug_assert!(a.0 < self.p, "unreduced input in F_{}", self.p);
-        let mut base = a;
-        let mut acc = Fp::ONE;
-        while exp > 0 {
-            if exp & 1 == 1 {
-                acc = self.mul(acc, base);
-            }
-            base = self.mul(base, base);
-            exp >>= 1;
-        }
-        acc
+    /// `a` to the power `exp`, by binary exponentiation.
+    ///
+    /// `pow(a, 0)` is 1 for every `a`, zero included.
+    pub fn pow(self, a: Fp, exp: u64) -> Fp {
+        self.debug_canonical(&[a]);
+        binary_power!(a, Fp::ONE, exp, |left, right| self.mul(*left, *right))
+    }
+
+    #[inline]
+    fn debug_canonical(self, values: &[Fp]) {
+        debug_assert!(
+            values.iter().all(|a| a.0 < self.p),
+            "unreduced input in F_{}",
+            self.p
+        );
     }
 }
 

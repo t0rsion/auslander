@@ -1,12 +1,9 @@
-"""Tests for the value semantics, taxonomy, and morphism surface added after v0.4.
+"""Value semantics, exception taxonomy, and morphism endpoints after v0.4.
 
-The typed results compare by value, so they hash by value too: an equal pair
-is one dict key. Engine defects are RuntimeError, never ValueError, on every
-route that can report one. A Morphism carries its endpoints, so a witness
-handed back on its own still says what it maps between, and composition is
-checked against those endpoints. Facts pinned here are textbook: over
-k[x]/(x^3) the AR quiver has three vertices, and the identity of a nonzero
-module is neither zero nor a composite that vanishes.
+Typed results compare and hash by value: an equal pair is one dict key.
+Engine defects are RuntimeError, never ValueError. A Morphism carries its
+endpoints, so a witness handed back on its own still says what it maps
+between, and composition is checked against those endpoints.
 """
 
 import threading

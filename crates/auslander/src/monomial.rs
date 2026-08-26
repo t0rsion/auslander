@@ -10,20 +10,16 @@
 //! Neither type builds a runtime algebra. Building one goes through
 //! [`crate::algebra::monomial_presentation`], which turns a
 //! [`MonomialIdeal`] into a [`crate::relation::Presentation`] over a field,
-//! and then through the one completion and verification pipeline every
-//! algebra uses. The basis this module computes and the normal-word basis
-//! that pipeline computes agree word for word, because for a monomial ideal
-//! the standard paths are exactly the normal words.
+//! and then through the one completion and verification pipeline. For a
+//! monomial ideal the standard paths are the normal words, so the basis this
+//! module computes and the pipeline's normal-word basis agree word for word.
 //!
 //! The named families live here: linearly oriented `A_n`, Kronecker,
 //! `k[x]/(xⁿ)`, linear and cyclic Nakayama, the radical-square-zero cycle,
-//! and `A_n` with zero relations. Each returns a [`MonomialIdeal`];
+//! and `A_n` with zero relations. Each returns a [`MonomialIdeal`].
 //! [`crate::algebra`] has the matching runtime constructor.
 
-use std::fmt;
-
-use rustc_hash::{FxHashMap, FxHashSet};
-
+use crate::completion::normal_word_transitions;
 use crate::quiver::{ArrowId, PathWord, Quiver, QuiverError};
 
 /// Rejected input to a monomial constructor.
@@ -43,36 +39,18 @@ pub enum MonomialError {
     ZeroPathOutOfRange { start: usize, len: usize },
 }
 
-impl fmt::Display for MonomialError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ForbiddenWordTooShort { index, len } => write!(
-                f,
-                "forbidden word {index} has length {len}; admissibility needs length >= 2"
-            ),
-            Self::ForbiddenWordInvalid { index, error } => {
-                write!(f, "forbidden word {index} is not a path: {error}")
-            }
-            Self::InfiniteDimensional => f.write_str(
-                "the standard-path language is infinite; this crate supports finite-dimensional algebras only",
-            ),
-            Self::InvalidKupisch { reason } => write!(f, "invalid Kupisch series: {reason}"),
-            Self::ZeroPathOutOfRange { start, len } => write!(
-                f,
-                "no path of length {len} starting at vertex {start} in the linear quiver"
-            ),
-        }
-    }
-}
+display_error! { MonomialError {
+    Self::ForbiddenWordTooShort { index, len } => "forbidden word {index} has length {len}; admissibility needs length >= 2";
+    Self::ForbiddenWordInvalid { index, error } => "forbidden word {index} is not a path: {error}";
+    Self::InfiniteDimensional => "the standard-path language is infinite; this crate supports finite-dimensional algebras only";
+    Self::InvalidKupisch { reason } => "invalid Kupisch series: {reason}";
+    Self::ZeroPathOutOfRange { start, len } => "no path of length {len} starting at vertex {start} in the linear quiver";
+} }
 
-impl std::error::Error for MonomialError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::ForbiddenWordInvalid { error, .. } => Some(error),
-            _ => None,
-        }
-    }
-}
+error_source! { MonomialError {
+    Self::ForbiddenWordInvalid { error, .. } => Some(error),
+    _ => None,
+} }
 
 /// A monomial ideal as field-free data: the quiver and the minimal forbidden
 /// words.
@@ -106,9 +84,8 @@ impl MonomialIdeal {
                     len: word.len(),
                 });
             }
-            if let Err(error) = PathWord::from_arrows(&quiver, word) {
-                return Err(MonomialError::ForbiddenWordInvalid { index, error });
-            }
+            PathWord::from_arrows(&quiver, word)
+                .map_err(|error| MonomialError::ForbiddenWordInvalid { index, error })?;
         }
         Ok(MonomialIdeal {
             quiver,
@@ -116,15 +93,10 @@ impl MonomialIdeal {
         })
     }
 
-    #[inline]
-    pub fn quiver(&self) -> &Quiver {
-        &self.quiver
-    }
-
-    /// The minimal forbidden words, sorted by length then arrow word.
-    #[inline]
-    pub fn forbidden(&self) -> &[Vec<ArrowId>] {
-        &self.forbidden
+    accessor_methods! {
+        pub quiver() -> &Quiver = |this| &this.quiver;
+        /// The minimal forbidden words, sorted by length then arrow word.
+        pub forbidden() -> &[Vec<ArrowId>] = |this| &this.forbidden;
     }
 }
 
@@ -135,8 +107,8 @@ impl MonomialIdeal {
 /// factor. Construction either certifies that the standard-path language is
 /// finite or fails. The basis order matches the normal-word order of
 /// [`crate::algebra::Algebra`]: `basis[v]` is the trivial path `e_v` for
-/// `v < num_vertices`; the remaining entries are sorted by length, then
-/// source vertex, then lexicographic arrow word.
+/// `v < num_vertices`. Remaining entries are sorted by length, then source
+/// vertex, then lexicographic arrow word.
 ///
 /// This type analyzes; it does not construct. Build the runtime algebra over
 /// a field from the [`MonomialIdeal`] with
@@ -195,33 +167,16 @@ impl MonomialPresentation {
         Ok(MonomialPresentation { ideal, basis })
     }
 
-    /// The ideal this presentation analyzes.
-    #[inline]
-    pub fn ideal(&self) -> &MonomialIdeal {
-        &self.ideal
-    }
-
-    #[inline]
-    pub fn quiver(&self) -> &Quiver {
-        self.ideal.quiver()
-    }
-
-    /// The minimal forbidden words, sorted by length then arrow word.
-    #[inline]
-    pub fn forbidden(&self) -> &[Vec<ArrowId>] {
-        self.ideal.forbidden()
-    }
-
-    /// `dim_k A` = number of standard paths, the same over every field.
-    #[inline]
-    pub fn dim(&self) -> usize {
-        self.basis.len()
-    }
-
-    /// The standard-path basis, in the order documented on the type.
-    #[inline]
-    pub fn basis(&self) -> &[PathWord] {
-        &self.basis
+    accessor_methods! {
+        /// The ideal this presentation analyzes.
+        pub ideal() -> &MonomialIdeal = |this| &this.ideal;
+        pub quiver() -> &Quiver = |this| this.ideal.quiver();
+        /// The minimal forbidden words, sorted by length then arrow word.
+        pub forbidden() -> &[Vec<ArrowId>] = |this| this.ideal.forbidden();
+        /// `dim_k A` = number of standard paths, the same over every field.
+        pub dim() -> usize = |this| this.basis.len();
+        /// The standard-path basis, in the order documented on the type.
+        pub basis() -> &[PathWord] = |this| &this.basis;
     }
 
     /// Cartan matrix: `c[i][j] = dim e_i A e_j`, the number of standard
@@ -272,50 +227,7 @@ struct Automaton {
 
 impl Automaton {
     fn build(quiver: &Quiver, forbidden: &[Vec<ArrowId>]) -> Automaton {
-        let n = quiver.num_vertices() as usize;
-        let mut prefixes: Vec<Vec<ArrowId>> = Vec::new();
-        let mut prefix_index: FxHashMap<Vec<ArrowId>, usize> = FxHashMap::default();
-        for word in forbidden {
-            for len in 1..word.len() {
-                let prefix = word[..len].to_vec();
-                if !prefix_index.contains_key(&prefix) {
-                    prefix_index.insert(prefix.clone(), prefixes.len());
-                    prefixes.push(prefix);
-                }
-            }
-        }
-        let forbidden_set: FxHashSet<&[ArrowId]> = forbidden.iter().map(Vec::as_slice).collect();
-
-        let num_states = n + prefixes.len();
-        let mut trans = vec![vec![None; quiver.num_arrows()]; num_states];
-        for (s, row) in trans.iter_mut().enumerate() {
-            let (word, vertex): (&[ArrowId], u32) = if s < n {
-                (&[], s as u32)
-            } else {
-                let w = prefixes[s - n].as_slice();
-                (w, quiver.target(w[w.len() - 1]))
-            };
-            for &a in quiver.arrows_from(vertex) {
-                let mut extended = word.to_vec();
-                extended.push(a);
-                // Longest suffix in (forbidden ∪ prefixes) decides; minimality makes
-                // the two sets disjoint and rules out shorter forbidden suffixes
-                // hiding under a prefix match.
-                let mut next = Some(quiver.target(a) as usize);
-                for start in 0..extended.len() {
-                    let suffix = &extended[start..];
-                    if forbidden_set.contains(suffix) {
-                        next = None;
-                        break;
-                    }
-                    if let Some(&k) = prefix_index.get(suffix) {
-                        next = Some(n + k);
-                        break;
-                    }
-                }
-                row[a.index()] = next;
-            }
-        }
+        let (_, trans) = normal_word_transitions(quiver, forbidden);
         Automaton { trans }
     }
 
@@ -385,55 +297,55 @@ pub fn truncated_poly_ideal(n: usize) -> Result<MonomialIdeal, MonomialError> {
     MonomialIdeal::new(quiver, vec![vec![ArrowId(0); n]])
 }
 
+fn invalid_kupisch(reason: impl Into<String>) -> MonomialError {
+    MonomialError::InvalidKupisch {
+        reason: reason.into(),
+    }
+}
+
 /// The linear Nakayama ideal over linearly oriented `A_n` with
 /// `dim P_i = kupisch[i]`.
 ///
 /// Valid series `c`: nonempty; `c[n-1] == 1`; `c[i] >= 2` for `i < n-1`
 /// (admissibility); `c[i+1] >= c[i] - 1` (rad `P_i` is a quotient of
-/// `P_{i+1}`). Anything else errors; for example `[3, 3, 2]`, where no
-/// admissible ideal gives the prescribed projective dimensions. Runtime
-/// form: [`crate::algebra::linear_nakayama`].
+/// `P_{i+1}`). Anything else errors. `[3, 3, 2]` is an example: no
+/// admissible ideal gives those projective dimensions. Runtime form:
+/// [`crate::algebra::linear_nakayama`].
 pub fn linear_nakayama_ideal(kupisch: &[usize]) -> Result<MonomialIdeal, MonomialError> {
     let n = kupisch.len();
     if n == 0 {
-        return Err(MonomialError::InvalidKupisch {
-            reason: "series is empty".to_string(),
-        });
+        return Err(invalid_kupisch("series is empty"));
     }
     if kupisch[n - 1] != 1 {
-        return Err(MonomialError::InvalidKupisch {
-            reason: format!(
-                "linear series must end with 1, got c[{}] = {}",
-                n - 1,
-                kupisch[n - 1]
-            ),
-        });
+        return Err(invalid_kupisch(format!(
+            "linear series must end with 1, got c[{}] = {}",
+            n - 1,
+            kupisch[n - 1]
+        )));
     }
     for i in 0..n - 1 {
         if kupisch[i] < 2 {
-            return Err(MonomialError::InvalidKupisch {
-                reason: format!("c[{i}] = {} but interior entries need c >= 2", kupisch[i]),
-            });
+            return Err(invalid_kupisch(format!(
+                "c[{i}] = {} but interior entries need c >= 2",
+                kupisch[i]
+            )));
         }
         if kupisch[i + 1] < kupisch[i] - 1 {
-            return Err(MonomialError::InvalidKupisch {
-                reason: format!(
-                    "c[{}] = {} violates c[i+1] >= c[i] - 1 = {}",
-                    i + 1,
-                    kupisch[i + 1],
-                    kupisch[i] - 1
-                ),
-            });
+            return Err(invalid_kupisch(format!(
+                "c[{}] = {} violates c[i+1] >= c[i] - 1 = {}",
+                i + 1,
+                kupisch[i + 1],
+                kupisch[i] - 1
+            )));
         }
     }
-    let mut forbidden = Vec::new();
-    for (i, &c) in kupisch.iter().enumerate() {
-        // Forbid the path from i of length c; it exists only when
-        // i + c <= n - 1.
-        if i + c <= n - 1 {
-            forbidden.push((i..i + c).map(|j| ArrowId(j as u32)).collect());
-        }
-    }
+    // Forbid the path from i of length c; it exists only when i + c <= n - 1.
+    let forbidden = kupisch
+        .iter()
+        .enumerate()
+        .filter(|&(i, &c)| i + c <= n - 1)
+        .map(|(i, &c)| (i..i + c).map(|j| ArrowId(j as u32)).collect())
+        .collect();
     MonomialIdeal::new(linear_quiver(n), forbidden)
 }
 
@@ -446,25 +358,21 @@ pub fn linear_nakayama_ideal(kupisch: &[usize]) -> Result<MonomialIdeal, Monomia
 pub fn cyclic_nakayama_ideal(kupisch: &[usize]) -> Result<MonomialIdeal, MonomialError> {
     let n = kupisch.len();
     if n == 0 {
-        return Err(MonomialError::InvalidKupisch {
-            reason: "series is empty".to_string(),
-        });
+        return Err(invalid_kupisch("series is empty"));
     }
     for (i, &c) in kupisch.iter().enumerate() {
         if c < 2 {
-            return Err(MonomialError::InvalidKupisch {
-                reason: format!("c[{i}] = {c} but cyclic entries need c >= 2"),
-            });
+            return Err(invalid_kupisch(format!(
+                "c[{i}] = {c} but cyclic entries need c >= 2"
+            )));
         }
         if kupisch[(i + 1) % n] < c - 1 {
-            return Err(MonomialError::InvalidKupisch {
-                reason: format!(
-                    "c[{}] = {} violates cyclic c[i+1] >= c[i] - 1 = {}",
-                    (i + 1) % n,
-                    kupisch[(i + 1) % n],
-                    c - 1
-                ),
-            });
+            return Err(invalid_kupisch(format!(
+                "c[{}] = {} violates cyclic c[i+1] >= c[i] - 1 = {}",
+                (i + 1) % n,
+                kupisch[(i + 1) % n],
+                c - 1
+            )));
         }
     }
     let forbidden: Vec<Vec<ArrowId>> = (0..n)

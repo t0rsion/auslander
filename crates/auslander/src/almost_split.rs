@@ -23,7 +23,7 @@
 //! The socle is unaffected, which is why the crate keeps the left action.
 //! `rad End(M)` is a two-sided ideal, so its left and right annihilators in
 //! `Ext^1(M, tau M)` are the same set, and the kernel of the stacked action
-//! matrices is that set either way. No computed value depends on the side.
+//! matrices is that set either way.
 //!
 //! A projectively trivial endomorphism acts as zero, because `Ext^1(P, -) = 0`,
 //! so the action factors through [`stable_end`]. Every lift solves its systems
@@ -38,12 +38,11 @@
 //! natural in both arguments, and the nonzero elements of the socle of
 //! `Ext^1(M, tau M)` as an `End(M)`-module are exactly the almost-split
 //! classes. The socle is the annihilator of `rad End(M)`, one set on either
-//! side, as the paragraph above records. Naturality is what turns annihilation
-//! by `rad End(M)` into the right-almost-split lifting property; the argument
-//! is cited, not re-proved in code. The code checks the hypotheses, namely the
-//! [`IndecomposableModule`] gate, the projectivity cross-check, and the two
-//! dimension gates of the duality. The theorem supplies the almost-split
-//! property itself.
+//! side. Naturality turns annihilation by `rad End(M)` into the
+//! right-almost-split lifting property. The argument is cited, not re-proved
+//! in code. The code checks the hypotheses: the [`IndecomposableModule`] gate,
+//! the projectivity cross-check, and the two dimension gates of the duality.
+//! The theorem supplies the almost-split property itself.
 //!
 //! The chosen class is the first RREF row of the socle: deterministic, not
 //! canonical. When the residue degree `d` of `M` exceeds 1, the socle has
@@ -51,9 +50,8 @@
 //! With the end terms fixed, distinct nonzero socle classes are inequivalent
 //! as extensions. Their sequences are isomorphic after suitable automorphisms
 //! of the end terms, so the almost-split sequence is unique up to isomorphism
-//! of sequences. Nothing in the crate calls the chosen class canonical.
+//! of sequences.
 
-use std::fmt;
 use std::sync::Arc;
 
 use crate::ar::{TauError, tau};
@@ -116,49 +114,14 @@ pub enum DefectKind {
     },
 }
 
-impl fmt::Display for DefectKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::DualityDimensionMismatch {
-                ext_dim,
-                stable_end_dim,
-            } => write!(
-                f,
-                "Ext^1(M, tau M) has dimension {ext_dim}, stable End(M) has dimension \
-                 {stable_end_dim}; crate defect"
-            ),
-            Self::SocleDimensionMismatch {
-                socle_dim,
-                residue_degree,
-            } => write!(
-                f,
-                "the Ext socle has dimension {socle_dim}, the residue degree is \
-                 {residue_degree}; crate defect"
-            ),
-            Self::ProjectivityDisagreement {
-                resolution_projective,
-                tau_zero,
-            } => write!(
-                f,
-                "the resolution route reports projective = {resolution_projective}, tau \
-                 reports zero = {tau_zero}; crate defect"
-            ),
-            Self::NonzeroClassSplit => {
-                f.write_str("the sequence of a nonzero chosen class splits; crate defect")
-            }
-            Self::RightFactorizationMismatch { entry } => write!(
-                f,
-                "the image of Hom(X, E) in Hom(X, M) differs from rad(X, M) at catalog \
-                 entry {entry}; crate defect"
-            ),
-            Self::LeftFactorizationMismatch { entry } => write!(
-                f,
-                "the image of Hom(E, X) in Hom(tau M, X) differs from rad(tau M, X) at \
-                 catalog entry {entry}; crate defect"
-            ),
-        }
-    }
-}
+display_error! { DefectKind {
+    Self::DualityDimensionMismatch { ext_dim, stable_end_dim } => "Ext^1(M, tau M) has dimension {ext_dim}, stable End(M) has dimension {stable_end_dim}; crate defect";
+    Self::SocleDimensionMismatch { socle_dim, residue_degree } => "the Ext socle has dimension {socle_dim}, the residue degree is {residue_degree}; crate defect";
+    Self::ProjectivityDisagreement { resolution_projective, tau_zero } => "the resolution route reports projective = {resolution_projective}, tau reports zero = {tau_zero}; crate defect";
+    Self::NonzeroClassSplit => "the sequence of a nonzero chosen class splits; crate defect";
+    Self::RightFactorizationMismatch { entry } => "the image of Hom(X, E) in Hom(X, M) differs from rad(X, M) at catalog entry {entry}; crate defect";
+    Self::LeftFactorizationMismatch { entry } => "the image of Hom(E, X) in Hom(tau M, X) differs from rad(tau M, X) at catalog entry {entry}; crate defect";
+} }
 
 /// Rejected input, a failed dependency, or a failed internal cross-check of
 /// the almost-split layer.
@@ -167,7 +130,7 @@ pub enum AlmostSplitError {
     /// The AR translate could not be computed or cross-checked.
     Tau(TauError),
     /// The translate failed the indecomposability gate. The theorem makes
-    /// this a defect in practice; the variant keeps the gate's own report.
+    /// this a defect; the variant keeps the gate's own report.
     TauIndecomposability(IndecError),
     /// Two modules do not share one algebra, or a composite was formed from
     /// mismatched endpoints.
@@ -184,77 +147,35 @@ pub enum AlmostSplitError {
     Defect(DefectKind),
 }
 
-impl fmt::Display for AlmostSplitError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Tau(error) => write!(f, "the AR translate failed: {error}"),
-            Self::TauIndecomposability(error) => {
-                write!(
-                    f,
-                    "the translate failed the indecomposability gate: {error}"
-                )
-            }
-            Self::Hom(error) => write!(f, "morphism rejected: {error}"),
-            Self::Space(error) => write!(f, "hom space rejected the input: {error}"),
-            Self::Ext(error) => write!(f, "Ext class rejected the input: {error}"),
-            Self::Sequence(error) => write!(f, "short exact sequence rejected: {error}"),
-            Self::Radical(error) => write!(f, "category radical failed: {error}"),
-            Self::Defect(kind) => write!(f, "internal cross-check failed: {kind}"),
-        }
-    }
-}
+display_error! { error AlmostSplitError {
+    Self::Tau(error) => "the AR translate failed: {error}";
+    Self::TauIndecomposability(error) => "the translate failed the indecomposability gate: {error}";
+    Self::Hom(error) => "morphism rejected: {error}";
+    Self::Space(error) => "hom space rejected the input: {error}";
+    Self::Ext(error) => "Ext class rejected the input: {error}";
+    Self::Sequence(error) => "short exact sequence rejected: {error}";
+    Self::Radical(error) => "category radical failed: {error}";
+    Self::Defect(kind) => "internal cross-check failed: {kind}";
+} }
 
-impl std::error::Error for AlmostSplitError {}
+from_variants!(AlmostSplitError {
+    TauError => Tau,
+    IndecError => TauIndecomposability,
+    HomError => Hom,
+    HomSpaceError => Space,
+    ExtClassError => Ext,
+    SequenceError => Sequence,
+    ArQuiverError => Radical,
+});
 
-impl From<TauError> for AlmostSplitError {
-    fn from(error: TauError) -> AlmostSplitError {
-        AlmostSplitError::Tau(error)
-    }
-}
-
-impl From<IndecError> for AlmostSplitError {
-    fn from(error: IndecError) -> AlmostSplitError {
-        AlmostSplitError::TauIndecomposability(error)
-    }
-}
-
-impl From<HomError> for AlmostSplitError {
-    fn from(error: HomError) -> AlmostSplitError {
-        AlmostSplitError::Hom(error)
-    }
-}
-
-impl From<HomSpaceError> for AlmostSplitError {
-    fn from(error: HomSpaceError) -> AlmostSplitError {
-        AlmostSplitError::Space(error)
-    }
-}
-
-impl From<ExtClassError> for AlmostSplitError {
-    fn from(error: ExtClassError) -> AlmostSplitError {
-        AlmostSplitError::Ext(error)
-    }
-}
-
-impl From<SequenceError> for AlmostSplitError {
-    fn from(error: SequenceError) -> AlmostSplitError {
-        AlmostSplitError::Sequence(error)
-    }
-}
-
-impl From<ArQuiverError> for AlmostSplitError {
-    fn from(error: ArQuiverError) -> AlmostSplitError {
-        AlmostSplitError::Radical(error)
-    }
+fn defect(kind: DefectKind) -> AlmostSplitError {
+    AlmostSplitError::Defect(kind)
 }
 
 /// The subspace of maps in `space` that factor through a projective module.
 ///
-/// By the factorization lemma of the module docs, `f: M -> N` factors through
-/// a projective exactly when it factors through the projective cover
-/// `pi_N: P(N) -> N`. So the subspace is the image of
-/// `Hom(M, P(N)) -> Hom(M, N)`, `h -> h.then(pi_N)`, and one composition per
-/// basis element of `Hom(M, P(N))` computes it.
+/// By the factorization lemma, this is the image of
+/// `Hom(M, P(N)) -> Hom(M, N)`, `h -> h.then(pi_N)`.
 pub fn projectively_trivial(space: &HomSpace) -> Result<HomSubspace, AlmostSplitError> {
     let (cover, pi) = projective_cover(space.target());
     let through = hom(space.source(), &cover)?;
@@ -283,13 +204,10 @@ pub fn stable_end(m: &Module) -> Result<HomQuotient, AlmostSplitError> {
 }
 
 /// The matrix `A_phi` of `Ext^1(phi, N)` in the fixed Ext basis of
-/// `space = Ext^1(M, N)`, for `phi` an endomorphism of `M`: row `i` holds the
-/// coordinates of the image of basis class `i`, computed through the chain
-/// lifts of the module docs.
+/// `space = Ext^1(M, N)`, for `phi` an endomorphism of `M`. Row `i` holds the
+/// coordinates of the image of basis class `i`.
 ///
-/// The functor is contravariant, so `A_{phi.then(psi)} = A_psi A_phi`. Every
-/// lift solves its systems with zeroed free variables, so the matrix is
-/// deterministic.
+/// The functor is contravariant, so `A_{phi.then(psi)} = A_psi A_phi`.
 fn action_matrix(space: &ExtSpace, phi: &Morphism) -> Result<DenseMat, AlmostSplitError> {
     let d = space.dim();
     if d == 0 {
@@ -301,15 +219,15 @@ fn action_matrix(space: &ExtSpace, phi: &Morphism) -> Result<DenseMat, AlmostSpl
     let d1 = &res.maps[0];
     let rhs1 = d1.then(&phi0)?;
     let phi1 = lift_through(&res.terms[1], d1, &rhs1);
-    let mut a = DenseMat::zero(d, d);
-    for (i, rep) in space.representatives().iter().enumerate() {
-        let moved = phi1.then(rep)?;
-        let class = space.class_from_cocycle(&moved)?;
-        for (c, &v) in class.coordinates().iter().enumerate() {
-            a.set(i, c, v);
-        }
-    }
-    Ok(a)
+    let rows: Vec<Vec<Fp>> = space
+        .representatives()
+        .iter()
+        .map(|rep| {
+            let moved = phi1.then(rep)?;
+            Ok(space.class_from_cocycle(&moved)?.coordinates().to_vec())
+        })
+        .collect::<Result<_, AlmostSplitError>>()?;
+    Ok(DenseMat::from_rows(&rows))
 }
 
 /// One [`action_matrix`] per radical basis element of `End(M)`, in radical
@@ -323,6 +241,23 @@ fn action_matrices(
     (0..radical.rows())
         .map(|j| action_matrix(space, &endo.morphism(radical.row(j))))
         .collect()
+}
+
+/// Whether the sequence and class have the expected endpoints and recover.
+fn ext_sequence_holds(
+    m: &IndecomposableModule,
+    sequence: &ShortExactSequence,
+    class: &ExtClass,
+) -> bool {
+    let space = class.space();
+    space.degree() == 1
+        && space.source().ptr_eq(m.module())
+        && sequence.quotient().ptr_eq(space.source())
+        && sequence.sub().ptr_eq(space.target())
+        && space.matches_recomputation()
+        && ShortExactSequence::new(sequence.inclusion().clone(), sequence.projection().clone())
+            .is_ok()
+        && matches!(sequence.ext1_class(space), Ok(recovered) if recovered.equals(class) == Ok(true))
 }
 
 /// The RREF basis of `{ e : e . r_j = 0 for every j }`: the left kernel of
@@ -348,17 +283,14 @@ fn subspace_combination(sub: &HomSubspace, coords: &[Fp]) -> Option<Morphism> {
     }
     let mut acc = zero_morphism(sub.source(), sub.target())
         .expect("a subspace's endpoints share one algebra");
-    for (k, &c) in coords.iter().enumerate() {
-        if c.is_zero() {
-            continue;
-        }
+    for (k, &c) in coords.iter().enumerate().filter(|(_, c)| !c.is_zero()) {
         acc = add_morphisms(&acc, &scale_morphism(&sub.basis_morphism(k), c));
     }
     Some(acc)
 }
 
 /// The outcome of [`almost_split`]. A projective module has no almost-split
-/// sequence ending at it, which is an outcome, not an error.
+/// sequence ending at it.
 // An outcome is built once and matched once, so the size gap between the
 // variants never costs a hot copy.
 #[derive(Clone, Debug)]
@@ -384,27 +316,18 @@ pub struct AlmostSplitSequence {
 }
 
 impl AlmostSplitSequence {
-    /// The sequence `0 -> tau M -> E -> M -> 0`.
-    #[inline]
-    pub fn sequence(&self) -> &ShortExactSequence {
-        &self.sequence
-    }
-
-    /// The chosen AR class: the first RREF row of the Ext socle.
-    ///
-    /// The class is deterministic, not canonical. Any nonzero socle element
-    /// gives an almost-split sequence isomorphic to this one after suitable
-    /// automorphisms of the end terms. With the end terms fixed, distinct
-    /// socle classes are inequivalent extensions.
-    #[inline]
-    pub fn chosen_ar_class(&self) -> &ExtClass {
-        &self.class
-    }
-
-    /// The witness behind the almost-split claim.
-    #[inline]
-    pub fn witness(&self) -> &AlmostSplitWitness {
-        &self.witness
+    accessor_methods! {
+        /// The sequence `0 -> tau M -> E -> M -> 0`.
+        pub sequence() -> &ShortExactSequence = |this| &this.sequence;
+        /// The chosen AR class: the first RREF row of the Ext socle.
+        ///
+        /// The class is deterministic, not canonical. Any nonzero socle element
+        /// gives an almost-split sequence isomorphic to this one after suitable
+        /// automorphisms of the end terms. With the end terms fixed, distinct
+        /// socle classes are inequivalent extensions.
+        pub chosen_ar_class() -> &ExtClass = |this| &this.class;
+        /// The witness behind the almost-split claim.
+        pub witness() -> &AlmostSplitWitness = |this| &this.witness;
     }
 
     /// Rechecks the AR duality witness against `m`, with the sequence and
@@ -471,70 +394,36 @@ pub struct ArDualityWitness {
 }
 
 impl ArDualityWitness {
-    /// RREF coordinates of the stored `rad End(M)` basis, one element per
-    /// row.
-    #[inline]
-    pub fn radical_basis_coords(&self) -> &DenseMat {
-        &self.radical_coords
-    }
-
-    /// The coordinates of `class . r_j` per radical basis element; every
-    /// entry is zero.
-    #[inline]
-    pub fn action_traces(&self) -> &[Vec<Fp>] {
-        &self.action_traces
-    }
-
-    /// The RREF basis of the socle kernel.
-    #[inline]
-    pub fn socle_rref(&self) -> &DenseMat {
-        &self.socle_rref
-    }
-
-    /// The index of the chosen socle row, always 0. The choice is
-    /// deterministic, not canonical, and [`ArDualityWitness::verify`] rejects
-    /// any other row.
-    #[inline]
-    pub fn chosen_row(&self) -> usize {
-        self.chosen_row
-    }
-
-    /// The stored `dim_Fp Ext^1(M, tau M)`.
-    #[inline]
-    pub fn ext_dim(&self) -> usize {
-        self.ext_dim
-    }
-
-    /// The stored `dim_Fp stable End(M)`.
-    #[inline]
-    pub fn stable_end_dim(&self) -> usize {
-        self.stable_end_dim
-    }
-
-    /// The stored socle dimension.
-    #[inline]
-    pub fn socle_dim(&self) -> usize {
-        self.socle_dim
-    }
-
-    /// The stored residue degree of `End(M)`.
-    #[inline]
-    pub fn residue_degree(&self) -> usize {
-        self.residue_degree
-    }
-
-    /// The proof that the sequence does not split.
-    #[inline]
-    pub fn non_split(&self) -> &NonSplitWitness {
-        &self.non_split
+    accessor_methods! {
+        /// RREF coordinates of the stored `rad End(M)` basis, one element per
+        /// row.
+        pub radical_basis_coords() -> &DenseMat = |this| &this.radical_coords;
+        /// The coordinates of `class . r_j` per radical basis element; every
+        /// entry is zero.
+        pub action_traces() -> &[Vec<Fp>] = |this| &this.action_traces;
+        /// The RREF basis of the socle kernel.
+        pub socle_rref() -> &DenseMat = |this| &this.socle_rref;
+        /// The index of the chosen socle row, always 0. The choice is
+        /// deterministic, not canonical, and [`ArDualityWitness::verify`] rejects
+        /// any other row.
+        pub chosen_row() -> usize = |this| this.chosen_row;
+        /// The stored `dim_Fp Ext^1(M, tau M)`.
+        pub ext_dim() -> usize = |this| this.ext_dim;
+        /// The stored `dim_Fp stable End(M)`.
+        pub stable_end_dim() -> usize = |this| this.stable_end_dim;
+        /// The stored socle dimension.
+        pub socle_dim() -> usize = |this| this.socle_dim;
+        /// The stored residue degree of `End(M)`.
+        pub residue_degree() -> usize = |this| this.residue_degree;
+        /// The proof that the sequence does not split.
+        pub non_split() -> &NonSplitWitness = |this| &this.non_split;
     }
 
     /// Rechecks the witness against the live modules.
     ///
-    /// The recheck takes nothing on trust, starting with the class's own
-    /// [`ExtSpace`]. Every other check reads that space, so a tampered
-    /// resolution, cocycle basis, coboundary basis, complement, or
-    /// representative would otherwise certify itself;
+    /// Starts from the class's own [`ExtSpace`]. Later checks read that space,
+    /// so a tampered resolution, cocycle basis, coboundary basis, complement,
+    /// or representative would otherwise certify itself.
     /// [`ExtSpace::matches_recomputation`] rebuilds all of it from the live
     /// endpoint modules and compares. The checks are:
     ///
@@ -564,97 +453,53 @@ impl ArDualityWitness {
         class: &ExtClass,
     ) -> bool {
         let space = class.space();
-        if space.degree() != 1
-            || !space.source().ptr_eq(m.module())
-            || !sequence.quotient().ptr_eq(space.source())
-            || !sequence.sub().ptr_eq(space.target())
-            || !space.matches_recomputation()
-        {
-            return false;
-        }
+        verify_guard!(ext_sequence_holds(m, sequence, class));
         // The construction uses tau(m) as the Ext space target, and the
         // recomputed translate is a fresh module value. So the comparison has
         // to be a certified isomorphism, not pointer identity. An Unknown
         // outcome fails verification.
-        let Ok(translate) = tau(m.module()) else {
-            return false;
-        };
-        if IndecomposableModule::new(&translate).is_err() {
-            return false;
-        }
-        match is_isomorphic(&translate, space.target()) {
-            Ok(IsoOutcome::Isomorphic(_)) => {}
-            _ => return false,
-        }
+        let_or_false!(Ok(translate) = tau(m.module()));
+        verify_guard!(IndecomposableModule::new(&translate).is_ok());
+        verify_guard!(matches!(
+            is_isomorphic(&translate, space.target()),
+            Ok(IsoOutcome::Isomorphic(_))
+        ));
         let field = m.module().field();
-        if self.radical_coords != *m.endo().radical_basis() {
-            return false;
-        }
+        verify_guard!(self.radical_coords == *m.endo().radical_basis());
         let d = space.dim();
-        if self.ext_dim != d || self.ext_dim != self.stable_end_dim {
-            return false;
-        }
-        let Ok(stable) = stable_end(m.module()) else {
-            return false;
-        };
-        if stable.dim() != self.stable_end_dim {
-            return false;
-        }
-        if self.socle_dim != self.socle_rref.rows()
-            || self.residue_degree != m.residue_degree()
-            || self.socle_dim != self.residue_degree
-        {
-            return false;
-        }
-        let Ok(action) = action_matrices(m, space) else {
-            return false;
-        };
-        if socle_kernel(&action, d, &field) != self.socle_rref {
-            return false;
-        }
-        for r in 0..self.socle_rref.rows() {
-            for a in &action {
-                if row_times(self.socle_rref.row(r), a, &field)
+        verify_guard!(self.ext_dim == d && self.ext_dim == self.stable_end_dim);
+        let_or_false!(Ok(stable) = stable_end(m.module()));
+        verify_guard!(stable.dim() == self.stable_end_dim);
+        verify_guard!(
+            self.socle_dim == self.socle_rref.rows()
+                && self.residue_degree == m.residue_degree()
+                && self.socle_dim == self.residue_degree
+        );
+        let_or_false!(Ok(action) = action_matrices(m, space));
+        verify_guard!(socle_kernel(&action, d, &field) == self.socle_rref);
+        verify_guard!(!(0..self.socle_rref.rows()).any(|r| {
+            action.iter().any(|a| {
+                row_times(self.socle_rref.row(r), a, &field)
                     .iter()
                     .any(|v| !v.is_zero())
-                {
-                    return false;
-                }
-            }
-        }
+            })
+        }));
         // Row 0 is the crate's choice, and the determinism fingerprint pins
         // its coordinates. Another socle row would give an almost-split
         // sequence too, but not this crate's, so it is rejected here.
-        if self.chosen_row != 0
-            || self.socle_rref.rows() == 0
-            || class.coordinates() != self.socle_rref.row(0)
-            || class.is_zero()
-        {
-            return false;
-        }
-        if self.action_traces.len() != action.len() {
-            return false;
-        }
-        for (trace, a) in self.action_traces.iter().zip(&action) {
-            if *trace != row_times(class.coordinates(), a, &field)
-                || trace.iter().any(|v| !v.is_zero())
-            {
-                return false;
-            }
-        }
-        if ShortExactSequence::new(sequence.inclusion().clone(), sequence.projection().clone())
-            .is_err()
-        {
-            return false;
-        }
-        match sequence.ext1_class(space) {
-            Ok(recovered) => {
-                if recovered.equals(class) != Ok(true) {
-                    return false;
-                }
-            }
-            Err(_) => return false,
-        }
+        verify_guard!(
+            self.chosen_row == 0
+                && self.socle_rref.rows() > 0
+                && class.coordinates() == self.socle_rref.row(0)
+                && !class.is_zero()
+        );
+        verify_guard!(
+            self.action_traces.len() == action.len()
+                && !self.action_traces.iter().zip(&action).any(|(trace, a)| {
+                    *trace != row_times(class.coordinates(), a, &field)
+                        || trace.iter().any(|v| !v.is_zero())
+                })
+        );
         self.non_split.verify(sequence)
     }
 }
@@ -673,8 +518,7 @@ impl ArDualityWitness {
 /// split, and almost split are equivalent. The right-side equality over an
 /// exhaustive catalog already proves `g` right almost split, and both ends are
 /// [`IndecomposableModule`] values, so the left side follows. It is computed
-/// and stored anyway, because redundant independent routes are this crate's
-/// house style.
+/// and stored as an independent check.
 #[derive(Clone, Debug)]
 pub struct CatalogEntryCheck {
     right_factorizations: Vec<Vec<Fp>>,
@@ -684,32 +528,19 @@ pub struct CatalogEntryCheck {
 }
 
 impl CatalogEntryCheck {
-    /// Coordinates of each `rad(X, M)` basis map over the RREF basis of
-    /// `im(Hom(X, E) -> Hom(X, M))`, in radical basis order.
-    #[inline]
-    pub fn right_factorizations(&self) -> &[Vec<Fp>] {
-        &self.right_factorizations
-    }
-
-    /// Coordinates of each composite `h_i.then(g)` over the RREF basis of
-    /// `rad(X, M)`, in `Hom(X, E)` basis order.
-    #[inline]
-    pub fn right_memberships(&self) -> &[Vec<Fp>] {
-        &self.right_memberships
-    }
-
-    /// Coordinates of each `rad(tau M, X)` basis map over the RREF basis of
-    /// `im(Hom(E, X) -> Hom(tau M, X))`, in radical basis order.
-    #[inline]
-    pub fn left_factorizations(&self) -> &[Vec<Fp>] {
-        &self.left_factorizations
-    }
-
-    /// Coordinates of each composite `f.then(h_i)` over the RREF basis of
-    /// `rad(tau M, X)`, in `Hom(E, X)` basis order.
-    #[inline]
-    pub fn left_memberships(&self) -> &[Vec<Fp>] {
-        &self.left_memberships
+    accessor_methods! {
+        /// Coordinates of each `rad(X, M)` basis map over the RREF basis of
+        /// `im(Hom(X, E) -> Hom(X, M))`, in radical basis order.
+        pub right_factorizations() -> &[Vec<Fp>] = |this| &this.right_factorizations;
+        /// Coordinates of each composite `h_i.then(g)` over the RREF basis of
+        /// `rad(X, M)`, in `Hom(X, E)` basis order.
+        pub right_memberships() -> &[Vec<Fp>] = |this| &this.right_memberships;
+        /// Coordinates of each `rad(tau M, X)` basis map over the RREF basis of
+        /// `im(Hom(E, X) -> Hom(tau M, X))`, in radical basis order.
+        pub left_factorizations() -> &[Vec<Fp>] = |this| &this.left_factorizations;
+        /// Coordinates of each composite `f.then(h_i)` over the RREF basis of
+        /// `rad(tau M, X)`, in `Hom(E, X)` basis order.
+        pub left_memberships() -> &[Vec<Fp>] = |this| &this.left_memberships;
     }
 }
 
@@ -733,6 +564,55 @@ struct EntryRecompute {
     left_image: HomSubspace,
     left_rad: HomSubspace,
     left_composites: Vec<Morphism>,
+}
+
+fn radical_maps(radical: &HomSubspace) -> Vec<Morphism> {
+    (0..radical.dim())
+        .map(|i| radical.basis_morphism(i))
+        .collect()
+}
+
+fn express(over: &HomSubspace, maps: &[Morphism]) -> Result<Vec<Vec<Fp>>, AlmostSplitError> {
+    maps.iter()
+        .map(|map| {
+            Ok(over.witness_contains(map)?.expect(
+                "the subspaces were just proved equal, so every map solves; this is a bug in \
+                 auslander",
+            ))
+        })
+        .collect()
+}
+
+impl EntryRecompute {
+    fn verifies(&self, check: &CatalogEntryCheck) -> bool {
+        self.image == self.rad
+            && self.left_image == self.left_rad
+            && family_solves(
+                &check.right_factorizations,
+                &self.image,
+                &radical_maps(&self.rad),
+            )
+            && family_solves(&check.right_memberships, &self.rad, &self.composites)
+            && family_solves(
+                &check.left_factorizations,
+                &self.left_image,
+                &radical_maps(&self.left_rad),
+            )
+            && family_solves(
+                &check.left_memberships,
+                &self.left_rad,
+                &self.left_composites,
+            )
+    }
+
+    fn into_check(self) -> Result<CatalogEntryCheck, AlmostSplitError> {
+        Ok(CatalogEntryCheck {
+            right_factorizations: express(&self.image, &radical_maps(&self.rad))?,
+            right_memberships: express(&self.rad, &self.composites)?,
+            left_factorizations: express(&self.left_image, &radical_maps(&self.left_rad))?,
+            left_memberships: express(&self.left_rad, &self.left_composites)?,
+        })
+    }
 }
 
 fn recompute_entry(
@@ -765,10 +645,9 @@ fn recompute_entry(
 }
 
 impl CatalogWitness {
-    /// The per-entry factorization data, in catalog order.
-    #[inline]
-    pub fn entry_checks(&self) -> &[CatalogEntryCheck] {
-        &self.entries
+    accessor_methods! {
+        /// The per-entry factorization data, in catalog order.
+        pub entry_checks() -> &[CatalogEntryCheck] = |this| &this.entries;
     }
 
     /// Rechecks the witness against the live modules, for every catalog entry
@@ -782,8 +661,7 @@ impl CatalogWitness {
     /// the class recovery below reduces against its stored bases. The sequence
     /// is also rechecked for exactness through the [`ShortExactSequence`]
     /// constructor, for recovery of the supplied class, and for
-    /// indecomposability of the sub module. The whole recheck is
-    /// deterministic.
+    /// indecomposability of the sub module.
     ///
     /// The sequence and class are the caller's, not this witness's own. For
     /// the pair the almost-split value holds, call
@@ -795,66 +673,15 @@ impl CatalogWitness {
         sequence: &ShortExactSequence,
         class: &ExtClass,
     ) -> bool {
-        if !Arc::ptr_eq(m.module().algebra(), catalog.algebra())
-            || self.entries.len() != catalog.len()
-        {
-            return false;
-        }
-        let space = class.space();
-        if space.degree() != 1
-            || !space.source().ptr_eq(m.module())
-            || !sequence.quotient().ptr_eq(space.source())
-            || !sequence.sub().ptr_eq(space.target())
-            || class.is_zero()
-            || !space.matches_recomputation()
-        {
-            return false;
-        }
-        if ShortExactSequence::new(sequence.inclusion().clone(), sequence.projection().clone())
-            .is_err()
-        {
-            return false;
-        }
-        match sequence.ext1_class(space) {
-            Ok(recovered) => {
-                if recovered.equals(class) != Ok(true) {
-                    return false;
-                }
-            }
-            Err(_) => return false,
-        }
-        let Ok(tau_ind) = IndecomposableModule::new(sequence.sub()) else {
-            return false;
-        };
+        verify_guard!(
+            Arc::ptr_eq(m.module().algebra(), catalog.algebra())
+                && self.entries.len() == catalog.len()
+        );
+        verify_guard!(!class.is_zero() && ext_sequence_holds(m, sequence, class));
+        let_or_false!(Ok(tau_ind) = IndecomposableModule::new(sequence.sub()));
         for (check, x) in self.entries.iter().zip(catalog.entries()) {
-            let Ok(EntryRecompute {
-                image,
-                rad,
-                composites,
-                left_image,
-                left_rad,
-                left_composites,
-            }) = recompute_entry(m, &tau_ind, sequence, x)
-            else {
-                return false;
-            };
-            if image != rad || left_image != left_rad {
-                return false;
-            }
-            let radical_maps = |rad: &HomSubspace| -> Vec<Morphism> {
-                (0..rad.dim()).map(|i| rad.basis_morphism(i)).collect()
-            };
-            let ok = family_solves(&check.right_factorizations, &image, &radical_maps(&rad))
-                && family_solves(&check.right_memberships, &rad, &composites)
-                && family_solves(
-                    &check.left_factorizations,
-                    &left_image,
-                    &radical_maps(&left_rad),
-                )
-                && family_solves(&check.left_memberships, &left_rad, &left_composites);
-            if !ok {
-                return false;
-            }
+            let_or_false!(Ok(entry) = recompute_entry(m, &tau_ind, sequence, x));
+            verify_guard!(entry.verifies(check));
         }
         true
     }
@@ -863,12 +690,10 @@ impl CatalogWitness {
 /// Whether each stored coordinate vector rebuilds the matching expected
 /// morphism over the RREF basis of `over`.
 fn family_solves(stored: &[Vec<Fp>], over: &HomSubspace, expected: &[Morphism]) -> bool {
-    if stored.len() != expected.len() {
-        return false;
-    }
-    stored.iter().zip(expected).all(|(coords, target)| {
-        matches!(subspace_combination(over, coords), Some(rebuilt) if rebuilt == *target)
-    })
+    stored.len() == expected.len()
+        && stored.iter().zip(expected).all(|(coords, target)| {
+            matches!(subspace_combination(over, coords), Some(rebuilt) if rebuilt == *target)
+        })
 }
 
 /// The shared output of the socle construction for a non-projective input.
@@ -887,21 +712,16 @@ enum Construction {
     Built(Box<SocleConstruction>),
 }
 
-/// Runs the socle construction of the module docs: the double-route
-/// translate with the projectivity cross-check, the indecomposability gate
-/// on the translate, the action matrices, the socle kernel, the two
-/// dimension gates, the extension of the chosen class, and its non-split
-/// witness.
+/// Socle construction of the module docs: double-route translate, action
+/// matrices, socle kernel, dimension gates, chosen class, non-split witness.
 fn construct(m: &IndecomposableModule) -> Result<Construction, AlmostSplitError> {
     let projective = m.is_projective();
     let tau_module = tau(m.module())?;
     if tau_module.is_zero() != projective {
-        return Err(AlmostSplitError::Defect(
-            DefectKind::ProjectivityDisagreement {
-                resolution_projective: projective,
-                tau_zero: tau_module.is_zero(),
-            },
-        ));
+        return Err(defect(DefectKind::ProjectivityDisagreement {
+            resolution_projective: projective,
+            tau_zero: tau_module.is_zero(),
+        }));
     }
     if projective {
         return Ok(Construction::Projective);
@@ -911,23 +731,19 @@ fn construct(m: &IndecomposableModule) -> Result<Construction, AlmostSplitError>
         .expect("the translate lives over the module's algebra Arc");
     let stable = stable_end(m.module())?;
     if space.dim() != stable.dim() {
-        return Err(AlmostSplitError::Defect(
-            DefectKind::DualityDimensionMismatch {
-                ext_dim: space.dim(),
-                stable_end_dim: stable.dim(),
-            },
-        ));
+        return Err(defect(DefectKind::DualityDimensionMismatch {
+            ext_dim: space.dim(),
+            stable_end_dim: stable.dim(),
+        }));
     }
     let field = m.module().field();
     let action = action_matrices(m, &space)?;
     let socle = socle_kernel(&action, space.dim(), &field);
     if socle.rows() != m.residue_degree() {
-        return Err(AlmostSplitError::Defect(
-            DefectKind::SocleDimensionMismatch {
-                socle_dim: socle.rows(),
-                residue_degree: m.residue_degree(),
-            },
-        ));
+        return Err(defect(DefectKind::SocleDimensionMismatch {
+            socle_dim: socle.rows(),
+            residue_degree: m.residue_degree(),
+        }));
     }
     let class = space.class_from_coordinates(socle.row(0))?;
     let traces: Vec<Vec<Fp>> = action
@@ -940,7 +756,7 @@ fn construct(m: &IndecomposableModule) -> Result<Construction, AlmostSplitError>
     let non_split = match sequence.split_status_one_pass() {
         SplitStatus::NonSplit(witness) => witness,
         SplitStatus::Split(_) => {
-            return Err(AlmostSplitError::Defect(DefectKind::NonzeroClassSplit));
+            return Err(defect(DefectKind::NonzeroClassSplit));
         }
     };
     Ok(Construction::Built(Box::new(SocleConstruction {
@@ -957,9 +773,8 @@ fn construct(m: &IndecomposableModule) -> Result<Construction, AlmostSplitError>
 /// The almost-split sequence ending at `m`, certified through the AR
 /// duality route.
 ///
-/// A projective input returns [`AlmostSplitOutcome::Projective`]: valid
-/// mathematics, not an error. Otherwise the socle construction runs and the
-/// result carries an [`ArDualityWitness`].
+/// A projective input returns [`AlmostSplitOutcome::Projective`]. Otherwise
+/// the socle construction runs and the result carries an [`ArDualityWitness`].
 ///
 /// # Errors
 /// [`AlmostSplitError::Tau`] when the translate fails,
@@ -1017,9 +832,9 @@ pub fn almost_split_via_catalog(
     m: &IndecomposableModule,
     catalog: &IndecomposableCatalog,
 ) -> Result<AlmostSplitOutcome, AlmostSplitError> {
-    if !Arc::ptr_eq(m.module().algebra(), catalog.algebra()) {
-        return Err(AlmostSplitError::Hom(HomError::DifferentAlgebras));
-    }
+    Arc::ptr_eq(m.module().algebra(), catalog.algebra())
+        .then_some(())
+        .ok_or(AlmostSplitError::Hom(HomError::DifferentAlgebras))?;
     let built = match construct(m)? {
         Construction::Projective => return Ok(AlmostSplitOutcome::Projective),
         Construction::Built(built) => built,
@@ -1032,44 +847,14 @@ pub fn almost_split_via_catalog(
     } = *built;
     let mut entries = Vec::with_capacity(catalog.len());
     for (entry, x) in catalog.entries().iter().enumerate() {
-        let EntryRecompute {
-            image,
-            rad,
-            composites,
-            left_image,
-            left_rad,
-            left_composites,
-        } = recompute_entry(m, &tau_ind, &sequence, x)?;
-        if image != rad {
-            return Err(AlmostSplitError::Defect(
-                DefectKind::RightFactorizationMismatch { entry },
-            ));
+        let recomputed = recompute_entry(m, &tau_ind, &sequence, x)?;
+        if recomputed.image != recomputed.rad {
+            return Err(defect(DefectKind::RightFactorizationMismatch { entry }));
         }
-        if left_image != left_rad {
-            return Err(AlmostSplitError::Defect(
-                DefectKind::LeftFactorizationMismatch { entry },
-            ));
+        if recomputed.left_image != recomputed.left_rad {
+            return Err(defect(DefectKind::LeftFactorizationMismatch { entry }));
         }
-        let express =
-            |over: &HomSubspace, maps: &[Morphism]| -> Result<Vec<Vec<Fp>>, AlmostSplitError> {
-                maps.iter()
-                    .map(|map| {
-                        Ok(over.witness_contains(map)?.expect(
-                            "the subspaces were just proved equal, so every map solves; \
-                         this is a bug in auslander",
-                        ))
-                    })
-                    .collect()
-            };
-        let radical_maps = |rad: &HomSubspace| -> Vec<Morphism> {
-            (0..rad.dim()).map(|i| rad.basis_morphism(i)).collect()
-        };
-        entries.push(CatalogEntryCheck {
-            right_factorizations: express(&image, &radical_maps(&rad))?,
-            right_memberships: express(&rad, &composites)?,
-            left_factorizations: express(&left_image, &radical_maps(&left_rad))?,
-            left_memberships: express(&left_rad, &left_composites)?,
-        });
+        entries.push(recomputed.into_check()?);
     }
     Ok(AlmostSplitOutcome::Sequence(AlmostSplitSequence {
         sequence,
@@ -1365,8 +1150,8 @@ mod tests {
     // Hom(M, A) = ann(x^2) = span{x^2, x^3}, and both composites with
     // A ->> M are zero, so stable End(M) has dimension 2 as well. The
     // radical of End(M) is spanned by x, so the socle gate forces dimension
-    // 1 = residue degree: a genuine proper socle inside a two-dimensional
-    // Ext space. The right map of the mesh 0 -> A/(x^2) ->
+    // 1 = residue degree: a proper socle inside a two-dimensional Ext space.
+    // The right map of the mesh 0 -> A/(x^2) ->
     // A/(x) (+) A/(x^3) -> A/(x^2) -> 0, (b, c) |-> x b - c, is right
     // almost split: a non-retraction A/(x^i) -> M either lands in rad M and
     // factors through the A/(x) leg (h = x u factors as x b with b the mod-x
@@ -1807,8 +1592,8 @@ mod tests {
 
     // Section 15 of the design, at residue degree above 1: a witness built
     // from socle row 1 carries that row's own valid non-split witness and
-    // annihilates every action matrix, so the sequence it names is genuinely
-    // almost split. It is not the crate's chosen class, whose coordinates the
+    // annihilates every action matrix, so the sequence it names is almost
+    // split. It is not the crate's chosen class, whose coordinates the
     // fresh-process fingerprint pins, so verify rejects the row index.
     #[test]
     fn a_chosen_row_other_than_zero_fails_duality_verification() {

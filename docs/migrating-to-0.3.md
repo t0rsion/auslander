@@ -7,10 +7,10 @@ in the `monomial` module and analyze only, and `Algebra::from_monomial` is gone,
 so a monomial ideal reaches `Algebra` as an ordinary `Presentation`. Read this
 file as the 0.3 record it is, and take current signatures from the API docs.
 
-The one structural change behind all of them: `MonomialAlgebra` is gone.
-`Algebra` is now the only runtime algebra type, it owns its prime field, and it
-exists only after the completion certificate has been verified. Wherever a field
-traveled beside an algebra, it now comes from the algebra.
+`MonomialAlgebra` is gone. `Algebra` is the only runtime algebra type, it
+owns its prime field, and it exists only after the completion certificate
+has been verified. Wherever a field traveled beside an algebra, it now
+comes from the algebra.
 
 ## 1. Named constructors take a field
 
@@ -430,7 +430,7 @@ Budgets. `CompletionLimits::default()` sets three:
 | `max_word_len` | 64 | arrows in one word |
 | `max_steps` | 1,000,000 | work units: one per reduction step and per emitted normal word |
 
-Tighten them when you want a run to stop early. An exhausted budget gives
+To stop a run early, tighten them. An exhausted budget gives
 `AlgebraBuildError::Truncated(TruncationDiagnostics)` with the basis size, the
 pending ambiguity count, the steps used, and which budget ran out.
 

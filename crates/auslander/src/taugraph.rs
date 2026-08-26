@@ -1,7 +1,7 @@
 //! The budgeted mutation walk from `(A, 0)` and its closure certificate.
 //!
 //! [`support_tau_tilting_graph`] walks the support tau-tilting quiver breadth
-//! first from the pair `(A, 0)`, closing under LEFT mutation alone. When the
+//! first from the pair `(A, 0)`, closing under left mutation alone. When the
 //! frontier empties, the walk builds a [`ClosureWitness`] and reruns
 //! [`ClosureWitness::verify`] on it before the outcome exists. Only a witness
 //! that passes becomes [`SupportTauTiltingGraphOutcome::Closed`], whose vertex
@@ -41,12 +41,12 @@
 //! argument above needs neither connectivity nor `n`-regularity, only the
 //! maximum, left closure, and finiteness.
 //!
-//! The result the release states, in full: for a finite-dimensional admissible
-//! bound quiver algebra over a checked prime field, a verified finite set
-//! containing `(A, 0)` and closed under every left mutation is the complete set
-//! of basic support tau-tilting pairs up to isomorphism, by AIR Theorem 2.18
-//! and Theorem 2.35(b). It requires neither an algebraically closed base field
-//! nor residue division rings equal to the base field.
+//! For a finite-dimensional admissible bound quiver algebra over a checked
+//! prime field, a verified finite set containing `(A, 0)` and closed under
+//! every left mutation is the complete set of basic support tau-tilting pairs
+//! up to isomorphism, by AIR Theorem 2.18 and Theorem 2.35(b). It requires
+//! neither an algebraically closed base field nor residue division rings
+//! equal to the base field.
 //!
 //! The field-generality clause rests on the AIR hypothesis itself, which
 //! reads "let `Lambda` be a finite dimensional `k`-algebra". The paper
@@ -58,10 +58,10 @@
 //! Theorem 2.35(b) by number and by statement: the published numbering may
 //! differ from the arXiv v4 numbering the citation was checked against.
 //!
-//! Two consequences shape the code. Mutation at a summand of the projective
-//! part is always a right mutation, so a descending walk never performs one
-//! and a slot is an index into the module summands. And `n`-regularity of the
-//! quiver is a cross-check here, not a step of the proof.
+//! Mutation at a summand of the projective part is always a right mutation,
+//! so a descending walk never performs one and a slot is an index into the
+//! module summands. `n`-regularity of the quiver is a cross-check here, not a
+//! step of the proof.
 //!
 //! # What closure means in code
 //!
@@ -72,9 +72,9 @@
 //! a vertex of the set, or a certified [`FacWitness`] proving that the slot
 //! admits no left mutation.
 //!
-//! That recheck is a gate, not an optional call. It runs on
-//! every drained walk before the closed value is built, so a construction
-//! defect surfaces as [`GraphError::Defect`] rather than as a
+//! That recheck is a gate, not an optional call. It runs on every drained
+//! walk before the closed value is built, so a construction defect surfaces
+//! as [`GraphError::Defect`] rather than as a
 //! [`ClosedSupportTauTiltingGraph`] whose own `verify` returns false. On D_4
 //! it costs 74.4 ms to 124.2 ms against 18.7 ms to 30.9 ms for the walk, over
 //! four dev-profile runs per field. The cost is not charged to
@@ -90,24 +90,22 @@
 //! from `(A, 0)` leaves that ray. Do not read a truncated result as "the pairs
 //! found so far, of which there may be a few more".
 //!
-//! The safe direction holds. A truncated set is never accidentally closed: at
-//! the moment of truncation the deepest vertex still has an unvisited slot, so
-//! the closure test fails. No false completeness certificate is possible; the
-//! only risk is never getting one.
+//! A truncated set is never accidentally closed. At the moment of truncation
+//! the deepest vertex still has an unvisited slot, so the closure test fails.
+//! No false completeness certificate is possible. The only risk is never
+//! getting one.
 //!
 //! # Cost and budgets
 //!
-//! One [`TauCache`] is shared across the whole walk, keyed by NOMINAL module
-//! identity, one entry per discovered indecomposable summand. `tau` never runs
-//! on an assembled module, which follows from additivity of `tau` and `Hom`
-//! and so is not a heuristic. Identity keying is what makes the cache sound: a
-//! dimension vector is an isomorphism invariant and no identifier, so an
-//! earlier index-keyed cache returned the translate of one module for another
-//! that merely shared its dimensions. A freshly rebuilt but isomorphic module
-//! misses, which costs time and never correctness; preserving known
-//! decompositions is what keeps those misses rare. The wall-clock figure that
-//! once stood here was measured before the cache was keyed by identity and no
-//! longer describes this code.
+//! One [`TauCache`] is shared across the whole walk, keyed by nominal module
+//! identity, one entry per discovered indecomposable summand. `tau` never
+//! runs on an assembled module, which follows from additivity of `tau` and
+//! `Hom` and so is not a heuristic. Identity keying is what makes the cache
+//! sound: a dimension vector is an isomorphism invariant and no identifier,
+//! so an earlier index-keyed cache returned the translate of one module for
+//! another that merely shared its dimensions. A freshly rebuilt but
+//! isomorphic module misses, which costs time and never correctness.
+//! Preserving known decompositions is what keeps those misses rare.
 //!
 //! The limit of that sharing is the price of the identity key. Every
 //! decomposition returns fresh module values, so a module rebuilt from an
@@ -127,27 +125,28 @@
 //! The size half of that rate is what makes `max_work_units` brake a
 //! tau-tilting infinite walk. Charged by call alone, a Kronecker walk charged
 //! units that grew far more slowly than its cost, so a ceiling well below the
-//! default never fired; the modules on the preprojective ray grow without
-//! bound and every Hom system on them was charged one unit. Those figures are
-//! not restated here because they measured a rate this code no longer uses.
-//! With the size factor the same walk stops well short of its vertex ceiling
-//! on the default 50 million work units, which is the point of the rate. See
+//! default never fired. The modules on the preprojective ray grow without
+//! bound, and every Hom system on them was charged one unit. With the size
+//! factor the same walk stops well short of its vertex ceiling on the default
+//! 50 million work units, which is the point of the rate. See
 //! [`ClosedSupportTauTiltingGraph::work_units`] for the rates.
 
 use std::collections::{HashMap, VecDeque};
-use std::fmt;
 use std::sync::Arc;
 
 use crate::algebra::Algebra;
 use crate::ar::TauError;
 use crate::basic::{
     BasicDecomposition, BasicError, PairFingerprint, ProjectiveSupport, SupportPairIsoOutcome,
-    SupportPairIsoWitness, pair_iso,
+    SupportPairIsoWitness, pair_iso, pairwise_distinct_by,
 };
+use crate::context::VerificationContext;
+use crate::dynkin::reachable_count;
 use crate::indec::{IndecError, IndecomposableModule};
 use crate::iso::indecomposable_iso;
-use crate::module::{Module, direct_sum};
+use crate::module::{Module, summand_sum};
 use crate::mutation::{FacWitness, Mutation, MutationError, SlotOutcome, mutate_at_with_cache};
+use crate::profile::{Site, hit};
 use crate::supporttau::{SupportTauError, SupportTauTiltingClassification, SupportTauTiltingPair};
 use crate::taurigid::{TauCache, TauRigidError};
 
@@ -174,45 +173,25 @@ pub enum GraphError {
     },
 }
 
-impl fmt::Display for GraphError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Basic(error) => write!(f, "basic layer: {error}"),
-            Self::SupportTau(error) => write!(f, "support tau-tilting layer: {error}"),
-            Self::Mutation(error) => write!(f, "mutation layer: {error}"),
-            Self::Defect { reason } => write!(f, "internal cross-check failed: {reason}"),
-        }
-    }
-}
+display_error! { GraphError {
+    Self::Basic(error) => "basic layer: {error}";
+    Self::SupportTau(error) => "support tau-tilting layer: {error}";
+    Self::Mutation(error) => "mutation layer: {error}";
+    Self::Defect { reason } => "internal cross-check failed: {reason}";
+} }
 
-impl std::error::Error for GraphError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Basic(error) => Some(error),
-            Self::SupportTau(error) => Some(error),
-            Self::Mutation(error) => Some(error),
-            Self::Defect { .. } => None,
-        }
-    }
-}
+error_source!(GraphError {
+    Self::Basic(error) => Some(error),
+    Self::SupportTau(error) => Some(error),
+    Self::Mutation(error) => Some(error),
+    Self::Defect { .. } => None,
+});
 
-impl From<BasicError> for GraphError {
-    fn from(error: BasicError) -> GraphError {
-        GraphError::Basic(error)
-    }
-}
-
-impl From<SupportTauError> for GraphError {
-    fn from(error: SupportTauError) -> GraphError {
-        GraphError::SupportTau(error)
-    }
-}
-
-impl From<MutationError> for GraphError {
-    fn from(error: MutationError) -> GraphError {
-        GraphError::Mutation(error)
-    }
-}
+from_variants!(GraphError {
+    BasicError => Basic,
+    SupportTauError => SupportTau,
+    MutationError => Mutation,
+});
 
 fn defect(reason: String) -> GraphError {
     GraphError::Defect { reason }
@@ -346,16 +325,12 @@ pub enum GraphLimit {
     MatrixEntries,
 }
 
-impl fmt::Display for GraphLimit {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Vertices => f.write_str("max_vertices"),
-            Self::DirectedMutations => f.write_str("max_directed_mutations"),
-            Self::WorkUnits => f.write_str("max_work_units"),
-            Self::MatrixEntries => f.write_str("max_matrix_entries"),
-        }
-    }
-}
+display_error! { GraphLimit {
+    Self::Vertices => "max_vertices";
+    Self::DirectedMutations => "max_directed_mutations";
+    Self::WorkUnits => "max_work_units";
+    Self::MatrixEntries => "max_matrix_entries";
+} }
 
 /// The size factor of every rate below: the unknown count of `Hom(M, M)` for a
 /// module of dimension vector `dims`, and never less than 1.
@@ -503,91 +478,39 @@ pub struct GraphBudgetDiagnostics {
 }
 
 impl GraphBudgetDiagnostics {
-    /// Distinct vertices held when the limit was hit.
-    #[inline]
-    pub fn vertices_found(&self) -> usize {
-        self.vertices_found
-    }
-
-    /// Module-summand slots decided, counting both branches.
-    #[inline]
-    pub fn verified_slots(&self) -> usize {
-        self.verified_slots
-    }
-
-    /// Left mutations that landed on a pair no vertex was isomorphic to.
-    #[inline]
-    pub fn new_vertices(&self) -> usize {
-        self.new_vertices
-    }
-
-    /// Left mutations that landed on an existing vertex.
-    #[inline]
-    pub fn repeated_endpoints(&self) -> usize {
-        self.repeated_endpoints
-    }
-
-    /// Vertices waiting in the breadth-first queue.
-    #[inline]
-    pub fn frontier(&self) -> usize {
-        self.frontier
-    }
-
-    /// The vertex the walk was at.
-    #[inline]
-    pub fn vertex(&self) -> usize {
-        self.vertex
-    }
-
-    /// The slot the walk was at, or `None` when the limit was hit between
-    /// slots.
-    #[inline]
-    pub fn slot(&self) -> Option<usize> {
-        self.slot
-    }
-
-    /// Module-summand slots of the discovered vertices still undecided.
-    #[inline]
-    pub fn open_slots(&self) -> usize {
-        self.open_slots
-    }
-
-    /// Work units charged.
-    #[inline]
-    pub fn work_units(&self) -> u64 {
-        self.work_units
-    }
-
-    /// The budget that ran out.
-    #[inline]
-    pub fn limit(&self) -> GraphLimit {
-        self.limit
+    accessor_methods! {
+        /// Distinct vertices held when the limit was hit.
+        pub vertices_found() -> usize = |this| this.vertices_found;
+        /// Module-summand slots decided, counting both branches.
+        pub verified_slots() -> usize = |this| this.verified_slots;
+        /// Left mutations that landed on a pair no vertex was isomorphic to.
+        pub new_vertices() -> usize = |this| this.new_vertices;
+        /// Left mutations that landed on an existing vertex.
+        pub repeated_endpoints() -> usize = |this| this.repeated_endpoints;
+        /// Vertices waiting in the breadth-first queue.
+        pub frontier() -> usize = |this| this.frontier;
+        /// The vertex the walk was at.
+        pub vertex() -> usize = |this| this.vertex;
+        /// The slot the walk was at, or `None` when the limit was hit between
+        /// slots.
+        pub slot() -> Option<usize> = |this| this.slot;
+        /// Module-summand slots of the discovered vertices still undecided.
+        pub open_slots() -> usize = |this| this.open_slots;
+        /// Work units charged.
+        pub work_units() -> u64 = |this| this.work_units;
+        /// The budget that ran out.
+        pub limit() -> GraphLimit = |this| this.limit;
     }
 }
 
-impl fmt::Display for GraphBudgetDiagnostics {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} ran out at vertex {} slot {:?}: {} vertices, {} slots decided, {} open, \
-             frontier {}, {} work units",
-            self.limit,
-            self.vertex,
-            self.slot,
-            self.vertices_found,
-            self.verified_slots,
-            self.open_slots,
-            self.frontier,
-            self.work_units
-        )
-    }
-}
+display_error! { GraphBudgetDiagnostics {
+    Self { limit, vertex, slot, vertices_found, verified_slots, open_slots, frontier, work_units, .. } => "{} ran out at vertex {} slot {:?}: {} vertices, {} slots decided, {} open, frontier {}, {} work units", limit, vertex, slot, vertices_found, verified_slots, open_slots, frontier, work_units;
+} }
 
 /// Where a certification was blocked, and why.
 ///
-/// A blocker is never budget exhaustion and never "probably fine". It means
-/// the crate could not certify a step, so no completeness claim can rest on
-/// the walk.
+/// A blocker is not budget exhaustion. The crate could not certify a step, so
+/// no completeness claim can rest on the walk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CertificationBlocker {
     vertex: usize,
@@ -598,47 +521,24 @@ pub struct CertificationBlocker {
 }
 
 impl CertificationBlocker {
-    /// The vertex the walk was at.
-    #[inline]
-    pub fn vertex(&self) -> usize {
-        self.vertex
-    }
-
-    /// The slot the walk was at, or `None` when the block hit while building a
-    /// vertex.
-    #[inline]
-    pub fn slot(&self) -> Option<usize> {
-        self.slot
-    }
-
-    /// What could not be certified.
-    #[inline]
-    pub fn reason(&self) -> &str {
-        &self.reason
-    }
-
-    /// Distinct vertices held when the block hit.
-    #[inline]
-    pub fn vertices_found(&self) -> usize {
-        self.vertices_found
-    }
-
-    /// Work units charged.
-    #[inline]
-    pub fn work_units(&self) -> u64 {
-        self.work_units
+    accessor_methods! {
+        /// The vertex the walk was at.
+        pub vertex() -> usize = |this| this.vertex;
+        /// The slot the walk was at, or `None` when the block hit while building a
+        /// vertex.
+        pub slot() -> Option<usize> = |this| this.slot;
+        /// What could not be certified.
+        pub reason() -> &str = |this| &this.reason;
+        /// Distinct vertices held when the block hit.
+        pub vertices_found() -> usize = |this| this.vertices_found;
+        /// Work units charged.
+        pub work_units() -> u64 = |this| this.work_units;
     }
 }
 
-impl fmt::Display for CertificationBlocker {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "certification blocked at vertex {} slot {:?}: {}",
-            self.vertex, self.slot, self.reason
-        )
-    }
-}
+display_error! { CertificationBlocker {
+    Self { vertex, slot, reason, .. } => "certification blocked at vertex {} slot {:?}: {}", vertex, slot, reason;
+} }
 
 /// Why a walk stopped short of closure.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -649,14 +549,10 @@ pub enum IncompleteReason {
     CertificationBlocked(CertificationBlocker),
 }
 
-impl fmt::Display for IncompleteReason {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::BudgetExhausted(diagnostics) => write!(f, "{diagnostics}"),
-            Self::CertificationBlocked(blocker) => write!(f, "{blocker}"),
-        }
-    }
-}
+display_error! { IncompleteReason {
+    Self::BudgetExhausted(diagnostics) => "{diagnostics}";
+    Self::CertificationBlocked(blocker) => "{blocker}";
+} }
 
 /// What one module-summand slot of a vertex admits.
 #[derive(Debug)]
@@ -673,22 +569,11 @@ pub enum SlotRecord {
 }
 
 impl SlotRecord {
-    /// The index of the mutation, or `None` when the slot admits none.
-    #[inline]
-    pub fn mutation(&self) -> Option<usize> {
-        match self {
-            Self::LeftMutation { mutation } => Some(*mutation),
-            Self::NoLeftMutation(_) => None,
-        }
-    }
-
-    /// The `Fac` witness, or `None` when the slot admits a left mutation.
-    #[inline]
-    pub fn fac_witness(&self) -> Option<&FacWitness> {
-        match self {
-            Self::NoLeftMutation(witness) => Some(witness),
-            Self::LeftMutation { .. } => None,
-        }
+    optional_accessors! {
+        /// The index of the mutation, or `None` when the slot admits none.
+        pub mutation() -> usize = Self::LeftMutation { mutation } => *mutation;
+        /// The `Fac` witness, or `None` when the slot admits a left mutation.
+        pub fac_witness() -> &FacWitness = Self::NoLeftMutation(witness) => witness;
     }
 }
 
@@ -701,20 +586,15 @@ pub struct GraphVertex {
 }
 
 impl GraphVertex {
-    /// The certified pair.
-    #[inline]
-    pub fn pair(&self) -> &SupportTauTiltingPair {
-        &self.pair
-    }
-
-    /// One record per module summand, in slot order.
-    ///
-    /// A vertex whose slots were not all visited has fewer records than
-    /// `pair().module().len()`. That only happens inside an
-    /// [`IncompleteSupportTauTiltingGraph`].
-    #[inline]
-    pub fn slots(&self) -> &[SlotRecord] {
-        &self.slots
+    accessor_methods! {
+        /// The certified pair.
+        pub pair() -> &SupportTauTiltingPair = |this| &this.pair;
+        /// One record per module summand, in slot order.
+        ///
+        /// A vertex whose slots were not all visited has fewer records than
+        /// `pair().module().len()`. That only happens inside an
+        /// [`IncompleteSupportTauTiltingGraph`].
+        pub slots() -> &[SlotRecord] = |this| &this.slots;
     }
 }
 
@@ -730,35 +610,18 @@ pub struct VerifiedMutation {
 }
 
 impl VerifiedMutation {
-    /// The vertex the mutation starts from.
-    #[inline]
-    pub fn source(&self) -> usize {
-        self.source
-    }
-
-    /// The module-summand slot the mutation was taken at.
-    #[inline]
-    pub fn slot(&self) -> usize {
-        self.slot
-    }
-
-    /// The vertex the mutation lands on.
-    #[inline]
-    pub fn target(&self) -> usize {
-        self.target
-    }
-
-    /// The mutation, with its target pair and its witness.
-    #[inline]
-    pub fn mutation(&self) -> &Mutation {
-        &self.mutation
-    }
-
-    /// The isomorphism from the mutation's own target pair to the pair stored
-    /// at vertex [`VerifiedMutation::target`].
-    #[inline]
-    pub fn endpoint(&self) -> &SupportPairIsoWitness {
-        &self.endpoint
+    accessor_methods! {
+        /// The vertex the mutation starts from.
+        pub source() -> usize = |this| this.source;
+        /// The module-summand slot the mutation was taken at.
+        pub slot() -> usize = |this| this.slot;
+        /// The vertex the mutation lands on.
+        pub target() -> usize = |this| this.target;
+        /// The mutation, with its target pair and its witness.
+        pub mutation() -> &Mutation = |this| &this.mutation;
+        /// The isomorphism from the mutation's own target pair to the pair stored
+        /// at vertex [`VerifiedMutation::target`].
+        pub endpoint() -> &SupportPairIsoWitness = |this| &this.endpoint;
     }
 }
 
@@ -766,37 +629,24 @@ impl VerifiedMutation {
 ///
 /// The count is recomputed from the edge list alone, never from the order the
 /// walk discovered vertices in.
-fn reachable_from_root(vertex_count: usize, edges: &[(usize, usize)]) -> usize {
-    if vertex_count == 0 {
-        return 0;
-    }
+fn reachable_from_root(
+    vertex_count: usize,
+    edges: impl IntoIterator<Item = (usize, usize)>,
+) -> usize {
     let mut out: Vec<Vec<usize>> = vec![Vec::new(); vertex_count];
-    for &(source, target) in edges {
+    for (source, target) in edges {
         if source < vertex_count && target < vertex_count {
             out[source].push(target);
         }
     }
-    let mut seen = vec![false; vertex_count];
-    seen[0] = true;
-    let mut queue = VecDeque::from([0usize]);
-    let mut count = 1;
-    while let Some(v) = queue.pop_front() {
-        for &w in &out[v] {
-            if !seen[w] {
-                seen[w] = true;
-                count += 1;
-                queue.push_back(w);
-            }
-        }
-    }
-    count
+    reachable_count(&out, 0)
 }
 
 /// The proof that a vertex set is closed under left mutation, rechecked from
 /// the stored data.
 ///
-/// [`ClosureWitness::verify`] recomputes every obligation. Nothing stored is
-/// taken on trust and nothing is inferred from the walk that built it.
+/// [`ClosureWitness::verify`] recomputes every obligation. Nothing is
+/// inferred from the walk that built it.
 #[derive(Debug)]
 pub struct ClosureWitness {
     algebra: Arc<Algebra>,
@@ -805,154 +655,103 @@ pub struct ClosureWitness {
 }
 
 impl ClosureWitness {
-    /// The algebra the pairs live over.
-    #[inline]
-    pub fn algebra(&self) -> &Arc<Algebra> {
-        &self.algebra
+    accessor_methods! {
+        /// The algebra the pairs live over.
+        pub algebra() -> &Arc<Algebra> = |this| &this.algebra;
+        /// The vertices, in discovery order from `(A, 0)`.
+        pub vertices() -> &[GraphVertex] = |this| &this.vertices;
+        /// The left-mutation edges, in discovery order.
+        pub mutations() -> &[VerifiedMutation] = |this| &this.mutations;
     }
 
-    /// The vertices, in discovery order from `(A, 0)`.
-    #[inline]
-    pub fn vertices(&self) -> &[GraphVertex] {
-        &self.vertices
-    }
-
-    /// The left-mutation edges, in discovery order.
-    #[inline]
-    pub fn mutations(&self) -> &[VerifiedMutation] {
-        &self.mutations
-    }
-
-    /// Obligation 1: every vertex is a verified basic support tau-tilting
-    /// pair over this algebra.
-    fn vertices_certified(&self) -> bool {
+    fn vertices_certified_with_context(&self, context: &VerificationContext) -> bool {
         self.vertices.iter().all(|v| {
-            Arc::ptr_eq(v.pair.module().module().algebra(), &self.algebra) && v.pair.verify()
+            Arc::ptr_eq(v.pair.module().module().algebra(), &self.algebra)
+                && v.pair.verify_with_context(context)
         })
     }
 
-    /// Obligation 2: the vertices are pairwise non-isomorphic.
-    ///
-    /// [`PairFingerprint`] buckets the vertices and [`pair_iso`] decides
-    /// inside a bucket. The fingerprint is a prefilter: a match is
-    /// inconclusive, so the certified test still runs.
-    fn pairwise_distinct(&self) -> bool {
-        let mut fingerprints = Vec::with_capacity(self.vertices.len());
-        for v in &self.vertices {
-            match PairFingerprint::new(v.pair.module(), &v.pair.projective()) {
-                Ok(fingerprint) => fingerprints.push(fingerprint),
-                Err(_) => return false,
-            }
-        }
-        for (i, left) in self.vertices.iter().enumerate() {
-            for (j, right) in self.vertices.iter().enumerate().skip(i + 1) {
-                if fingerprints[i] != fingerprints[j] {
-                    continue;
-                }
-                match pair_iso(
-                    left.pair.module(),
-                    &left.pair.projective(),
-                    right.pair.module(),
-                    &right.pair.projective(),
-                ) {
-                    Ok(SupportPairIsoOutcome::NotIsomorphic(_)) => {}
-                    _ => return false,
-                }
-            }
-        }
-        true
-    }
-
-    /// Obligation 3: vertex zero is certified isomorphic to `(A, 0)`.
-    fn root_is_regular(&self) -> bool {
-        let Some(root) = self.vertices.first() else {
-            return false;
-        };
-        let Ok((module, support)) = regular_parts(&self.algebra) else {
-            return false;
-        };
-        matches!(
-            pair_iso(
-                &module,
-                &support,
-                root.pair.module(),
-                &root.pair.projective()
-            ),
-            Ok(SupportPairIsoOutcome::Isomorphic(_))
+    fn pairwise_distinct_with_context(&self, context: &VerificationContext) -> bool {
+        pairwise_distinct_by(
+            &self.vertices,
+            |vertex| {
+                PairFingerprint::new_with_context(
+                    vertex.pair.module(),
+                    &vertex.pair.projective(),
+                    context,
+                )
+                .ok()
+            },
+            |left, right| {
+                matches!(
+                    context.pair_iso_for(
+                        left.pair.module(),
+                        &left.pair.projective(),
+                        right.pair.module(),
+                        &right.pair.projective(),
+                    ),
+                    Ok(outcome)
+                        if matches!(outcome.as_ref(), SupportPairIsoOutcome::NotIsomorphic(_))
+                )
+            },
         )
     }
 
-    /// Obligation 4: every module-summand slot of every vertex carries either
-    /// a verified left mutation into the set or a certified `Fac` witness.
-    fn slots_resolved(&self) -> bool {
+    fn root_is_regular_with_context(&self, context: &VerificationContext) -> bool {
+        let_or_false!(Some(root) = self.vertices.first());
+        let_or_false!(Ok((module, support)) = regular_parts_with_context(&self.algebra, context));
+        matches!(
+            context.pair_iso_for(
+                &module,
+                &support,
+                root.pair.module(),
+                &root.pair.projective(),
+            ),
+            Ok(outcome) if matches!(outcome.as_ref(), SupportPairIsoOutcome::Isomorphic(_))
+        )
+    }
+
+    fn slots_resolved_with_context(&self, context: &VerificationContext) -> bool {
         let mut referenced = vec![false; self.mutations.len()];
         for (v, vertex) in self.vertices.iter().enumerate() {
-            if vertex.slots.len() != vertex.pair.module().len() {
-                return false;
-            }
+            verify_guard!(vertex.slots.len() == vertex.pair.module().len());
             for (slot, record) in vertex.slots.iter().enumerate() {
                 match record {
                     SlotRecord::LeftMutation { mutation } => {
-                        let Some(edge) = self.mutations.get(*mutation) else {
-                            return false;
-                        };
-                        if referenced[*mutation] {
-                            return false;
-                        }
+                        let_or_false!(Some(edge) = self.mutations.get(*mutation));
+                        verify_guard!(
+                            !referenced[*mutation]
+                                && edge.source == v
+                                && edge.slot == slot
+                                && edge.target < self.vertices.len()
+                                && edge.mutation.slot() == slot
+                                && edge.mutation.verify_with_context(context)
+                        );
+                        verify_guard!(
+                            edge.mutation
+                                .witness()
+                                .source_module()
+                                .ptr_eq(vertex.pair.module().module())
+                                && edge.mutation.witness().source_projective()
+                                    == vertex.pair.projective().vertices()
+                        );
                         referenced[*mutation] = true;
-                        if edge.source != v || edge.slot != slot {
-                            return false;
-                        }
-                        if edge.target >= self.vertices.len() {
-                            return false;
-                        }
-                        if edge.mutation.slot() != slot || !edge.mutation.verify() {
-                            return false;
-                        }
-                        // The stored mutation has to start at this vertex's
-                        // module part, so a witness borrowed from elsewhere
-                        // fails here.
-                        if !edge
-                            .mutation
-                            .witness()
-                            .source_module()
-                            .ptr_eq(vertex.pair.module().module())
-                            || edge.mutation.witness().source_projective()
-                                != vertex.pair.projective().vertices()
-                        {
-                            return false;
-                        }
                     }
                     SlotRecord::NoLeftMutation(witness) => {
-                        if !witness.verify() {
-                            return false;
-                        }
+                        verify_guard!(witness.verify());
                         let summands = vertex.pair.module().summands();
-                        let Some(x) = summands.get(slot) else {
-                            return false;
-                        };
-                        if !witness.summand().ptr_eq(x.module()) {
-                            return false;
-                        }
-                        // The witness stores the summands of U, and the
-                        // mutation layer built U by dropping this slot, so
-                        // they are this vertex's own summand values in order.
-                        // Bind them by pointer: a dimension vector is an
-                        // isomorphism invariant and no identifier, so a sum
-                        // comparison would admit a witness built over
-                        // different modules of the same dimensions.
+                        let_or_false!(Some(x) = summands.get(slot));
+                        verify_guard!(witness.summand().ptr_eq(x.module()));
                         let kept = summands
                             .iter()
                             .enumerate()
                             .filter(|(i, _)| *i != slot)
                             .map(|(_, other)| other.module());
                         let stored = witness.summands();
-                        if stored.len() + 1 != summands.len() {
-                            return false;
-                        }
-                        if !kept.zip(stored).all(|(a, b)| a.ptr_eq(b)) {
-                            return false;
-                        }
+                        verify_guard!(
+                            stored.len() + 1 == summands.len()
+                                && kept.zip(stored).all(|(a, b)| a.ptr_eq(b))
+                        );
                     }
                 }
             }
@@ -964,35 +763,24 @@ impl ClosureWitness {
     /// its indexed vertex, and the stored maps run between those two pairs.
     fn endpoints_bound(&self) -> bool {
         for edge in &self.mutations {
-            let Some(vertex) = self.vertices.get(edge.target) else {
-                return false;
-            };
+            let_or_false!(Some(vertex) = self.vertices.get(edge.target));
             let built = edge.mutation.target();
-            if built.projective().vertices() != vertex.pair.projective().vertices() {
-                return false;
-            }
+            verify_guard!(built.projective().vertices() == vertex.pair.projective().vertices());
             let from = built.module().summands();
             let to = vertex.pair.module().summands();
             let bijection = edge.endpoint.bijection();
-            if bijection.len() != from.len() || from.len() != to.len() {
-                return false;
-            }
-            if !edge.endpoint.verify() {
-                return false;
-            }
+            verify_guard!(bijection.len() == from.len() && from.len() == to.len());
+            verify_guard!(edge.endpoint.verify());
             for (i, &j) in bijection.iter().enumerate() {
-                let (Some(source), Some(target)) = (from.get(i), to.get(j)) else {
-                    return false;
-                };
+                let_or_false!((Some(source), Some(target)) = (from.get(i), to.get(j)));
                 let forward = &edge.endpoint.forward()[i];
                 let backward = &edge.endpoint.backward()[i];
-                if !forward.source().ptr_eq(source.module())
-                    || !forward.target().ptr_eq(target.module())
-                    || !backward.source().ptr_eq(target.module())
-                    || !backward.target().ptr_eq(source.module())
-                {
-                    return false;
-                }
+                verify_guard!(
+                    forward.source().ptr_eq(source.module())
+                        && forward.target().ptr_eq(target.module())
+                        && backward.source().ptr_eq(target.module())
+                        && backward.target().ptr_eq(source.module())
+                );
             }
         }
         true
@@ -1001,12 +789,10 @@ impl ClosureWitness {
     /// Obligation 6: every vertex is reachable from vertex zero along the
     /// stored left-mutation edges.
     fn connected(&self) -> bool {
-        let edges: Vec<(usize, usize)> = self
-            .mutations
-            .iter()
-            .map(|edge| (edge.source, edge.target))
-            .collect();
-        reachable_from_root(self.vertices.len(), &edges) == self.vertices.len()
+        reachable_from_root(
+            self.vertices.len(),
+            self.mutations.iter().map(|edge| (edge.source, edge.target)),
+        ) == self.vertices.len()
     }
 
     /// Obligation 7, a cross-check: `incoming = Fac slots + |P|` at every
@@ -1016,9 +802,7 @@ impl ClosureWitness {
         let n = self.algebra.quiver().num_vertices() as usize;
         let mut incoming = vec![0usize; self.vertices.len()];
         for edge in &self.mutations {
-            if edge.target >= incoming.len() {
-                return false;
-            }
+            verify_guard!(edge.target < incoming.len());
             incoming[edge.target] += 1;
         }
         for (v, vertex) in self.vertices.iter().enumerate() {
@@ -1028,16 +812,13 @@ impl ClosureWitness {
                 .filter(|record| record.mutation().is_some())
                 .count();
             let fac = vertex.slots.len() - outgoing;
-            if incoming[v] != fac + vertex.pair.projective().len() {
-                return false;
-            }
-            if outgoing + incoming[v] != n {
-                return false;
-            }
+            verify_guard!(incoming[v] == fac + vertex.pair.projective().len());
+            verify_guard!(outgoing + incoming[v] == n);
         }
         true
     }
 
+    verify_methods!(, { hit(Site::ClosureWitnessVerify); },
     /// Rechecks all seven obligations of `docs/v0.5-design.md` section 8.
     ///
     /// 1. Every vertex is a verified basic support tau-tilting pair.
@@ -1051,10 +832,10 @@ impl ClosureWitness {
     /// 6. Every vertex is reachable from vertex zero along the stored edges.
     /// 7. As a cross-check, the graph is `n`-regular.
     ///
-    /// Every check recomputes from the stored pairs and maps: the vertices are
+    /// Every check recomputes from the stored pairs and maps. The vertices are
     /// re-verified, the vertex comparisons rerun, the mutations re-verified,
-    /// the endpoint witnesses rebound, and connectivity recomputed from the
-    /// edge list rather than inferred from the walk.
+    /// the endpoint witnesses rebound, and connectivity is recomputed from
+    /// the edge list rather than inferred from the walk.
     ///
     /// Obligation 7 is a cross-check and not a gate on soundness. The
     /// underlying graph of the support tau-tilting quiver is `n`-regular with
@@ -1075,21 +856,22 @@ impl ClosureWitness {
     /// stored edge list, which no single vertex built, while the right side is
     /// read off the vertex itself.
     ///
-    /// Completeness rests on obligations 1 to 5, which are finite left closure
-    /// with `(A, 0)` present. Obligation 6 follows from those: the descending
-    /// chain of AIR Theorem 2.35(b) reaches every pair from `(A, 0)` along
-    /// edges obligation 4 stores. Obligation 7 is outside the argument
-    /// altogether. Both stay gates all the same, because a failure of either
-    /// contradicts a theorem whose hypotheses hold, so it is a crate defect.
-    pub fn verify(&self) -> bool {
-        self.vertices_certified()
-            && self.pairwise_distinct()
-            && self.root_is_regular()
-            && self.slots_resolved()
+    /// Completeness rests on obligations 1 to 5, which are finite left
+    /// closure with `(A, 0)` present. Obligation 6 follows from those: the
+    /// descending chain of AIR Theorem 2.35(b) reaches every pair from
+    /// `(A, 0)` along edges obligation 4 stores. Obligation 7 is outside the
+    /// argument altogether. Both stay gates all the same, because a failure
+    /// of either contradicts a theorem whose hypotheses hold, so it is a
+    /// crate defect.
+        |self, context| {
+        self.vertices_certified_with_context(context)
+            && self.pairwise_distinct_with_context(context)
+            && self.root_is_regular_with_context(context)
+            && self.slots_resolved_with_context(context)
             && self.endpoints_bound()
             && self.connected()
             && self.n_regular()
-    }
+    });
 }
 
 /// A walk that closed: the complete list of basic support tau-tilting pairs of
@@ -1113,41 +895,22 @@ pub struct ClosedSupportTauTiltingGraph {
 }
 
 impl ClosedSupportTauTiltingGraph {
-    /// The algebra the pairs live over.
-    #[inline]
-    pub fn algebra(&self) -> &Arc<Algebra> {
-        self.witness.algebra()
-    }
-
-    /// Every basic support tau-tilting pair of the algebra, in discovery order
-    /// from `(A, 0)`.
-    pub fn pairs(&self) -> impl ExactSizeIterator<Item = &SupportTauTiltingPair> {
-        self.witness.vertices().iter().map(GraphVertex::pair)
-    }
-
-    /// The vertices, each with its slot records.
-    #[inline]
-    pub fn vertices(&self) -> &[GraphVertex] {
-        self.witness.vertices()
-    }
-
-    /// The left-mutation edges.
-    #[inline]
-    pub fn mutations(&self) -> &[VerifiedMutation] {
-        self.witness.mutations()
-    }
-
-    /// The number of pairs.
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.witness.vertices().len()
-    }
-
-    /// Whether the list is empty. It never is: `(A, 0)` is a pair over every
-    /// algebra.
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.witness.vertices().is_empty()
+    accessor_methods! {
+        /// The algebra the pairs live over.
+        pub algebra() -> &Arc<Algebra> = |this| this.witness.algebra();
+        /// Every basic support tau-tilting pair of the algebra, in discovery order
+        /// from `(A, 0)`.
+        pub pairs() -> impl ExactSizeIterator<Item = &SupportTauTiltingPair> =
+            |this| this.witness.vertices().iter().map(GraphVertex::pair);
+        /// The vertices, each with its slot records.
+        pub vertices() -> &[GraphVertex] = |this| this.witness.vertices();
+        /// The left-mutation edges.
+        pub mutations() -> &[VerifiedMutation] = |this| this.witness.mutations();
+        /// The number of pairs.
+        pub len() -> usize = |this| this.witness.vertices().len();
+        /// Whether the list is empty. It never is: `(A, 0)` is a pair over every
+        /// algebra.
+        pub is_empty() -> bool = |this| this.witness.vertices().is_empty();
     }
 
     /// Pair counts by `|M|`, indexed from zero to the number of vertices of
@@ -1161,56 +924,48 @@ impl ClosedSupportTauTiltingGraph {
         out
     }
 
-    /// The closure witness.
-    #[inline]
-    pub fn witness(&self) -> &ClosureWitness {
-        &self.witness
-    }
-
-    /// Work units charged by the walk that built this graph.
-    ///
-    /// One unit is one unknown of one Hom system. Write `s` for the summand
-    /// count and `e` for `sum_v (dim M_v)^2`, the unknown count of
-    /// `Hom(M, M)` for the module `M` the walk is standing on:
-    ///
-    /// ```text
-    /// hom_dim / HomSpace::new(M, N)         = e units
-    /// IndecomposableModule::new             = 8 * e units
-    /// krull_schmidt / decompose             = 8 * s^3 * e units
-    /// is_isomorphic(M, N)                   = (8 * s^3 + 16) * e units
-    /// tau(M)                                = (64 * s + 8 * s^3) * e units
-    /// ```
-    ///
-    /// The count is charged by call and by module size, never by time, so it
-    /// is the same in every profile and on every platform.
-    ///
-    /// The count has three limits. The walk charges the call sequence of the
-    /// layers it uses from a fixed model rather than instrumenting each call
-    /// inside them, except for `tau`, which is counted from the shared cache's
-    /// miss counter. `e` is an upper bound on the size of each modelled Hom
-    /// system, not its exact size, since the arguments are summands of `M`.
-    /// And the count covers the walk, not the closure recheck that gates this
-    /// value and is the slower half of a closing walk on D_4. So the count is
-    /// exact and reproducible, and it is a model of the work rather than a
-    /// trace of it.
-    ///
-    /// `docs/v0.5-design.md` section 8 still prints the rates without the `e`
-    /// factor. Those rates did not brake a tau-tilting infinite walk: a Hom
-    /// system at Kronecker vertex 64 costs about a thousand times one at
-    /// vertex 1 and was charged the same single unit.
-    #[inline]
-    pub fn work_units(&self) -> u64 {
-        self.work_units
-    }
-
-    /// Rechecks the closure witness. See [`ClosureWitness::verify`].
-    ///
-    /// This value cannot exist unless the same recheck already passed, so a
-    /// caller gets `true` here or the crate has a defect. Call it to recheck a
-    /// graph that crossed a process or a storage boundary, not to decide
-    /// whether the completeness claim holds.
-    pub fn verify(&self) -> bool {
-        self.witness.verify()
+    accessor_methods! {
+        /// The closure witness.
+        pub witness() -> &ClosureWitness = |this| &this.witness;
+        /// Work units charged by the walk that built this graph.
+        ///
+        /// One unit is one unknown of one Hom system. Write `s` for the summand
+        /// count and `e` for `sum_v (dim M_v)^2`, the unknown count of
+        /// `Hom(M, M)` for the module `M` the walk is standing on:
+        ///
+        /// ```text
+        /// hom_dim / HomSpace::new(M, N)         = e units
+        /// IndecomposableModule::new             = 8 * e units
+        /// krull_schmidt / decompose             = 8 * s^3 * e units
+        /// is_isomorphic(M, N)                   = (8 * s^3 + 16) * e units
+        /// tau(M)                                = (64 * s + 8 * s^3) * e units
+        /// ```
+        ///
+        /// The count is charged by call and by module size, never by time, so it
+        /// is the same in every profile and on every platform.
+        ///
+        /// The count has three limits. The walk charges the call sequence of
+        /// the layers it uses from a fixed model rather than instrumenting
+        /// each call inside them, except for `tau`, which is counted from the
+        /// shared cache's miss counter. `e` is an upper bound on the size of
+        /// each modelled Hom system, not its exact size, since the arguments
+        /// are summands of `M`. And the count covers the walk, not the
+        /// closure recheck that gates this value and is the slower half of a
+        /// closing walk on D_4. So the count is exact and reproducible, and
+        /// it is a model of the work rather than a trace of it.
+        ///
+        /// `docs/v0.5-design.md` section 8 still prints the rates without the `e`
+        /// factor. Those rates did not brake a tau-tilting infinite walk: a Hom
+        /// system at Kronecker vertex 64 costs about a thousand times one at
+        /// vertex 1 and was charged the same single unit.
+        pub work_units() -> u64 = |this| this.work_units;
+        /// Rechecks the closure witness. See [`ClosureWitness::verify`].
+        ///
+        /// This value cannot exist unless the same recheck already passed, so
+        /// a caller gets `true` here or the crate has a defect. Call it to
+        /// recheck a graph that crossed a process or a storage boundary, not
+        /// to decide whether the completeness claim holds.
+        pub verify() -> bool = |this| this.witness.verify();
     }
 }
 
@@ -1234,52 +989,32 @@ pub struct IncompleteSupportTauTiltingGraph {
 }
 
 impl IncompleteSupportTauTiltingGraph {
-    /// The algebra the pairs live over.
-    #[inline]
-    pub fn algebra(&self) -> &Arc<Algebra> {
-        &self.algebra
-    }
-
-    /// The vertices the walk reached, in discovery order from `(A, 0)`.
-    ///
-    /// This is a part of the support tau-tilting quiver, not a list of every
-    /// pair.
-    #[inline]
-    pub fn vertices_found(&self) -> &[GraphVertex] {
-        &self.vertices
-    }
-
-    /// The left mutations the walk verified.
-    #[inline]
-    pub fn verified_mutations(&self) -> &[VerifiedMutation] {
-        &self.mutations
-    }
-
-    /// Why the walk stopped.
-    #[inline]
-    pub fn reason(&self) -> &IncompleteReason {
-        &self.reason
-    }
-
-    /// Work units charged before the walk stopped.
-    #[inline]
-    pub fn work_units(&self) -> u64 {
-        self.work_units
-    }
-
-    /// Rechecks each vertex and each mutation on its own.
-    ///
-    /// This is not a completeness check and cannot become one. It reruns
-    /// [`SupportTauTiltingPair::verify`] on every vertex and
-    /// [`Mutation::verify`] on every edge, so a stored value that does not
-    /// hold up fails here.
-    pub fn verify_parts(&self) -> bool {
-        self.vertices.iter().all(|v| {
-            Arc::ptr_eq(v.pair.module().module().algebra(), &self.algebra) && v.pair.verify()
-        }) && self
+    accessor_methods! {
+        /// The algebra the pairs live over.
+        pub algebra() -> &Arc<Algebra> = |this| &this.algebra;
+        /// The vertices the walk reached, in discovery order from `(A, 0)`.
+        ///
+        /// This is a part of the support tau-tilting quiver, not a list of every
+        /// pair.
+        pub vertices_found() -> &[GraphVertex] = |this| &this.vertices;
+        /// The left mutations the walk verified.
+        pub verified_mutations() -> &[VerifiedMutation] = |this| &this.mutations;
+        /// Why the walk stopped.
+        pub reason() -> &IncompleteReason = |this| &this.reason;
+        /// Work units charged before the walk stopped.
+        pub work_units() -> u64 = |this| this.work_units;
+        /// Rechecks each vertex and each mutation on its own.
+        ///
+        /// This is not a completeness check and cannot become one. It reruns
+        /// [`SupportTauTiltingPair::verify`] on every vertex and
+        /// [`Mutation::verify`] on every edge, so a stored value that does not
+        /// hold up fails here.
+        pub verify_parts() -> bool = |this| this.vertices.iter().all(|v| {
+            Arc::ptr_eq(v.pair.module().module().algebra(), &this.algebra) && v.pair.verify()
+        }) && this
             .mutations
             .iter()
-            .all(|edge| edge.mutation.verify() && edge.endpoint.verify())
+            .all(|edge| edge.mutation.verify() && edge.endpoint.verify());
     }
 }
 
@@ -1293,63 +1028,49 @@ pub enum SupportTauTiltingGraphOutcome {
 }
 
 impl SupportTauTiltingGraphOutcome {
-    /// Whether the walk closed.
-    #[inline]
-    pub fn is_closed(&self) -> bool {
-        matches!(self, Self::Closed(_))
-    }
-
-    /// The closed graph, or `None` when the walk stopped short.
-    #[inline]
-    pub fn closed(&self) -> Option<&ClosedSupportTauTiltingGraph> {
-        match self {
-            Self::Closed(graph) => Some(graph),
-            Self::Incomplete(_) => None,
-        }
-    }
-
-    /// The partial graph, or `None` when the walk closed.
-    #[inline]
-    pub fn incomplete(&self) -> Option<&IncompleteSupportTauTiltingGraph> {
-        match self {
-            Self::Closed(_) => None,
-            Self::Incomplete(graph) => Some(graph),
-        }
-    }
-
-    /// The closed graph by value, or `None` when the walk stopped short.
-    #[inline]
-    pub fn into_closed(self) -> Option<ClosedSupportTauTiltingGraph> {
-        match self {
-            Self::Closed(graph) => Some(graph),
-            Self::Incomplete(_) => None,
-        }
-    }
+    binary_outcome_accessors!(
+        Closed,
+        Incomplete,
+        closed -> ClosedSupportTauTiltingGraph = |value| value,
+        incomplete -> IncompleteSupportTauTiltingGraph = |value| value,
+        is_closed,
+        into_closed -> ClosedSupportTauTiltingGraph = |value| value;
+        flag = "Whether the walk closed.";
+        positive = "The closed graph, or `None` when the walk stopped short.";
+        negative = "The partial graph, or `None` when the walk closed.";
+        into = "The closed graph by value, or `None` when the walk stopped short.";
+    );
 }
 
 /// The module part and the projective support of `(A, 0)`.
 fn regular_parts(
     algebra: &Arc<Algebra>,
 ) -> Result<(BasicDecomposition, ProjectiveSupport), BasicError> {
-    let parts: Vec<Module> = (0..algebra.quiver().num_vertices())
-        .map(|v| Module::projective(algebra, v))
-        .collect();
-    let refs: Vec<&Module> = parts.iter().collect();
-    let module = if refs.is_empty() {
-        Module::zero(algebra)
-    } else {
-        direct_sum(&refs).0
-    };
-    Ok((
-        BasicDecomposition::new(&module)?,
-        ProjectiveSupport::new(algebra, &[])?,
-    ))
+    regular_parts_with(algebra, BasicDecomposition::new)
+}
+
+fn regular_parts_with(
+    algebra: &Arc<Algebra>,
+    basic: impl FnOnce(&Module) -> Result<BasicDecomposition, BasicError>,
+) -> Result<(BasicDecomposition, ProjectiveSupport), BasicError> {
+    let vertices: Vec<u32> = (0..algebra.quiver().num_vertices()).collect();
+    let module = summand_sum(algebra, &vertices, Module::projective);
+    Ok((basic(&module)?, ProjectiveSupport::new(algebra, &[])?))
+}
+
+fn regular_parts_with_context(
+    algebra: &Arc<Algebra>,
+    context: &VerificationContext,
+) -> Result<(BasicDecomposition, ProjectiveSupport), BasicError> {
+    regular_parts_with(algebra, |module| {
+        BasicDecomposition::new_with_context(module, context)
+    })
 }
 
 /// The indecomposables the walk has discovered, each with a stable index.
 ///
 /// The index labels an isomorphism class for witnesses and for the Python
-/// bindings. It does NOT key the shared [`TauCache`], which keys on nominal
+/// bindings. It does not key the shared [`TauCache`], which keys on nominal
 /// module identity.
 ///
 /// Module identity in this crate is nominal, and every decomposition returns
@@ -1443,7 +1164,7 @@ impl Walk<'_> {
     /// ones the walk has not seen.
     ///
     /// `preferred` is the index a mutation already spent on its cokernel
-    /// summand. Reusing it keeps ONE index per isomorphism class, so the
+    /// summand. Reusing it keeps one index per isomorphism class, so the
     /// registry does not grow a second label for the same class. It does not
     /// preserve the cached translate: the cache is keyed by module identity,
     /// and re-decomposition produces a fresh module value that misses.
@@ -1704,20 +1425,18 @@ impl Walk<'_> {
         Ok(None)
     }
 
-    /// The stop for a ledger already past `max_work_units`, or `None`.
-    ///
-    /// The precheck in [`Walk::visit_slot`] reserves that slot's own model and
-    /// nothing else. The graph layer charges the tau misses, the fingerprint,
-    /// the isomorphism tests, and a new vertex after the reservation, so a walk
-    /// whose queue holds no further slot needs this check to stay inside the
-    /// budget. Without it the one-vertex algebra closes over its ceiling: its
-    /// only slot lands on `(0, A)`, which has no slot to precheck.
-    fn over_work_budget(&self) -> Option<Stop> {
-        if self.ledger.units > self.limits.max_work_units {
-            Some(Stop::Budget(GraphLimit::WorkUnits))
-        } else {
-            None
-        }
+    accessor_methods! {
+        /// The stop for a ledger already past `max_work_units`, or `None`.
+        ///
+        /// The precheck in [`Walk::visit_slot`] reserves that slot's own model and
+        /// nothing else. The graph layer charges the tau misses, the fingerprint,
+        /// the isomorphism tests, and a new vertex after the reservation, so a walk
+        /// whose queue holds no further slot needs this check to stay inside the
+        /// budget. Without it the one-vertex algebra closes over its ceiling: its
+        /// only slot lands on `(0, A)`, which has no slot to precheck.
+        over_work_budget() -> Option<Stop> = |this|
+            (this.ledger.units > this.limits.max_work_units)
+                .then_some(Stop::Budget(GraphLimit::WorkUnits));
     }
 
     /// Walks until the frontier empties or a budget stops it.
@@ -1766,14 +1485,12 @@ impl Walk<'_> {
 /// Gates a drained walk on the closure recheck, then wraps it as closed.
 ///
 /// The recheck runs before the value exists, so no
-/// [`ClosedSupportTauTiltingGraph`] can be handed out whose own
-/// [`ClosedSupportTauTiltingGraph::verify`] returns false, in Rust or through
-/// the Python bindings. A drained frontier alone says the builder found a
-/// branch at every slot and placed every target. It does not say the seven
-/// obligations of [`ClosureWitness::verify`] hold, which is a separate recheck
-/// of the stored pairs and maps.
+/// [`ClosedSupportTauTiltingGraph`] can exist whose own
+/// [`ClosedSupportTauTiltingGraph::verify`] returns false. A drained frontier
+/// says the builder found a branch at every slot and placed every target. It
+/// does not say the seven obligations of [`ClosureWitness::verify`] hold.
 ///
-/// The recheck is the slower half of a closing walk; the module documentation
+/// The recheck is the slower half of a closing walk. The module documentation
 /// gives the D_4 figures. There is no flag to skip it.
 ///
 /// # Errors
@@ -1891,6 +1608,145 @@ mod tests {
     use crate::field::PrimeField;
     use crate::quiver::Quiver;
     use crate::supporttau::enumerate_over_catalog;
+
+    impl ClosureWitness {
+        fn pairwise_distinct(&self) -> bool {
+            pairwise_distinct(self)
+        }
+
+        fn slots_resolved(&self) -> bool {
+            slots_resolved(self)
+        }
+
+        fn verify_without_context(&self) -> bool {
+            hit(Site::ClosureWitnessVerify);
+            self.vertices.iter().all(|vertex| {
+                Arc::ptr_eq(vertex.pair.module().module().algebra(), &self.algebra)
+                    && vertex.pair.verify()
+            }) && pairwise_distinct(self)
+                && root_is_regular(self)
+                && slots_resolved(self)
+                && self.endpoints_bound()
+                && self.connected()
+                && self.n_regular()
+        }
+
+        fn fingerprints_without_context(&self) -> Vec<PairFingerprint> {
+            self.vertices
+                .iter()
+                .map(|vertex| {
+                    PairFingerprint::new(vertex.pair.module(), &vertex.pair.projective())
+                        .expect("the graph stores compatible pairs")
+                })
+                .collect()
+        }
+
+        fn fingerprints_with_context(&self, context: &VerificationContext) -> Vec<PairFingerprint> {
+            self.vertices
+                .iter()
+                .map(|vertex| {
+                    PairFingerprint::new_with_context(
+                        vertex.pair.module(),
+                        &vertex.pair.projective(),
+                        context,
+                    )
+                    .expect("the graph stores compatible pairs")
+                })
+                .collect()
+        }
+    }
+
+    fn pairwise_distinct(witness: &ClosureWitness) -> bool {
+        let mut fingerprints = Vec::with_capacity(witness.vertices.len());
+        for vertex in &witness.vertices {
+            match PairFingerprint::new(vertex.pair.module(), &vertex.pair.projective()) {
+                Ok(fingerprint) => fingerprints.push(fingerprint),
+                Err(_) => return false,
+            }
+        }
+        for (i, left) in witness.vertices.iter().enumerate() {
+            for (j, right) in witness.vertices.iter().enumerate().skip(i + 1) {
+                if fingerprints[i] == fingerprints[j]
+                    && !matches!(
+                        pair_iso(
+                            left.pair.module(),
+                            &left.pair.projective(),
+                            right.pair.module(),
+                            &right.pair.projective(),
+                        ),
+                        Ok(SupportPairIsoOutcome::NotIsomorphic(_))
+                    )
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn root_is_regular(witness: &ClosureWitness) -> bool {
+        let_or_false!(Some(root) = witness.vertices.first());
+        let_or_false!(Ok((module, support)) = regular_parts(&witness.algebra));
+        matches!(
+            pair_iso(
+                &module,
+                &support,
+                root.pair.module(),
+                &root.pair.projective(),
+            ),
+            Ok(SupportPairIsoOutcome::Isomorphic(_))
+        )
+    }
+
+    fn slots_resolved(witness: &ClosureWitness) -> bool {
+        let mut referenced = vec![false; witness.mutations.len()];
+        for (vertex_index, vertex) in witness.vertices.iter().enumerate() {
+            if vertex.slots.len() != vertex.pair.module().len() {
+                return false;
+            }
+            for (slot, record) in vertex.slots.iter().enumerate() {
+                match record {
+                    SlotRecord::LeftMutation { mutation } => {
+                        let_or_false!(Some(edge) = witness.mutations.get(*mutation));
+                        if referenced[*mutation]
+                            || edge.source != vertex_index
+                            || edge.slot != slot
+                            || edge.target >= witness.vertices.len()
+                            || edge.mutation.slot() != slot
+                            || !edge.mutation.verify()
+                            || !edge
+                                .mutation
+                                .witness()
+                                .source_module()
+                                .ptr_eq(vertex.pair.module().module())
+                            || edge.mutation.witness().source_projective()
+                                != vertex.pair.projective().vertices()
+                        {
+                            return false;
+                        }
+                        referenced[*mutation] = true;
+                    }
+                    SlotRecord::NoLeftMutation(fac) => {
+                        let summands = vertex.pair.module().summands();
+                        let_or_false!(Some(summand) = summands.get(slot));
+                        let kept = summands
+                            .iter()
+                            .enumerate()
+                            .filter(|(index, _)| *index != slot)
+                            .map(|(_, summand)| summand.module());
+                        if !fac.verify()
+                            || !fac.summand().ptr_eq(summand.module())
+                            || fac.summands().len() + 1 != summands.len()
+                            || !kept.zip(fac.summands()).all(|(a, b)| a.ptr_eq(b))
+                        {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        referenced.iter().all(|used| *used)
+    }
 
     fn f2() -> PrimeField {
         PrimeField::new(2).unwrap()
@@ -2102,6 +1958,73 @@ mod tests {
         }
     }
 
+    /// A shared verification context removes repeated primitive computations.
+    #[test]
+    fn a_d4_f5_closure_context_has_hits_and_misses() {
+        let _reset_guard = crate::profile::tests::reset_lock();
+        let graph = walk(&d4(f5()));
+        let without_fingerprints = graph.witness.fingerprints_without_context();
+        let primitive_calls = |counts: &[u64]| {
+            [
+                Site::HomDim,
+                Site::Tau,
+                Site::TauWithOpposite,
+                Site::EndoNew,
+                Site::Decompose,
+                Site::PairIso,
+            ]
+            .into_iter()
+            .map(|site| counts[site as usize])
+            .sum::<u64>()
+        };
+
+        crate::profile::reset();
+        assert!(graph.witness.verify_without_context());
+        let without_counts = crate::profile::snapshot();
+        let without_distinct = crate::profile::distinct_snapshot();
+        let without_context = primitive_calls(&without_counts);
+
+        crate::profile::reset();
+        let context = VerificationContext::new();
+        assert!(graph.witness.verify_with_context(&context));
+        assert_eq!(
+            without_fingerprints,
+            graph.witness.fingerprints_with_context(&context)
+        );
+        let (hits, misses) = context.memo_stats();
+        assert!(hits > 0, "the context has no hit");
+        assert!(misses > 0, "the context has no miss");
+        let with_counts = crate::profile::snapshot();
+        let with_distinct = crate::profile::distinct_snapshot();
+        let with_context = primitive_calls(&with_counts);
+
+        if crate::profile::ENABLED {
+            let sites = [
+                Site::HomDim,
+                Site::Tau,
+                Site::TauWithOpposite,
+                Site::EndoNew,
+                Site::Decompose,
+                Site::PairIso,
+            ];
+            eprintln!(
+                "D4/F5 context: memo hits {hits}, misses {misses}; primitive calls {without_context} -> {with_context}; distinct {:?} -> {:?}",
+                sites
+                    .iter()
+                    .map(|site| without_distinct[*site as usize])
+                    .collect::<Vec<_>>(),
+                sites
+                    .iter()
+                    .map(|site| with_distinct[*site as usize])
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                with_context < without_context,
+                "context made {with_context} primitive calls versus {without_context} uncached"
+            );
+        }
+    }
+
     /// The walk and the catalog enumeration list the same pairs.
     ///
     /// The two routes share no code and rest on different theorems. The walk
@@ -2128,8 +2051,8 @@ mod tests {
     /// Every closed graph rechecks its closure witness.
     ///
     /// The gate already ran this recheck on each of these graphs. The test
-    /// stays because it asserts the public promise: a value of this type
-    /// answers `true`, and it answers `true` on a second call.
+    /// asserts the public promise: a value of this type answers `true`, and
+    /// it answers `true` on a second call.
     #[test]
     fn every_closed_graph_verifies_its_closure_witness() {
         for field in fields() {
@@ -2200,7 +2123,6 @@ mod tests {
         assert_eq!(graph.vertices_found().len(), 16);
         assert!(diagnostics.open_slots() > 0);
         assert!(diagnostics.work_units() > 0);
-        // Every vertex the walk did reach stays certified on its own.
         // Rechecking the mutations as well costs 183 ms, so
         // `the_kronecker_mutations_recheck` carries that part.
         for vertex in graph.vertices_found() {
@@ -2452,14 +2374,17 @@ mod tests {
             .iter()
             .map(|edge| (edge.source(), edge.target()))
             .collect();
-        assert_eq!(reachable_from_root(graph.len(), &all), graph.len());
+        assert_eq!(
+            reachable_from_root(graph.len(), all.iter().copied()),
+            graph.len()
+        );
         let cut: Vec<(usize, usize)> = all
             .iter()
             .copied()
             .filter(|(source, _)| *source != 0)
             .collect();
-        assert!(reachable_from_root(graph.len(), &cut) < graph.len());
-        assert_eq!(reachable_from_root(graph.len(), &[]), 1);
+        assert!(reachable_from_root(graph.len(), cut.iter().copied()) < graph.len());
+        assert_eq!(reachable_from_root(graph.len(), std::iter::empty()), 1);
     }
 
     /// A Hom system wider than `max_matrix_entries` stops the walk before the

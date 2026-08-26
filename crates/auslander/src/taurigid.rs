@@ -1,5 +1,4 @@
-//! Tau-rigidity, decided one indecomposable at a time, with a certified
-//! answer either way.
+//! Tau-rigidity, decided one indecomposable at a time.
 //!
 //! A module `M` is tau-rigid when `Hom(M, tau M) = 0`. A vanishing claim has
 //! no element to exhibit, so [`TauRigidModule`] stores no positive witness:
@@ -8,118 +7,93 @@
 //! The negative answer does have an element to exhibit, and
 //! [`NonTauRigidWitness`] carries it.
 //!
-//! Additivity is what makes this layer affordable. Both `tau` and `Hom` are
-//! additive, so for `M = X_1 + ... + X_s`,
+//! Both `tau` and `Hom` are additive, so for `M = X_1 + ... + X_s`,
 //! `Hom(M, tau M) = 0` exactly when `hom_dim(X_i, tau X_j) = 0` for every
-//! ordered pair `(i, j)`. [`is_tau_rigid_summandwise`] decides tau-rigidity
-//! that way, with `tau` computed once per summand and kept in a [`TauCache`].
-//! The identity holds for any direct-sum decomposition, not only for a
-//! decomposition into indecomposables; indecomposable summands are what make
-//! the cache pay.
+//! ordered pair `(i, j)`. [`is_tau_rigid_summandwise`] decides that way, with
+//! `tau` computed once per summand and kept in a [`TauCache`]. The identity
+//! holds for any direct-sum decomposition, not only indecomposables.
+//! Indecomposable summands are what reuse cache entries.
 //!
-//! Working per summand does not weaken the certified route. Every `tau` here
-//! still runs both routes of [`crate::ar`] and cross-checks them with
-//! [`is_isomorphic`]. It runs them on an indecomposable, where the check is
-//! cheap.
+//! Every `tau` still runs both routes of [`crate::ar`] and cross-checks them
+//! with [`is_isomorphic`]. On an indecomposable the check is cheap.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::fmt;
 use std::sync::Arc;
 
 use crate::algebra::{Algebra, AlgebraBuildError};
-use crate::ar::{TauError, tau};
+use crate::ar::{TauError, tau_with_opposite};
+use crate::context::VerificationContext;
 use crate::decompose::decompose;
-use crate::hom::{HomError, Morphism, cokernel, hom_dim, kernel};
+use crate::hom::{HomError, Morphism, hom_dim};
 use crate::homspace::HomSpace;
 use crate::iso::{IsoOutcome, is_isomorphic};
 use crate::linalg::DenseMat;
 use crate::module::Module;
-use crate::opposite::{OppositeMap, dual, nu_of_presentation_map, opposite};
-use crate::resolution::minimal_presentation_matrix;
+use crate::opposite::{OppositeMap, opposite};
+use crate::profile::{Site, hit};
 
 /// Why a tau-rigidity decision could not be reached.
 ///
-/// Neither variant is a mathematical answer about the module. A tau-rigidity
-/// answer is a [`TauRigidityOutcome`].
+/// Neither variant is an answer about the module. A tau-rigidity answer is a
+/// [`TauRigidityOutcome`].
 #[derive(Clone, Debug)]
 pub enum TauRigidError {
     /// The AR translate of a summand did not come back certified. See
     /// [`TauError`] for the three cases.
     Tau(TauError),
-    /// A Hom space could not be built, which happens when two summands do not
+    /// A Hom space could not be built. That happens when two summands do not
     /// share one algebra [`Arc`].
     Hom(HomError),
 }
 
-impl fmt::Display for TauRigidError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Tau(error) => write!(f, "the AR translate of a summand failed: {error}"),
-            Self::Hom(error) => write!(f, "a Hom space between summands failed: {error}"),
-        }
-    }
-}
+display_error! { TauRigidError {
+    Self::Tau(error) => "the AR translate of a summand failed: {error}";
+    Self::Hom(error) => "a Hom space between summands failed: {error}";
+} }
 
-impl std::error::Error for TauRigidError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Tau(error) => Some(error),
-            Self::Hom(error) => Some(error),
-        }
-    }
-}
+error_source!(TauRigidError {
+    Self::Tau(error) => Some(error),
+    Self::Hom(error) => Some(error),
+});
 
-impl From<TauError> for TauRigidError {
-    fn from(error: TauError) -> Self {
-        Self::Tau(error)
-    }
-}
-
-impl From<HomError> for TauRigidError {
-    fn from(error: HomError) -> Self {
-        Self::Hom(error)
-    }
-}
+from_variants!(TauRigidError {
+    TauError => Tau,
+    HomError => Hom,
+});
 
 /// A module certified tau-rigid, stored by its summands.
 ///
-/// Fields are private and construction goes through
-/// [`is_tau_rigid_summandwise`] or [`is_tau_rigid`], so every value carries a
-/// certified translate per summand and a checked `dim Hom(X_i, tau X_j) = 0`
-/// for every ordered pair. The vanishing is not stored: a zero space has no
-/// element to exhibit, so the type itself is the proof token and
-/// [`TauRigidModule::verify`] recomputes both the translates and the
-/// dimensions.
+/// Construction goes through [`is_tau_rigid_summandwise`] or
+/// [`is_tau_rigid`], so every value carries a certified translate per summand
+/// and a checked `dim Hom(X_i, tau X_j) = 0` for every ordered pair. The
+/// vanishing is not stored: a zero space has no element to exhibit, so the
+/// type itself is the proof token and [`TauRigidModule::verify`] recomputes
+/// both the translates and the dimensions.
 ///
-/// The module itself is not stored: it is the direct sum of
-/// [`TauRigidModule::summands`], and assembling it is exactly what the
-/// performance rule of `docs/v0.5-design.md` section 5 keeps `tau` away from.
-/// An empty summand list is the zero module, which is tau-rigid with no pairs
-/// to check. The support tau-tilting pair `(0, A)` depends on that case.
+/// The module itself is not stored. It is the direct sum of
+/// [`TauRigidModule::summands`]. Assembling it would put `tau` on a
+/// decomposable module. An empty summand list is the zero module, which is
+/// tau-rigid with no pairs to check. The support tau-tilting pair `(0, A)`
+/// depends on that case.
 #[derive(Clone, Debug)]
 pub struct TauRigidModule {
     // The caller's stable index and the module, in the order supplied. The
     // index is a label for witnesses and bindings, never a cache key.
     summands: Vec<(usize, Module)>,
-    // translates[j] is the certified AR translate of summands[j], the zero
-    // module exactly where the summand is projective.
+    // translates[j] is the certified AR translate of summands[j]. Zero
+    // exactly when the summand is projective.
     translates: Vec<Module>,
 }
 
 impl TauRigidModule {
-    /// The summands with the caller's stable indices, in the order supplied.
-    /// An empty slice is the zero module.
-    #[inline]
-    pub fn summands(&self) -> &[(usize, Module)] {
-        &self.summands
-    }
-
-    /// The certified translate of each summand, in summand order. The zero
-    /// module marks a projective summand, as [`tau`].
-    #[inline]
-    pub fn translates(&self) -> &[Module] {
-        &self.translates
+    accessor_methods! {
+        /// The summands with the caller's stable indices, in the order supplied.
+        /// An empty slice is the zero module.
+        pub summands() -> &[(usize, Module)] = |this| &this.summands;
+        /// The certified translate of each summand, in summand order. Zero
+        /// exactly on a projective summand. See [`crate::ar::tau`].
+        pub translates() -> &[Module] = |this| &this.translates;
     }
 
     /// The ordered summand pairs `(i, j)` whose `Hom(X_i, tau X_j)` was
@@ -140,43 +114,35 @@ impl TauRigidModule {
         out
     }
 
-    /// Whether the certified module is the zero module, meaning it has no
-    /// summands.
-    #[inline]
-    pub fn is_zero_module(&self) -> bool {
-        self.summands.is_empty()
+    accessor_methods! {
+        /// Whether the certified module is the zero module, meaning it has no
+        /// summands.
+        pub is_zero_module() -> bool = |this| this.summands.is_empty();
     }
 
-    /// Rechecks the claim against the live modules.
-    ///
-    /// Every stored value is recomputed and compared, never taken on trust.
-    /// The checks are:
-    ///
-    /// - Each summand's translate, recomputed through the certified double
-    ///   route of [`tau`], matches the stored one: both zero, or both nonzero
-    ///   and certified isomorphic.
-    /// - `dim Hom(X_i, tau X_j)` against the freshly recomputed translate is
-    ///   zero, for every ordered pair whose translate is nonzero.
-    pub fn verify(&self) -> bool {
-        if self.translates.len() != self.summands.len() {
-            return false;
-        }
+    verify_methods!(pub(crate), { hit(Site::TauRigidVerify); },
+        /// Rechecks the claim against the live modules.
+        ///
+        /// The vanishing is not stored, so both the translates and the Hom
+        /// dimensions are recomputed. Each summand's translate, through the
+        /// certified double route of [`crate::ar::tau`], must match the stored
+        /// one: both zero, or both nonzero and certified isomorphic. Then
+        /// `dim Hom(X_i, tau X_j)` against the fresh translate is zero for
+        /// every ordered pair whose translate is nonzero.
+        |self, context| {
+        verify_guard!(self.translates.len() == self.summands.len());
         let mut fresh = Vec::with_capacity(self.summands.len());
         for ((_, x), stored) in self.summands.iter().zip(&self.translates) {
-            let Ok(live) = tau(x) else {
-                return false;
-            };
-            if live.is_zero() != stored.is_zero() {
-                return false;
-            }
+            let_or_false!(Ok(live) = context.tau_for(x));
+            verify_guard!(live.is_zero() == stored.is_zero());
             // The stored translate is a different module value than a fresh
             // one, so the comparison is a certified isomorphism and never
             // pointer identity.
-            if !live.is_zero()
-                && !matches!(is_isomorphic(&live, stored), Ok(IsoOutcome::Isomorphic(_)))
-            {
-                return false;
-            }
+            verify_guard!(live.is_zero()
+                || matches!(
+                    is_isomorphic(live.as_ref(), stored),
+                    Ok(IsoOutcome::Isomorphic(_))
+                ));
             fresh.push(live);
         }
         for (_, x) in &self.summands {
@@ -184,25 +150,22 @@ impl TauRigidModule {
                 if live.is_zero() {
                     continue;
                 }
-                match hom_dim(x, live) {
-                    Ok(0) => {}
-                    _ => return false,
-                }
+                verify_guard!(matches!(context.hom_dim_for(x, live), Ok(0)));
             }
         }
         true
-    }
+    });
 }
 
 /// One nonzero morphism `X_i -> tau X_j`, which proves `M` is not tau-rigid.
 ///
-/// Fields are private and construction goes through
-/// [`is_tau_rigid_summandwise`], so the stored morphism is the first basis
-/// morphism of the first nonzero `Hom(X_i, tau X_j)` in `(i, j)`
-/// lexicographic order. The choice is deterministic, not canonical.
+/// Construction goes through [`is_tau_rigid_summandwise`]. The stored
+/// morphism is the first basis morphism of the first nonzero
+/// `Hom(X_i, tau X_j)` in `(i, j)` lexicographic order. The choice is
+/// deterministic, not canonical.
 ///
 /// The morphism is a summand-level map. `Hom(X_i, tau X_j)` is a direct
-/// summand of `Hom(M, tau M)` under the additivity of `tau` and `Hom`, so a
+/// summand of `Hom(M, tau M)` under additivity of `tau` and `Hom`, so a
 /// nonzero element of it is a nonzero element of `Hom(M, tau M)`.
 #[derive(Clone, Debug)]
 pub struct NonTauRigidWitness {
@@ -217,99 +180,57 @@ pub struct NonTauRigidWitness {
 }
 
 impl NonTauRigidWitness {
-    /// The caller's index of the summand `X_i` the morphism starts at.
-    #[inline]
-    pub fn source_index(&self) -> usize {
-        self.source_index
+    accessor_methods! {
+        /// The caller's index of the summand `X_i` the morphism starts at.
+        pub source_index() -> usize = |this| this.source_index;
+        /// The caller's index of the summand `X_j` whose translate the morphism
+        /// ends at.
+        pub target_index() -> usize = |this| this.target_index;
+        /// The summand `X_i`.
+        pub source() -> &Module = |this| &this.source;
+        /// The summand `X_j`, whose translate is the morphism's target.
+        pub target_summand() -> &Module = |this| &this.target_summand;
+        /// `tau X_j`, as computed by the double route.
+        pub translate() -> &Module = |this| &this.translate;
+        /// The nonzero morphism `X_i -> tau X_j`.
+        pub morphism() -> &Morphism = |this| &this.morphism;
     }
 
-    /// The caller's index of the summand `X_j` whose translate the morphism
-    /// ends at.
-    #[inline]
-    pub fn target_index(&self) -> usize {
-        self.target_index
-    }
-
-    /// The summand `X_i`.
-    #[inline]
-    pub fn source(&self) -> &Module {
-        &self.source
-    }
-
-    /// The summand `X_j`, whose translate is the morphism's target.
-    #[inline]
-    pub fn target_summand(&self) -> &Module {
-        &self.target_summand
-    }
-
-    /// `tau X_j`, as computed by the double route.
-    #[inline]
-    pub fn translate(&self) -> &Module {
-        &self.translate
-    }
-
-    /// The nonzero morphism `X_i -> tau X_j`.
-    #[inline]
-    pub fn morphism(&self) -> &Morphism {
-        &self.morphism
-    }
-
-    /// Rechecks that the stored morphism is a genuine nonzero element of
-    /// `Hom(X_i, tau X_j)`.
-    ///
-    /// The checks are:
-    ///
-    /// - The morphism runs from the stored source to the stored translate.
-    /// - Its vertex matrices pass [`Morphism::new`] again, so A-linearity is
-    ///   rechecked against the live modules.
-    /// - `tau X_j`, recomputed through the certified double route, is nonzero
-    ///   and certified isomorphic to the stored translate.
-    /// - `Hom(X_i, tau X_j)`, rebuilt from the endpoints, contains the
-    ///   morphism.
-    /// - The morphism is nonzero.
-    pub fn verify(&self) -> bool {
-        if !self.morphism.source().ptr_eq(&self.source)
-            || !self.morphism.target().ptr_eq(&self.translate)
-        {
-            return false;
-        }
+    verify_methods!(pub(crate), {},
+        /// Rechecks that the stored morphism is a nonzero element of
+        /// `Hom(X_i, tau X_j)`.
+        ///
+        /// The morphism must run from the stored source to the stored
+        /// translate, and its vertex matrices must pass [`Morphism::new`]
+        /// again. `tau X_j`, through the certified double route, must be
+        /// nonzero and certified isomorphic to the stored translate.
+        /// `Hom(X_i, tau X_j)`, rebuilt from the endpoints, must contain the
+        /// morphism, and the morphism must be nonzero.
+        |self, context| {
+        verify_guard!(self.morphism.source().ptr_eq(&self.source)
+            && self.morphism.target().ptr_eq(&self.translate));
         let vertices = self.source.algebra().quiver().num_vertices();
         let maps: Vec<DenseMat> = (0..vertices)
             .map(|v| self.morphism.map_at(v).clone())
             .collect();
-        let Ok(rebuilt) = Morphism::new(&self.source, &self.translate, maps) else {
-            return false;
-        };
-        if rebuilt != self.morphism {
-            return false;
-        }
-        let Ok(live) = tau(&self.target_summand) else {
-            return false;
-        };
-        if live.is_zero() {
-            return false;
-        }
-        if !matches!(
-            is_isomorphic(&live, &self.translate),
+        let_or_false!(Ok(rebuilt) = Morphism::new(&self.source, &self.translate, maps));
+        verify_guard!(rebuilt == self.morphism);
+        let_or_false!(Ok(live) = context.tau_for(&self.target_summand));
+        verify_guard!(!live.is_zero());
+        verify_guard!(matches!(
+            is_isomorphic(live.as_ref(), &self.translate),
             Ok(IsoOutcome::Isomorphic(_))
-        ) {
-            return false;
-        }
-        let Ok(space) = HomSpace::new(&self.source, &self.translate) else {
-            return false;
-        };
-        if space.dim() == 0 {
-            return false;
-        }
-        match space.full_subspace().contains(&self.morphism) {
-            Ok(true) => {}
-            _ => return false,
-        }
+        ));
+        let_or_false!(Ok(space) = HomSpace::new(&self.source, &self.translate));
+        verify_guard!(matches!(
+            space.full_subspace().contains(&self.morphism),
+            Ok(true)
+        ));
         !self.morphism.is_zero()
-    }
+    });
 }
 
-/// The answer to a tau-rigidity question, certified either way.
+/// The answer to a tau-rigidity question.
 #[derive(Clone, Debug)]
 pub enum TauRigidityOutcome {
     /// `Hom(M, tau M) = 0`, with a certified translate per summand.
@@ -319,10 +240,9 @@ pub enum TauRigidityOutcome {
 }
 
 impl TauRigidityOutcome {
-    /// Whether the outcome is [`TauRigidityOutcome::TauRigid`].
-    #[inline]
-    pub fn is_tau_rigid(&self) -> bool {
-        matches!(self, Self::TauRigid(_))
+    accessor_methods! {
+        /// Whether the outcome is [`TauRigidityOutcome::TauRigid`].
+        pub is_tau_rigid() -> bool = |this| matches!(this, Self::TauRigid(_));
     }
 }
 
@@ -348,46 +268,6 @@ impl OppositeCache {
             }
         }
     }
-}
-
-/// The certified double route of [`tau`], with the opposite algebra supplied
-/// instead of rebuilt.
-///
-/// Every step matches [`tau`]: the same minimal presentation, the same
-/// Nakayama-kernel route, the same transpose-dual route, and the same
-/// [`is_isomorphic`] cross-check before an answer comes back. The one
-/// difference is the source of the [`OppositeMap`], which [`TauCache`] holds
-/// once per algebra. `the_cached_double_route_matches_the_uncached_one` pins
-/// the agreement on every fixture.
-fn tau_with_opposite(m: &Module, op: &OppositeMap) -> Result<Module, TauError> {
-    let d1 = minimal_presentation_matrix(m);
-    let nakayama_kernel = kernel(&nu_of_presentation_map(&d1)).0;
-    let transposed = d1
-        .transpose_over(op)
-        .expect("the cache keys the opposite map by the algebra of its own pair");
-    let (transpose, _) = cokernel(&transposed.morphism());
-    let transpose_dual =
-        dual(&transpose, op).expect("Tr M lives over the opposite side of the pair");
-    match is_isomorphic(&nakayama_kernel, &transpose_dual)
-        .expect("both routes land over m's algebra")
-    {
-        IsoOutcome::Isomorphic(_) => {}
-        IsoOutcome::NotIsomorphic(obstruction) => {
-            return Err(TauError::RoutesDisagree {
-                nakayama_kernel,
-                transpose_dual,
-                obstruction,
-            });
-        }
-        IsoOutcome::Unknown { reason } => {
-            return Err(TauError::AgreementUnknown {
-                nakayama_kernel,
-                transpose_dual,
-                reason,
-            });
-        }
-    }
-    Ok(nakayama_kernel)
 }
 
 /// AR translates kept by the nominal identity of the module they belong to.
@@ -434,6 +314,7 @@ impl TauCache {
     /// A hit needs `x` to be a clone of a module already passed in. Two
     /// isomorphic modules built separately are two entries.
     pub fn tau_of(&mut self, x: &Module) -> Result<&Module, TauError> {
+        hit(Site::TauCacheLookup);
         let key = x.addr();
         if self.entries.contains_key(&key) {
             debug_assert!(
@@ -456,28 +337,15 @@ impl TauCache {
         Ok(&self.entries[&key].translate)
     }
 
-    /// The number of stored translates.
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Whether the cache holds no translate.
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// The number of [`TauCache::tau_of`] calls answered from the store.
-    #[inline]
-    pub fn hits(&self) -> u64 {
-        self.hits
-    }
-
-    /// The number of [`TauCache::tau_of`] calls that computed a translate.
-    #[inline]
-    pub fn misses(&self) -> u64 {
-        self.misses
+    accessor_methods! {
+        /// The number of stored translates.
+        pub len() -> usize = |this| this.entries.len();
+        /// Whether the cache holds no translate.
+        pub is_empty() -> bool = |this| this.entries.is_empty();
+        /// The number of [`TauCache::tau_of`] calls answered from the store.
+        pub hits() -> u64 = |this| this.hits;
+        /// The number of [`TauCache::tau_of`] calls that computed a translate.
+        pub misses() -> u64 = |this| this.misses;
     }
 }
 
@@ -486,25 +354,52 @@ impl TauCache {
 ///
 /// Each entry of `summands` is a caller label and the summand. The label
 /// travels to [`NonTauRigidWitness`] and to
-/// [`TauRigidModule::vanishing_pairs`]; `cache` answers from the identity of
-/// the module value, not from the label, so `tau` runs once per module value.
-/// The pairs are scanned in `(i, j)` lexicographic order over positions, so
-/// the returned [`NonTauRigidWitness`] is the first nonzero
-/// `Hom(X_i, tau X_j)` in that order and does not depend on how the walk
-/// arrived here.
+/// [`TauRigidModule::vanishing_pairs`]. `cache` keys on the identity of the
+/// module value, not on the label, so `tau` runs once per module value. The
+/// pairs are scanned in `(i, j)` lexicographic order over positions, so the
+/// returned [`NonTauRigidWitness`] is the first nonzero `Hom(X_i, tau X_j)`
+/// in that order.
 ///
 /// An empty slice is the zero module: tau-rigid, with no pair to check.
 ///
-/// Correctness rests on additivity of `tau` and of `Hom`, so the identity
-/// holds for any direct-sum decomposition. Indecomposable summands are what
-/// make `cache` pay, not what makes the answer right.
+/// Correctness is additivity of `tau` and of `Hom`, so the identity holds
+/// for any direct-sum decomposition. Indecomposable summands reuse cache
+/// entries. They are not what makes the answer right.
 pub fn is_tau_rigid_summandwise(
     summands: &[(usize, Module)],
     cache: &mut TauCache,
 ) -> Result<TauRigidityOutcome, TauRigidError> {
+    is_tau_rigid_summandwise_with(
+        summands,
+        |module| cache.tau_of(module).cloned().map_err(Into::into),
+        |source, target| hom_dim(source, target).map_err(Into::into),
+    )
+}
+
+pub(crate) fn is_tau_rigid_summandwise_with_context(
+    summands: &[(usize, Module)],
+    context: &VerificationContext,
+) -> Result<TauRigidityOutcome, TauRigidError> {
+    is_tau_rigid_summandwise_with(
+        summands,
+        |module| {
+            context
+                .tau_for(module)
+                .map(|translate| translate.as_ref().clone())
+                .map_err(Into::into)
+        },
+        |source, target| context.hom_dim_for(source, target).map_err(Into::into),
+    )
+}
+
+fn is_tau_rigid_summandwise_with(
+    summands: &[(usize, Module)],
+    mut tau_of: impl FnMut(&Module) -> Result<Module, TauRigidError>,
+    mut hom_dimension: impl FnMut(&Module, &Module) -> Result<usize, TauRigidError>,
+) -> Result<TauRigidityOutcome, TauRigidError> {
     let mut translates = Vec::with_capacity(summands.len());
     for (_, x) in summands {
-        translates.push(cache.tau_of(x)?.clone());
+        translates.push(tau_of(x)?);
     }
     for (source_index, x) in summands {
         for (j, (target_index, y)) in summands.iter().enumerate() {
@@ -517,7 +412,7 @@ pub fn is_tau_rigid_summandwise(
             // A vanishing pair needs the dimension alone. The basis is built
             // only where a nonzero dimension says a morphism exists to hand
             // back.
-            if hom_dim(x, translate)? == 0 {
+            if hom_dimension(x, translate)? == 0 {
                 continue;
             }
             let space = HomSpace::new(x, translate)?;
@@ -545,14 +440,12 @@ pub fn is_tau_rigid_summandwise(
 ///
 /// In a hot loop, call [`is_tau_rigid_summandwise`] instead and keep one
 /// [`TauCache`] across the whole walk. Working per summand avoids running the
-/// double-route cross-check on a decomposable module, where it decomposes both
-/// of its results. How much of `tau` that accounts for is not claimed: the
-/// wall-clock figures that once stood here predate the identity-keyed cache
-/// and were removed rather than carried forward.
+/// double-route cross-check on a decomposable module, where it decomposes
+/// both of its results.
 pub fn is_tau_rigid(m: &Module) -> Result<TauRigidityOutcome, TauRigidError> {
     // decompose has no summand to return for the zero module, which is
     // tau-rigid with an empty summand list.
-    let summands: Vec<(usize, Module)> = if m.is_zero() {
+    let summands: Vec<_> = if m.is_zero() {
         Vec::new()
     } else {
         decompose(m)
@@ -569,6 +462,7 @@ pub fn is_tau_rigid(m: &Module) -> Result<TauRigidityOutcome, TauRigidError> {
 mod tests {
     use super::*;
     use crate::algebra::{commutative_square, linear_an, truncated_poly};
+    use crate::ar::tau;
     use crate::arquiver::IndecomposableCatalog;
     use crate::dynkin::{DynkinType, dynkin_quiver};
     use crate::field::PrimeField;
@@ -604,9 +498,8 @@ mod tests {
 
     /// The fixture algebras with a module list each, named for failure
     /// messages. The additivity identity holds for any direct-sum
-    /// decomposition, so the lists are not required to be catalogs; the
-    /// commutative-square list mixes simples, projectives, and injectives on
-    /// purpose.
+    /// decomposition, so the lists need not be catalogs. The commutative-square
+    /// list mixes simples, projectives, and injectives.
     fn fixtures(field: PrimeField) -> Vec<(String, Vec<Module>)> {
         let mut out = Vec::new();
         for n in [2usize, 3] {
@@ -674,8 +567,8 @@ mod tests {
         total
     }
 
-    /// `dim Hom(M, tau M)` with `M` assembled and `tau` called on it, the
-    /// route the performance rule forbids in production code.
+    /// `dim Hom(M, tau M)` with `M` assembled and `tau` called on it. Production
+    /// code does not take this route.
     fn assembled_dim(modules: &[&Module]) -> usize {
         if modules.is_empty() {
             return 0;
@@ -943,11 +836,10 @@ mod tests {
         }
     }
 
-    // The correctness gate for the additivity shortcut: on the D_4 path
-    // algebra with no relations the catalog has 12 indecomposables, and the
-    // summandwise sum of dim Hom(X_i, tau X_j) is compared against dim
-    // Hom(M, tau M) with M assembled and tau called on it, for all
-    // 1 + 12 + 66 + 220 = 299 subsets of size at most three.
+    // On the D_4 path algebra with no relations the catalog has 12
+    // indecomposables. The summandwise sum of dim Hom(X_i, tau X_j) is
+    // compared against dim Hom(M, tau M) with M assembled and tau called on
+    // it, for all 1 + 12 + 66 + 220 = 299 subsets of size at most three.
     #[test]
     fn summandwise_agrees_with_the_assembled_route_on_every_small_d4_subset() {
         for field in fields() {

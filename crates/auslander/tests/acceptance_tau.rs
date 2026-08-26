@@ -17,28 +17,12 @@
 //! - On the two Nakayama fixtures the indecomposables and `tau` are short
 //!   enough to list, so the pair sets are counted by hand in `catalog_fixtures`.
 //!
-//! Tier split, design section 11. Measured on this branch in the dev profile
-//! (`opt-level = 2`) on the development host, this binary only:
-//!
-//! ```text
-//! always-on block, default parallelism      0.12 s to 0.16 s over three runs
-//! always-on block, --test-threads=1         0.18 s to 0.24 s over five runs
-//! exhaustive block, --ignored               0.74 s to 0.94 s over three runs
-//! ```
-//!
-//! Ranges, not medians, because the host runs other work. The per-block
-//! breakdown that once stood here was measured before the tau cache was keyed
-//! by module identity and is not restated: a stale number reads as a current
-//! one.
-//!
 //! The design puts the D_4 walk in the always-on block. It does not fit: a
-//! D_4 walk and its closure recheck cost more over two fields than the whole
-//! always-on budget above, and the recheck is the slower half. The per-walk
-//! figures that once stood here predate the closure gate and the identity-keyed
-//! cache; `taugraph` carries the current recheck intervals. D_4 keeps its
+//! D_4 walk and its closure recheck cost more over two fields than the rest
+//! of the always-on block, and the recheck is the slower half. D_4 keeps its
 //! always-on catalog route and moves its walk to `#[ignore]`, together with
-//! the 16-vertex Kronecker walk. Nothing is dropped; the heavy cases run
-//! under `cargo test -- --ignored`.
+//! the 16-vertex Kronecker walk. The heavy cases run under
+//! `cargo test -- --ignored`.
 //!
 //! What "tampered" means here. Every witness type has private fields and no
 //! public mutator, so an integration test cannot corrupt a stored witness. It
@@ -119,7 +103,6 @@ struct Fixture {
     pairs: usize,
     histogram: Vec<usize>,
     /// Whether the always-on tier walks the mutation graph over this algebra.
-    /// See the tier table in the module documentation.
     walk_always_on: bool,
 }
 

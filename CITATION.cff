@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+message: "If you use auslander, cite it with the metadata below."
+title: auslander
+type: software
+authors:
+  - family-names: Kringeland
+    given-names: Tor
+    email: tor@vixe.re
+version: 0.6.0
+date-released: 2026-08-26
+repository-code: "https://github.com/t0rsion/auslander"
+url: "https://github.com/t0rsion/auslander"
+license:
+  - Apache-2.0
+  - MIT

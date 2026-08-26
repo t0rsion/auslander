@@ -2,13 +2,13 @@
 //! quiver algebras with monomial or general admissible relations, and their
 //! right modules.
 //!
-//! The surface is small and algebra-owned. Modules are created only through
-//! `Algebra` methods, so every Python-visible `Module` is a validated
-//! `kQ/I`-module. Library errors cross the boundary as `ValueError` carrying
-//! the Rust `Display` message. A rejection with variants gets one `ValueError`
-//! subclass per variant, with its payload attached as attributes, so the failed
-//! precondition is never reduced to a message string. Engine limits and defects
-//! are `RuntimeError`, never `ValueError`.
+//! The surface is algebra-owned. Modules are created only through `Algebra`
+//! methods, so every Python-visible `Module` is a validated `kQ/I`-module.
+//! Library errors cross the boundary as `ValueError` carrying the Rust
+//! `Display` message. A rejection with variants gets one `ValueError` subclass
+//! per variant, with its payload attached as attributes, so the failed
+//! precondition is never reduced to a message string. Engine limits and
+//! defects are `RuntimeError`, never `ValueError`.
 //!
 //! A mathematical outcome never raises. A pair that fails a condition is a
 //! `PairRejection` value, a slot with no left mutation is a `FacWitness`, and a
@@ -22,6 +22,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
+use pyo3::IntoPyObjectExt;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyBaseException, PyOverflowError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -36,11 +37,19 @@ use auslander::arquiver::{
 };
 use auslander::basic::{AddClosureWitness, BasicDecomposition, BasicError, ProjectiveSupport};
 use auslander::completion::{CompletionLimits, TruncationDiagnostics, TruncationReason};
+use auslander::complex::{
+    CheckedComplex, ExactComplex, ExactnessOutcome, HomologyDimensions, NonExactWitness,
+};
 use auslander::decompose::{self, Certificate, KrullSchmidtOutcome};
 use auslander::dynkin::{self, DynkinType, EuclideanType};
 use auslander::enumerate;
 use auslander::ext::{self, ExtClassError};
 use auslander::field::{Fp, PrimeField};
+use auslander::hochschild::{
+    BarBudgetDiagnostics, BarCutReason, BarInput, BarLimit, BarLimits, BarRunDiagnostics, BarStage,
+    HochschildClass, HochschildCohomology, HochschildDegree, HochschildError, HochschildOutcome,
+    IncompleteHochschildCohomology, bar_hochschild,
+};
 use auslander::hom;
 use auslander::homspace::HomSubspace;
 use auslander::indec::{IndecError, IndecomposableModule};
@@ -70,6 +79,10 @@ use auslander::taugraph::{
 };
 use auslander::taurigid::{
     self, NonTauRigidWitness, TauRigidError, TauRigidModule, TauRigidityOutcome,
+};
+use auslander::tilting::{
+    self, ClassicalTiltingResult as RustClassicalTiltingResult, GenerationBlocker, TiltingBlocker,
+    TiltingError, TiltingLimits,
 };
 use auslander::verify;
 
@@ -315,6 +328,57 @@ fn graph_error(e: GraphError) -> PyErr {
     }
 }
 
+/// A failed classical-tilting call. A rejected basic candidate keeps the
+/// basic layer's mapping. Every later error contradicts an internal checked
+/// construction and becomes DefectError.
+fn tilting_error(e: TiltingError) -> PyErr {
+    match e {
+        TiltingError::Basic(inner) => basic_error(inner),
+        e @ (TiltingError::Approx(_)
+        | TiltingError::Ext(_)
+        | TiltingError::Complex(_)
+        | TiltingError::Defect { .. }) => DefectError::new_err(e.to_string()),
+    }
+}
+
+/// A rejected bar-class input is ValueError. A nonzero internally generated
+/// differential square contradicts the construction and becomes DefectError.
+fn hochschild_error(e: HochschildError) -> PyErr {
+    match e {
+        e @ HochschildError::DifferentialSquare { .. } => DefectError::new_err(e.to_string()),
+        other => value_error(other),
+    }
+}
+
+fn bar_limit_name(limit: BarLimit) -> &'static str {
+    match limit {
+        BarLimit::TensorTuples => "max_tensor_tuples",
+        BarLimit::CochainDimension => "max_cochain_dim",
+        BarLimit::MatrixEntries => "max_matrix_entries",
+        BarLimit::WorkUnits => "max_work_units",
+    }
+}
+
+fn bar_reason_name(reason: BarCutReason) -> &'static str {
+    match reason {
+        BarCutReason::Limit(limit) => bar_limit_name(limit),
+        BarCutReason::SizeOverflow => "size_overflow",
+    }
+}
+
+fn bar_stage_name(stage: BarStage) -> &'static str {
+    match stage {
+        BarStage::DegreeRecord => "degree_record",
+        BarStage::Shape => "shape",
+        BarStage::Layout => "layout",
+        BarStage::Differential => "differential",
+        BarStage::Square => "square",
+        BarStage::Cocycles => "cocycles",
+        BarStage::Coboundaries => "coboundaries",
+        BarStage::Complement => "complement",
+    }
+}
+
 /// The canonical representatives in `0..p` of a row of field elements. An `Fp`
 /// keeps its representative to itself outside the library, so the row travels
 /// through a one-row matrix.
@@ -359,6 +423,19 @@ fn wrap_all<'a, T, W: From<&'a T>>(items: &'a [T]) -> Vec<W> {
 /// term order.
 fn dim_vectors(terms: &[Module]) -> Vec<Vec<usize>> {
     terms.iter().map(|t| t.dim_vector().to_vec()).collect()
+}
+
+/// A Python-owned copy of a resolution stored inside another certificate.
+fn wrapped_resolution(module: &Module, inner: &ProjectiveResolution) -> PyResolution {
+    PyResolution {
+        module: module.clone(),
+        inner: ProjectiveResolution {
+            terms: inner.terms.clone(),
+            maps: inner.maps.clone(),
+            augmentation: inner.augmentation.clone(),
+            end: inner.end,
+        },
+    }
 }
 
 /// How a resolution prefix ended, as the `status=` field of a repr.
@@ -1087,6 +1164,34 @@ impl PyAlgebra {
         }
     }
 
+    /// Computes relative normalized bar Hochschild cohomology through one
+    /// degree under four explicit resource ceilings.
+    ///
+    /// A finished request returns HochschildCohomology. A ceiling or checked
+    /// size overflow returns IncompleteHochschildCohomology with the exact
+    /// completed prefix and first rejected reservation. A cut never raises.
+    #[pyo3(text_signature = "($self, field, max_degree, limits)")]
+    fn hochschild_cohomology<'py>(
+        &self,
+        py: Python<'py>,
+        field: &PyPrimeField,
+        max_degree: usize,
+        limits: &PyBarLimits,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let algebra = self.over(py, field.inner)?;
+        match py
+            .allow_threads(|| bar_hochschild(&algebra, max_degree, limits.inner))
+            .map_err(hochschild_error)?
+        {
+            HochschildOutcome::Complete(inner) => {
+                Ok(Bound::new(py, PyHochschildCohomology { inner })?.into_any())
+            }
+            HochschildOutcome::Cut(inner) => {
+                Ok(Bound::new(py, PyIncompleteHochschildCohomology { inner })?.into_any())
+            }
+        }
+    }
+
     /// Lists every support tau-tilting pair of the algebra from the definition
     /// over an exhaustive catalog of its indecomposables.
     ///
@@ -1402,9 +1507,8 @@ impl PyRightModule {
         }
     }
 
-    /// The Auslander-Reiten translate τM as a Module. A projective module
-    /// gives the zero module, which is the answer and not an absent one, so
-    /// this never returns None.
+    /// The Auslander-Reiten translate `τM`. Zero exactly when the module is
+    /// projective.
     ///
     /// Both computation routes, the Nakayama kernel and transpose-then-dual,
     /// always run and are cross-checked. A certified disagreement raises
@@ -1441,10 +1545,8 @@ impl PyRightModule {
         })
     }
 
-    /// The almost-split sequence ending at this module, as an
-    /// AlmostSplitSequence, or AlmostSplitOutcome.PROJECTIVE when the module
-    /// is projective. A projective module is a valid outcome, not an error:
-    /// no almost-split sequence ends at it.
+    /// The almost-split sequence ending at this module, or
+    /// `AlmostSplitOutcome.PROJECTIVE` when the module is projective.
     ///
     /// The module goes through the indecomposability gate first, so the zero
     /// module, a decomposable module, and a module the gate left undetermined
@@ -1904,6 +2006,205 @@ impl PyKrullSchmidtResult {
     }
 }
 
+/// A nonempty finite complex whose consecutive maps compose to zero.
+///
+/// Terms and maps use display order: `maps[i]` goes from `terms[i]` to
+/// `terms[i + 1]`. Construction checks every endpoint and composite.
+#[pyclass(name = "CheckedComplex", module = "auslander", frozen)]
+struct PyCheckedComplex {
+    inner: CheckedComplex,
+}
+
+impl From<&CheckedComplex> for PyCheckedComplex {
+    fn from(inner: &CheckedComplex) -> Self {
+        Self {
+            inner: inner.clone(),
+        }
+    }
+}
+
+#[pymethods]
+impl PyCheckedComplex {
+    /// CheckedComplex(terms, maps); raises ValueError for an empty term list,
+    /// a wrong map count, a mismatched endpoint, or a nonzero composite.
+    #[new]
+    #[pyo3(text_signature = "(terms, maps)")]
+    fn new(
+        terms: Vec<PyRef<'_, PyRightModule>>,
+        maps: Vec<PyRef<'_, PyMorphism>>,
+    ) -> PyResult<Self> {
+        let terms = terms.iter().map(|term| term.inner.clone()).collect();
+        let maps = maps.iter().map(|map| map.inner.clone()).collect();
+        Ok(Self {
+            inner: CheckedComplex::new(terms, maps).map_err(value_error)?,
+        })
+    }
+
+    /// The terms in display order.
+    #[getter]
+    fn terms(&self) -> Vec<PyRightModule> {
+        wrap_all(self.inner.terms())
+    }
+
+    /// The maps in display order.
+    #[getter]
+    fn maps(&self) -> Vec<PyMorphism> {
+        wrap_all(self.inner.maps())
+    }
+
+    /// Rechecks every endpoint and zero composite.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    /// The exact homology dimension vector at one term.
+    #[pyo3(text_signature = "($self, index)")]
+    fn homology_dimensions(&self, index: usize) -> PyResult<PyHomologyDimensions> {
+        Ok(PyHomologyDimensions {
+            inner: self.inner.homology_dimensions(index).map_err(value_error)?,
+        })
+    }
+
+    /// An ExactComplex, or a NonExactWitness at the first nonexact term.
+    #[pyo3(text_signature = "($self)")]
+    fn exactness<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        match self.inner.exactness() {
+            ExactnessOutcome::Exact(inner) => {
+                Ok(Bound::new(py, PyExactComplex { inner })?.into_any())
+            }
+            ExactnessOutcome::NotExact(inner) => {
+                Ok(Bound::new(py, PyNonExactWitness { inner })?.into_any())
+            }
+        }
+    }
+
+    fn __len__(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "CheckedComplex(terms={}, maps={})",
+            self.inner.terms().len(),
+            self.inner.maps().len()
+        )
+    }
+}
+
+/// Exact homology dimensions at one term of a CheckedComplex.
+#[pyclass(name = "HomologyDimensions", module = "auslander", frozen)]
+struct PyHomologyDimensions {
+    inner: HomologyDimensions,
+}
+
+#[pymethods]
+impl PyHomologyDimensions {
+    /// The term index in display order.
+    #[getter]
+    fn index(&self) -> usize {
+        self.inner.index()
+    }
+
+    /// The homology dimension at each quiver vertex.
+    #[getter]
+    fn dimension_vector(&self) -> Vec<usize> {
+        self.inner.dimension_vector().to_vec()
+    }
+
+    /// Whether every entry of the dimension vector is zero.
+    #[getter]
+    fn is_zero(&self) -> bool {
+        self.inner.is_zero()
+    }
+
+    /// Rechecks the complex and the stored dimensions.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "HomologyDimensions(index={}, dimension_vector={:?})",
+            self.inner.index(),
+            self.inner.dimension_vector()
+        )
+    }
+}
+
+/// The first term of a CheckedComplex with nonzero homology.
+#[pyclass(name = "NonExactWitness", module = "auslander", frozen)]
+struct PyNonExactWitness {
+    inner: NonExactWitness,
+}
+
+#[pymethods]
+impl PyNonExactWitness {
+    /// The first nonexact term index.
+    #[getter]
+    fn index(&self) -> usize {
+        self.inner.homology().index()
+    }
+
+    /// The first nonzero homology dimension vector.
+    #[getter]
+    fn dimension_vector(&self) -> Vec<usize> {
+        self.inner.homology().dimension_vector().to_vec()
+    }
+
+    /// The full checked homology record.
+    #[getter]
+    fn homology(&self) -> PyHomologyDimensions {
+        PyHomologyDimensions {
+            inner: self.inner.homology().clone(),
+        }
+    }
+
+    /// Rechecks that this is the first nonexact term.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "NonExactWitness(index={}, dimension_vector={:?})",
+            self.inner.homology().index(),
+            self.inner.homology().dimension_vector()
+        )
+    }
+}
+
+/// A finite CheckedComplex proved exact at every term.
+#[pyclass(name = "ExactComplex", module = "auslander", frozen)]
+struct PyExactComplex {
+    inner: ExactComplex,
+}
+
+#[pymethods]
+impl PyExactComplex {
+    /// The checked complex whose homology vanishes.
+    #[getter]
+    fn complex(&self) -> PyCheckedComplex {
+        self.inner.complex().into()
+    }
+
+    /// Rechecks every endpoint, composite, and homology dimension.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    fn __len__(&self) -> usize {
+        self.inner.complex().len()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("ExactComplex(terms={})", self.inner.complex().len())
+    }
+}
+
 /// How a computed resolution prefix ended: FINITE (reached zero) or CUT (step
 /// budget ran out with the next syzygy nonzero).
 #[pyclass(name = "ResolutionKind", module = "auslander", frozen, eq, hash)]
@@ -2115,8 +2416,8 @@ impl PyInjectiveCoresolution {
 /// true value is >= n; it does not claim the value finite or infinite. There is no
 /// "None means infinite" convention anywhere in this package.
 ///
-/// Instances are immutable and hash by value, so a Bounded serves as a dict
-/// key or set element.
+/// Instances are immutable and hash by value, so a Bounded is a dict key or
+/// set element.
 #[pyclass(name = "Bounded", module = "auslander", frozen)]
 struct PyBounded {
     inner: Bounded<usize>,
@@ -2829,8 +3130,7 @@ impl PyShortExactSequence {
 ///
 /// The class has one member, `AlmostSplitOutcome.PROJECTIVE`, and
 /// `Module.almost_split` returns that very object, so `is` decides the case.
-/// No almost-split sequence ends at a projective module. That is a
-/// mathematical answer, not a failure, and it is never reported as None.
+/// No almost-split sequence ends at a projective.
 #[pyclass(name = "AlmostSplitOutcome", module = "auslander", frozen, eq, hash)]
 #[derive(PartialEq, Eq, Hash)]
 struct PyAlmostSplitOutcome;
@@ -3253,13 +3553,12 @@ impl PyArQuiver {
 /// The certified translates behind a tau-rigid module.
 ///
 /// The module itself is not stored: it is the direct sum of `summands`.
-/// `translates[j]` is tau of `summands[j]`, the zero module exactly when the
-/// summand is projective. `vanishing_pairs` lists the ordered summand
-/// positions (i, j) whose Hom(X_i, tau X_j) was checked zero, which is every
-/// pair with a nonzero translate. A vanishing claim has no element to exhibit,
-/// so those positions are the whole record and `verify` recomputes rather than
-/// rereads. Instances are immutable and come only from
-/// `TauRigidity.vanishing`.
+/// `translates[j]` is tau of `summands[j]`. That translate is zero exactly
+/// when the summand is projective. `vanishing_pairs` lists the ordered
+/// summand positions `(i, j)` whose `Hom(X_i, tau X_j)` was checked zero:
+/// every pair with a nonzero translate. A vanishing claim has no element to
+/// exhibit, so those positions are the whole record and `verify` recomputes.
+/// Instances are immutable and come only from `TauRigidity.vanishing`.
 #[pyclass(name = "TauRigidModule", module = "auslander", frozen)]
 struct PyTauRigidModule {
     inner: TauRigidModule,
@@ -3278,8 +3577,7 @@ impl PyTauRigidModule {
             .collect()
     }
 
-    /// tau of each summand, in summand order. A projective summand gives the
-    /// zero module, which is the answer rather than an absent one.
+    /// tau of each summand, in summand order. Zero on a projective summand.
     #[getter]
     fn translates(&self) -> Vec<PyRightModule> {
         self.inner.translates().iter().map(|t| t.into()).collect()
@@ -3300,7 +3598,6 @@ impl PyTauRigidModule {
 
     /// Recomputes every translate through the certified double route and
     /// rebuilds every Hom space, then requires each one to vanish again.
-    /// Nothing stored is taken on trust.
     #[pyo3(text_signature = "($self)")]
     fn verify(&self, py: Python<'_>) -> bool {
         py.allow_threads(|| self.inner.verify())
@@ -4552,6 +4849,883 @@ impl PyAddClosureWitness {
     }
 }
 
+/// Four resource ceilings for one relative bar cohomology request.
+#[pyclass(name = "BarLimits", module = "auslander", frozen)]
+#[derive(Clone, Copy)]
+struct PyBarLimits {
+    inner: BarLimits,
+}
+
+#[pymethods]
+impl PyBarLimits {
+    /// BarLimits(max_tensor_tuples, max_cochain_dim, max_matrix_entries,
+    /// max_work_units). Every ceiling is required and independent.
+    #[new]
+    #[pyo3(
+        text_signature = "(max_tensor_tuples, max_cochain_dim, max_matrix_entries, max_work_units)"
+    )]
+    fn new(
+        max_tensor_tuples: usize,
+        max_cochain_dim: usize,
+        max_matrix_entries: usize,
+        max_work_units: u64,
+    ) -> Self {
+        Self {
+            inner: BarLimits {
+                max_tensor_tuples,
+                max_cochain_dim,
+                max_matrix_entries,
+                max_work_units,
+            },
+        }
+    }
+
+    #[getter]
+    fn max_tensor_tuples(&self) -> usize {
+        self.inner.max_tensor_tuples
+    }
+
+    #[getter]
+    fn max_cochain_dim(&self) -> usize {
+        self.inner.max_cochain_dim
+    }
+
+    #[getter]
+    fn max_matrix_entries(&self) -> usize {
+        self.inner.max_matrix_entries
+    }
+
+    #[getter]
+    fn max_work_units(&self) -> u64 {
+        self.inner.max_work_units
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "BarLimits(max_tensor_tuples={}, max_cochain_dim={}, max_matrix_entries={}, max_work_units={})",
+            self.inner.max_tensor_tuples,
+            self.inner.max_cochain_dim,
+            self.inner.max_matrix_entries,
+            self.inner.max_work_units
+        )
+    }
+}
+
+/// The first rejected reservation of an incomplete bar request.
+#[pyclass(name = "BarBudgetDiagnostics", module = "auslander", frozen)]
+struct PyBarBudgetDiagnostics {
+    inner: BarBudgetDiagnostics,
+}
+
+#[pymethods]
+impl PyBarBudgetDiagnostics {
+    /// The caller ceiling name, or `size_overflow`.
+    #[getter]
+    fn reason(&self) -> &'static str {
+        bar_reason_name(self.inner.reason)
+    }
+
+    /// The operation whose reservation stopped the request.
+    #[getter]
+    fn stage(&self) -> &'static str {
+        bar_stage_name(self.inner.stage)
+    }
+
+    #[getter]
+    fn completed_degree_count(&self) -> usize {
+        self.inner.completed_degree_count
+    }
+
+    #[getter]
+    fn first_uncomputed_differential(&self) -> usize {
+        self.inner.first_uncomputed_differential
+    }
+
+    #[getter]
+    fn work_units(&self) -> u64 {
+        self.inner.work_units
+    }
+
+    #[getter]
+    fn matrix_entries(&self) -> usize {
+        self.inner.matrix_entries
+    }
+
+    #[getter]
+    fn used(&self) -> u128 {
+        self.inner.used
+    }
+
+    #[getter]
+    fn proposed(&self) -> u128 {
+        self.inner.proposed
+    }
+
+    #[getter]
+    fn ceiling(&self) -> Option<u128> {
+        self.inner.ceiling
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "BarBudgetDiagnostics(reason={:?}, stage={:?}, used={}, proposed={}, ceiling={:?})",
+            self.reason(),
+            self.stage(),
+            self.inner.used,
+            self.inner.proposed,
+            self.inner.ceiling
+        )
+    }
+}
+
+/// Final work and retained-matrix counters of a complete bar request.
+#[pyclass(name = "BarRunDiagnostics", module = "auslander", frozen)]
+struct PyBarRunDiagnostics {
+    inner: BarRunDiagnostics,
+}
+
+#[pymethods]
+impl PyBarRunDiagnostics {
+    #[getter]
+    fn work_units(&self) -> u64 {
+        self.inner.work_units
+    }
+
+    #[getter]
+    fn matrix_entries(&self) -> usize {
+        self.inner.matrix_entries
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "BarRunDiagnostics(work_units={}, matrix_entries={})",
+            self.inner.work_units, self.inner.matrix_entries
+        )
+    }
+}
+
+/// Exact Hochschild cohomology through one requested degree.
+#[pyclass(name = "HochschildCohomology", module = "auslander", frozen)]
+struct PyHochschildCohomology {
+    inner: HochschildCohomology,
+}
+
+#[pymethods]
+impl PyHochschildCohomology {
+    /// The requested last cohomological degree.
+    #[getter]
+    fn requested_degree(&self) -> usize {
+        self.inner.requested_degree()
+    }
+
+    /// The effective resource ceilings.
+    #[getter]
+    fn limits(&self) -> PyBarLimits {
+        PyBarLimits {
+            inner: self.inner.limits(),
+        }
+    }
+
+    /// The exact dimensions from H^0 through the requested degree.
+    #[getter]
+    fn dimensions(&self) -> Vec<usize> {
+        self.inner
+            .degrees()
+            .iter()
+            .map(HochschildDegree::dim)
+            .collect()
+    }
+
+    /// The exact space at a completed degree.
+    #[pyo3(text_signature = "($self, degree)")]
+    fn degree(&self, degree: usize) -> PyResult<PyHochschildDegree> {
+        let inner = self.inner.degree(degree).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "Hochschild degree {degree} is outside 0..={}",
+                self.inner.requested_degree()
+            ))
+        })?;
+        Ok(PyHochschildDegree {
+            inner: inner.clone(),
+            field: self.inner.algebra().field(),
+        })
+    }
+
+    /// The final work and retained-matrix counters.
+    #[getter]
+    fn diagnostics(&self) -> PyBarRunDiagnostics {
+        PyBarRunDiagnostics {
+            inner: self.inner.diagnostics(),
+        }
+    }
+
+    /// Rebuilds the request and compares every stored coordinate and matrix.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "HochschildCohomology(requested_degree={}, dimensions={:?})",
+            self.inner.requested_degree(),
+            self.dimensions()
+        )
+    }
+}
+
+/// The exact leading degrees retained when a bar request reaches a resource cut.
+///
+/// This class has no requested-degree accessor. `completed_degrees` contains
+/// only spaces whose outgoing differential, square check, and quotient bases
+/// all finished.
+#[pyclass(name = "IncompleteHochschildCohomology", module = "auslander", frozen)]
+struct PyIncompleteHochschildCohomology {
+    inner: IncompleteHochschildCohomology,
+}
+
+#[pymethods]
+impl PyIncompleteHochschildCohomology {
+    /// The effective resource ceilings.
+    #[getter]
+    fn limits(&self) -> PyBarLimits {
+        PyBarLimits {
+            inner: self.inner.limits(),
+        }
+    }
+
+    /// The completed exact prefix. No later degree is present.
+    #[getter]
+    fn completed_degrees(&self) -> Vec<PyHochschildDegree> {
+        let field = self.inner.algebra().field();
+        self.inner
+            .completed_degrees()
+            .iter()
+            .cloned()
+            .map(|inner| PyHochschildDegree { inner, field })
+            .collect()
+    }
+
+    /// The caller ceiling name, or `size_overflow`.
+    #[getter]
+    fn reason(&self) -> &'static str {
+        bar_reason_name(self.inner.diagnostics().reason)
+    }
+
+    /// The first rejected reservation and its exact counters.
+    #[getter]
+    fn diagnostics(&self) -> PyBarBudgetDiagnostics {
+        PyBarBudgetDiagnostics {
+            inner: self.inner.diagnostics().clone(),
+        }
+    }
+
+    /// Rebuilds the request and compares the prefix and first cut.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "IncompleteHochschildCohomology(completed_degrees={}, reason={:?})",
+            self.inner.completed_degrees().len(),
+            self.reason()
+        )
+    }
+}
+
+/// One exact Hochschild cohomology space with deterministic bases.
+#[pyclass(name = "HochschildDegree", module = "auslander", frozen)]
+struct PyHochschildDegree {
+    inner: HochschildDegree,
+    field: PrimeField,
+}
+
+#[pymethods]
+impl PyHochschildDegree {
+    #[getter]
+    fn degree(&self) -> usize {
+        self.inner.degree()
+    }
+
+    #[getter]
+    fn dim(&self) -> usize {
+        self.inner.dim()
+    }
+
+    /// The relative cochain basis as `(tuple_rank, output_basis_index)` pairs.
+    #[getter]
+    fn cochain_basis(&self) -> Vec<(usize, usize)> {
+        self.inner
+            .cochain_basis()
+            .iter()
+            .map(|coordinate| (coordinate.tuple_rank, coordinate.output))
+            .collect()
+    }
+
+    /// Decodes a relative input tuple rank.
+    ///
+    /// Degree zero returns a vertex integer. Positive degree returns the list
+    /// of nontrivial normal-word basis indices. An out-of-range rank raises
+    /// ValueError.
+    #[pyo3(text_signature = "($self, tuple_rank)")]
+    fn input_for_rank(&self, py: Python<'_>, tuple_rank: usize) -> PyResult<Py<PyAny>> {
+        match self.inner.input_for_rank(tuple_rank).ok_or_else(|| {
+            PyValueError::new_err(format!("tuple rank {tuple_rank} is outside this degree"))
+        })? {
+            BarInput::Vertex(vertex) => vertex.into_py_any(py),
+            BarInput::Tuple(indices) => indices.into_py_any(py),
+        }
+    }
+
+    /// Resolves one algebra basis index as `(source, target, arrow_ids)`.
+    #[pyo3(text_signature = "($self, basis_index)")]
+    fn basis_word(&self, basis_index: usize) -> PyResult<(u32, u32, Vec<u32>)> {
+        let word = self
+            .inner
+            .algebra()
+            .basis()
+            .get(basis_index)
+            .ok_or_else(|| {
+                PyValueError::new_err(format!("basis index {basis_index} is out of range"))
+            })?;
+        Ok((
+            word.source(),
+            word.target(),
+            word.arrows().iter().map(|arrow| arrow.0).collect(),
+        ))
+    }
+
+    #[getter]
+    fn differential(&self) -> Vec<Vec<u64>> {
+        self.inner.differential().entries_u64()
+    }
+
+    #[getter]
+    fn cocycle_basis(&self) -> Vec<Vec<u64>> {
+        self.inner.cocycle_basis().entries_u64()
+    }
+
+    #[getter]
+    fn coboundary_basis(&self) -> Vec<Vec<u64>> {
+        self.inner.coboundary_basis().entries_u64()
+    }
+
+    #[getter]
+    fn complement_basis(&self) -> Vec<Vec<u64>> {
+        self.inner.complement_basis().entries_u64()
+    }
+
+    /// The zero class in deterministic complement coordinates.
+    #[pyo3(text_signature = "($self)")]
+    fn zero_class(&self) -> PyHochschildClass {
+        PyHochschildClass {
+            inner: self.inner.zero_class(),
+            field: self.field,
+        }
+    }
+
+    /// A class from complement coordinates, reduced modulo the prime.
+    #[pyo3(text_signature = "($self, coordinates)")]
+    fn class_from_coordinates(&self, coordinates: Vec<i64>) -> PyResult<PyHochschildClass> {
+        let coordinates = coordinates
+            .into_iter()
+            .map(|value| self.field.elem(value))
+            .collect();
+        Ok(PyHochschildClass {
+            inner: self
+                .inner
+                .class_from_coordinates(coordinates)
+                .map_err(hochschild_error)?,
+            field: self.field,
+        })
+    }
+
+    /// Rebuilds through this degree and compares every stored basis and matrix.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "HochschildDegree(degree={}, dim={})",
+            self.inner.degree(),
+            self.inner.dim()
+        )
+    }
+}
+
+/// A Hochschild class in deterministic complement coordinates.
+#[pyclass(name = "HochschildClass", module = "auslander", frozen)]
+struct PyHochschildClass {
+    inner: HochschildClass,
+    field: PrimeField,
+}
+
+#[pymethods]
+impl PyHochschildClass {
+    /// The exact Hochschild space this class belongs to.
+    #[getter]
+    fn degree(&self) -> PyHochschildDegree {
+        PyHochschildDegree {
+            inner: self.inner.degree().clone(),
+            field: self.field,
+        }
+    }
+
+    /// The deterministic complement coordinates in `0..p`.
+    #[getter]
+    fn coordinates(&self) -> Vec<u64> {
+        row_u64(self.inner.coordinates())
+    }
+
+    #[getter]
+    fn is_zero(&self) -> bool {
+        self.inner.is_zero()
+    }
+
+    /// The representative cochain in the full relative coordinate basis.
+    #[getter]
+    fn representative(&self) -> Vec<u64> {
+        row_u64(&self.inner.representative())
+    }
+
+    /// Evaluates the representative on one normalized input.
+    ///
+    /// Degree zero takes a vertex integer. Positive degree takes a list of
+    /// nontrivial normal-word basis indices. Bad degree, basis, or composability
+    /// raises ValueError.
+    #[pyo3(text_signature = "($self, input)")]
+    fn evaluate(&self, input: &Bound<'_, PyAny>) -> PyResult<Vec<(usize, u64)>> {
+        let input = if self.inner.degree().degree() == 0 {
+            BarInput::Vertex(input.extract::<u32>()?)
+        } else {
+            BarInput::Tuple(input.extract::<Vec<usize>>()?)
+        };
+        let evaluated = self.inner.evaluate(&input).map_err(hochschild_error)?;
+        let (indices, values): (Vec<_>, Vec<_>) = evaluated.into_iter().unzip();
+        Ok(indices.into_iter().zip(row_u64(&values)).collect())
+    }
+
+    /// Rechecks the coordinate length and reconstructs the degree.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "HochschildClass(degree={}, coordinates={:?})",
+            self.inner.degree().degree(),
+            self.coordinates()
+        )
+    }
+}
+
+/// Independent bounds for classical tilting classification.
+#[pyclass(name = "TiltingLimits", module = "auslander", frozen)]
+#[derive(Clone, Copy)]
+struct PyTiltingLimits {
+    inner: TiltingLimits,
+}
+
+#[pymethods]
+impl PyTiltingLimits {
+    /// TiltingLimits(max_projective_dimension, max_generation_steps).
+    #[new]
+    #[pyo3(text_signature = "(max_projective_dimension, max_generation_steps)")]
+    fn new(max_projective_dimension: usize, max_generation_steps: usize) -> Self {
+        Self {
+            inner: TiltingLimits {
+                max_projective_dimension,
+                max_generation_steps,
+            },
+        }
+    }
+
+    /// The projective-resolution differential bound.
+    #[getter]
+    fn max_projective_dimension(&self) -> usize {
+        self.inner.max_projective_dimension
+    }
+
+    /// The minimal left-approximation map bound.
+    #[getter]
+    fn max_generation_steps(&self) -> usize {
+        self.inner.max_generation_steps
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "TiltingLimits(max_projective_dimension={}, max_generation_steps={})",
+            self.inner.max_projective_dimension, self.inner.max_generation_steps
+        )
+    }
+}
+
+/// A classical tilting classification with one of three mathematical outcomes.
+///
+/// `is_tilting` is True for a certificate, False only for a positive
+/// self-extension, and None when a caller bound or generation step blocks the
+/// decision. Exactly one of `tilting`, `rejection`, and `blocker` is set.
+#[pyclass(name = "ClassicalTiltingResult", module = "auslander", frozen)]
+struct PyClassicalTiltingResult {
+    inner: Arc<RustClassicalTiltingResult>,
+}
+
+#[pymethods]
+impl PyClassicalTiltingResult {
+    /// True, False, or None for a certified, rejected, or undetermined result.
+    #[getter]
+    fn is_tilting(&self) -> Option<bool> {
+        match self.inner.as_ref() {
+            RustClassicalTiltingResult::Tilting(_) => Some(true),
+            RustClassicalTiltingResult::NotTilting(_) => Some(false),
+            RustClassicalTiltingResult::Undetermined(_) => None,
+        }
+    }
+
+    /// The accepted certificate, or None for the other two outcomes.
+    #[getter]
+    fn tilting(&self) -> Option<PyClassicalTiltingModule> {
+        matches!(self.inner.as_ref(), RustClassicalTiltingResult::Tilting(_)).then(|| {
+            PyClassicalTiltingModule {
+                home: self.inner.clone(),
+            }
+        })
+    }
+
+    /// The first positive self-extension, or None when not rejected.
+    #[getter]
+    fn rejection(&self) -> Option<PyPositiveSelfExtension> {
+        matches!(
+            self.inner.as_ref(),
+            RustClassicalTiltingResult::NotTilting(_)
+        )
+        .then(|| PyPositiveSelfExtension {
+            home: self.inner.clone(),
+        })
+    }
+
+    /// The projective-dimension or generation blocker, or None when decided.
+    #[getter]
+    fn blocker(&self) -> Option<PyTiltingBlocker> {
+        matches!(
+            self.inner.as_ref(),
+            RustClassicalTiltingResult::Undetermined(_)
+        )
+        .then(|| PyTiltingBlocker {
+            home: self.inner.clone(),
+        })
+    }
+
+    /// Rechecks the proof data carried by the selected outcome.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| match self.inner.as_ref() {
+            RustClassicalTiltingResult::Tilting(value) => value.verify(),
+            RustClassicalTiltingResult::NotTilting(value) => value.verify(),
+            RustClassicalTiltingResult::Undetermined(value) => value.verify(),
+        })
+    }
+
+    fn __repr__(&self) -> &'static str {
+        match self.inner.as_ref() {
+            RustClassicalTiltingResult::Tilting(_) => "ClassicalTiltingResult(is_tilting=True)",
+            RustClassicalTiltingResult::NotTilting(_) => "ClassicalTiltingResult(is_tilting=False)",
+            RustClassicalTiltingResult::Undetermined(_) => {
+                "ClassicalTiltingResult(is_tilting=None)"
+            }
+        }
+    }
+}
+
+/// A basic module certified against all three classical tilting conditions.
+#[pyclass(name = "ClassicalTiltingModule", module = "auslander", frozen)]
+struct PyClassicalTiltingModule {
+    home: Arc<RustClassicalTiltingResult>,
+}
+
+impl PyClassicalTiltingModule {
+    fn inner(&self) -> &tilting::ClassicalTiltingModule {
+        let RustClassicalTiltingResult::Tilting(inner) = self.home.as_ref() else {
+            unreachable!("the wrapper is created only for a tilting outcome")
+        };
+        inner
+    }
+}
+
+#[pymethods]
+impl PyClassicalTiltingModule {
+    /// Classifies a basic module under two independent bounds.
+    #[staticmethod]
+    #[pyo3(text_signature = "(module, limits)")]
+    fn classify(
+        py: Python<'_>,
+        module: &PyRightModule,
+        limits: &PyTiltingLimits,
+    ) -> PyResult<PyClassicalTiltingResult> {
+        let result = py
+            .allow_threads(|| tilting::classify(&module.inner, limits.inner))
+            .map_err(tilting_error)?;
+        Ok(PyClassicalTiltingResult {
+            inner: Arc::new(result),
+        })
+    }
+
+    /// The certified basic module.
+    #[getter]
+    fn module(&self) -> PyRightModule {
+        self.inner().module().into()
+    }
+
+    /// The exact projective dimension.
+    #[getter]
+    fn projective_dimension(&self) -> usize {
+        self.inner().projective_dimension()
+    }
+
+    /// The limits used by this successful classification.
+    #[getter]
+    fn limits(&self) -> PyTiltingLimits {
+        PyTiltingLimits {
+            inner: self.inner().limits(),
+        }
+    }
+
+    /// The complete minimal projective resolution.
+    #[getter]
+    fn resolution(&self) -> PyResolution {
+        wrapped_resolution(self.inner().module(), self.inner().resolution())
+    }
+
+    /// The zero self-Ext spaces in degrees 1 through pd T.
+    #[getter]
+    fn ext_spaces(&self) -> Vec<PyExtSpace> {
+        self.inner()
+            .ext_spaces()
+            .iter()
+            .cloned()
+            .map(|inner| PyExtSpace { inner })
+            .collect()
+    }
+
+    /// The checked exact generation complex A -> T^0 -> ... -> T^n.
+    #[getter]
+    fn generation_complex(&self) -> PyExactComplex {
+        PyExactComplex {
+            inner: self.inner().generation_complex().clone(),
+        }
+    }
+
+    /// One add(T) witness for each generation term after A.
+    #[getter]
+    fn add_witnesses(&self) -> Vec<PyAddClosureWitness> {
+        self.inner()
+            .add_witnesses()
+            .iter()
+            .cloned()
+            .map(|inner| PyAddClosureWitness { inner })
+            .collect()
+    }
+
+    /// Recomputes the resolution, Ext spaces, generation route, and witnesses.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner().verify())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ClassicalTiltingModule(projective_dimension={}, module_dims={:?})",
+            self.inner().projective_dimension(),
+            self.inner().module().dim_vector()
+        )
+    }
+}
+
+/// The first positive self-extension of a non-tilting candidate.
+#[pyclass(name = "PositiveSelfExtension", module = "auslander", frozen)]
+struct PyPositiveSelfExtension {
+    home: Arc<RustClassicalTiltingResult>,
+}
+
+impl PyPositiveSelfExtension {
+    fn inner(&self) -> &tilting::PositiveSelfExtension {
+        let RustClassicalTiltingResult::NotTilting(inner) = self.home.as_ref() else {
+            unreachable!("the wrapper is created only for a rejection")
+        };
+        inner
+    }
+}
+
+#[pymethods]
+impl PyPositiveSelfExtension {
+    /// The rejected module.
+    #[getter]
+    fn module(&self) -> PyRightModule {
+        self.inner().module().into()
+    }
+
+    /// The first positive degree with nonzero self-Ext.
+    #[getter]
+    fn degree(&self) -> usize {
+        self.inner().degree()
+    }
+
+    /// The dimension of that Ext space.
+    #[getter]
+    fn dimension(&self) -> usize {
+        self.inner().dimension()
+    }
+
+    /// The proved finite projective dimension.
+    #[getter]
+    fn projective_dimension(&self) -> usize {
+        self.inner().projective_dimension()
+    }
+
+    /// The positive self-Ext space.
+    #[getter]
+    fn space(&self) -> PyExtSpace {
+        PyExtSpace {
+            inner: self.inner().space().clone(),
+        }
+    }
+
+    /// The complete projective resolution used by the rejection.
+    #[getter]
+    fn resolution(&self) -> PyResolution {
+        wrapped_resolution(self.inner().module(), self.inner().resolution())
+    }
+
+    /// Recomputes the finite resolution and every Ext space through the witness.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner().verify())
+    }
+}
+
+/// A bound or generation step that leaves classical tilting undetermined.
+#[pyclass(name = "TiltingBlocker", module = "auslander", frozen)]
+struct PyTiltingBlocker {
+    home: Arc<RustClassicalTiltingResult>,
+}
+
+impl PyTiltingBlocker {
+    fn inner(&self) -> &TiltingBlocker {
+        let RustClassicalTiltingResult::Undetermined(inner) = self.home.as_ref() else {
+            unreachable!("the wrapper is created only for an undetermined outcome")
+        };
+        inner
+    }
+}
+
+#[pymethods]
+impl PyTiltingBlocker {
+    /// `projective_dimension` or `generation`.
+    #[getter]
+    fn kind(&self) -> &'static str {
+        match self.inner() {
+            TiltingBlocker::ProjectiveDimension(_) => "projective_dimension",
+            TiltingBlocker::Generation(_) => "generation",
+        }
+    }
+
+    /// The candidate module.
+    #[getter]
+    fn module(&self) -> PyRightModule {
+        match self.inner() {
+            TiltingBlocker::ProjectiveDimension(value) => value.module().into(),
+            TiltingBlocker::Generation(value) => value.module().into(),
+        }
+    }
+
+    /// The genuine projective-dimension lower bound, only for that blocker.
+    #[getter]
+    fn projective_dimension(&self) -> Option<PyBounded> {
+        self.inner().projective_dimension().map(|value| PyBounded {
+            inner: value.projective_dimension(),
+        })
+    }
+
+    /// The requested projective-dimension bound, only for that blocker.
+    #[getter]
+    fn projective_dimension_bound(&self) -> Option<usize> {
+        self.inner()
+            .projective_dimension()
+            .map(|value| value.bound())
+    }
+
+    /// The first blocked generation stage, only for a generation blocker.
+    #[getter]
+    fn stage(&self) -> Option<usize> {
+        self.inner().generation().map(GenerationBlocker::stage)
+    }
+
+    /// The generation-step bound, only for a generation blocker.
+    #[getter]
+    fn max_generation_steps(&self) -> Option<usize> {
+        self.inner().generation().map(GenerationBlocker::max_steps)
+    }
+
+    /// `non_monic` or `step_limit`, only for a generation blocker.
+    #[getter]
+    fn generation_kind(&self) -> Option<&'static str> {
+        self.inner().generation().map(|value| match value {
+            GenerationBlocker::NonMonic { .. } => "non_monic",
+            GenerationBlocker::StepLimit { .. } => "step_limit",
+        })
+    }
+
+    /// The checked maps built before the blocked generation stage.
+    #[getter]
+    fn partial_complex(&self) -> Option<PyCheckedComplex> {
+        self.inner()
+            .generation()
+            .map(|value| value.partial_complex().into())
+    }
+
+    /// The nonzero kernel dimensions of a non-monic approximation.
+    #[getter]
+    fn kernel_dimension_vector(&self) -> Option<Vec<usize>> {
+        self.inner()
+            .generation()
+            .and_then(GenerationBlocker::kernel_dimension_vector)
+            .map(<[usize]>::to_vec)
+    }
+
+    /// The last nonzero cokernel dimensions of a step-limit blocker.
+    #[getter]
+    fn cokernel_dimension_vector(&self) -> Option<Vec<usize>> {
+        self.inner()
+            .generation()
+            .and_then(GenerationBlocker::cokernel_dimension_vector)
+            .map(<[usize]>::to_vec)
+    }
+
+    /// The last nonzero cokernel of a step-limit blocker.
+    #[getter]
+    fn cokernel(&self) -> Option<PyRightModule> {
+        self.inner()
+            .generation()
+            .and_then(GenerationBlocker::cokernel)
+            .map(Into::into)
+    }
+
+    /// Recomputes the stored cut or bounded generation route.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner().verify())
+    }
+
+    fn __repr__(&self) -> String {
+        format!("TiltingBlocker(kind={:?})", self.kind())
+    }
+}
+
 create_exception!(
     auslander,
     TauAgreementUnknown,
@@ -4565,9 +5739,9 @@ create_exception!(
     auslander,
     BudgetExhaustedError,
     PyRuntimeError,
-    "Base of the budget exhaustions: an enforced work budget ran out before \
-     the computation finished. Nothing is claimed about the result; raise the \
-     limits and run again. The variant is the subclass."
+    "An enforced work budget ran out before the computation finished. Nothing \
+     is claimed about the result; raise the limits and run again. The variant \
+     is the subclass."
 );
 
 create_exception!(
@@ -4587,8 +5761,7 @@ create_exception!(
     PyRuntimeError,
     "An internal cross-check of this library failed: a computation checked a \
      consequence of a theorem whose hypotheses hold, and the check came out \
-     false. This is a bug in auslander, never bad input, and it is reported \
-     as such. Please report it with the input that produced it."
+     false. This is a bug in auslander, never bad input."
 );
 
 create_exception!(
@@ -4648,8 +5821,8 @@ create_exception!(
     auslander,
     DynkinError,
     PyValueError,
-    "Base of the two rejections of dynkin_indecomposables; the variant is the \
-     subclass, NonzeroIdealError or NotDynkinError."
+    "A rejection of dynkin_indecomposables. The variant is the subclass, \
+     NonzeroIdealError or NotDynkinError."
 );
 
 create_exception!(
@@ -4811,6 +5984,10 @@ fn auslander_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCertificate>()?;
     m.add_class::<PyDecomposition>()?;
     m.add_class::<PyKrullSchmidtResult>()?;
+    m.add_class::<PyCheckedComplex>()?;
+    m.add_class::<PyHomologyDimensions>()?;
+    m.add_class::<PyNonExactWitness>()?;
+    m.add_class::<PyExactComplex>()?;
     m.add_class::<PyResolutionKind>()?;
     m.add_class::<PyResolutionStatus>()?;
     m.add_class::<PyResolution>()?;
@@ -4844,6 +6021,18 @@ fn auslander_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyIncompleteSupportTauTiltingGraph>()?;
     m.add_class::<PyCatalogEnumeration>()?;
     m.add_class::<PyAddClosureWitness>()?;
+    m.add_class::<PyBarLimits>()?;
+    m.add_class::<PyBarBudgetDiagnostics>()?;
+    m.add_class::<PyBarRunDiagnostics>()?;
+    m.add_class::<PyHochschildCohomology>()?;
+    m.add_class::<PyIncompleteHochschildCohomology>()?;
+    m.add_class::<PyHochschildDegree>()?;
+    m.add_class::<PyHochschildClass>()?;
+    m.add_class::<PyTiltingLimits>()?;
+    m.add_class::<PyClassicalTiltingResult>()?;
+    m.add_class::<PyClassicalTiltingModule>()?;
+    m.add_class::<PyPositiveSelfExtension>()?;
+    m.add_class::<PyTiltingBlocker>()?;
     m.add(
         "TauAgreementUnknown",
         m.py().get_type::<TauAgreementUnknown>(),

@@ -17,14 +17,17 @@
 //! constructed route needs a drawn minimal polynomial that is squarefree and
 //! reducible, which is likely but not guaranteed.
 
-use std::fmt;
+use std::sync::Arc;
 
+use crate::algebra::Algebra;
+use crate::context::VerificationContext;
 use crate::endo::{EndoAlgebra, SplitMix64};
 use crate::field::{Fp, PrimeField};
 use crate::hom::{Morphism, identity, submodule_with_inclusion, zero_morphism};
 use crate::iso::Fingerprint;
 use crate::linalg::DenseMat;
-use crate::module::Module;
+use crate::module::{Module, direct_sum};
+use crate::profile::{Site, hit, hit_module};
 
 /// Rejected split data.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,27 +45,25 @@ pub enum SplitError {
     SumNotIdentity,
 }
 
-impl fmt::Display for SplitError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::CountMismatch => f.write_str("summand, inclusion, and projection counts differ"),
-            Self::EndpointMismatch { index } => {
-                write!(f, "inclusion/projection {index} has wrong endpoints")
-            }
-            Self::NotIdentityOnSummand { index } => {
-                write!(f, "projection {index} does not split inclusion {index}")
-            }
-            Self::CrossTermNonzero { from, to } => {
-                write!(f, "inclusion {from} followed by projection {to} is nonzero")
-            }
-            Self::SumNotIdentity => {
-                f.write_str("the projections and inclusions do not sum to the identity")
-            }
-        }
+display_error! { error SplitError {
+    Self::CountMismatch => "summand, inclusion, and projection counts differ";
+    Self::EndpointMismatch { index } => "inclusion/projection {index} has wrong endpoints";
+    Self::NotIdentityOnSummand { index } => "projection {index} does not split inclusion {index}";
+    Self::CrossTermNonzero { from, to } => "inclusion {from} followed by projection {to} is nonzero";
+    Self::SumNotIdentity => "the projections and inclusions do not sum to the identity";
+} }
+
+/// The direct sum of `parts`, or the zero module over `algebra` when empty.
+pub(crate) fn direct_sum_or_zero<'a>(
+    algebra: &Arc<Algebra>,
+    parts: impl IntoIterator<Item = &'a Module>,
+) -> (Module, Vec<Morphism>, Vec<Morphism>) {
+    let parts: Vec<&Module> = parts.into_iter().collect();
+    match parts.as_slice() {
+        [] => (Module::zero(algebra), Vec::new(), Vec::new()),
+        _ => direct_sum(&parts),
     }
 }
-
-impl std::error::Error for SplitError {}
 
 /// A verified direct-sum decomposition `M ≅ ⊕_k S_k`: inclusions `ι_k: S_k → M`
 /// and projections `π_k: M → S_k` with `ι_k.then(π_k) = id`,
@@ -104,6 +105,24 @@ pub(crate) fn add_morphisms(f: &Morphism, g: &Morphism) -> Morphism {
 /// `None` where that one panics.
 pub(crate) fn matrix_inverse(a: &DenseMat, field: &PrimeField) -> Option<DenseMat> {
     (a.rows() == a.cols()).then(|| a.inverse(field))?
+}
+
+/// The inverse morphism when every vertex matrix is square and invertible.
+pub(crate) fn inverse_morphism(f: &Morphism) -> Option<Morphism> {
+    let field = f.source().field();
+    let maps = (0..f.source().algebra().quiver().num_vertices())
+        .map(|v| matrix_inverse(f.map_at(v), &field))
+        .collect::<Option<Vec<_>>>()?;
+    Morphism::new(f.target(), f.source(), maps).ok()
+}
+
+/// Whether two morphisms compose to the identity in both orders.
+pub(crate) fn mutually_inverse(f: &Morphism, g: &Morphism) -> bool {
+    matches!(
+        (f.then(g), g.then(f)),
+        (Ok(round), Ok(round_back))
+            if round == identity(f.source()) && round_back == identity(g.source())
+    )
 }
 
 impl Split {
@@ -158,28 +177,15 @@ impl Split {
         })
     }
 
-    /// The decomposed module.
-    #[inline]
-    pub fn total(&self) -> &Module {
-        &self.total
-    }
-
-    /// The summands, in inclusion/projection order.
-    #[inline]
-    pub fn summands(&self) -> &[Module] {
-        &self.summands
-    }
-
-    /// `ι_k: summands[k] → total`.
-    #[inline]
-    pub fn inclusions(&self) -> &[Morphism] {
-        &self.inclusions
-    }
-
-    /// `π_k: total → summands[k]`.
-    #[inline]
-    pub fn projections(&self) -> &[Morphism] {
-        &self.projections
+    accessor_methods! {
+        /// The decomposed module.
+        pub total() -> &Module = |this| &this.total;
+        /// The summands, in inclusion/projection order.
+        pub summands() -> &[Module] = |this| &this.summands;
+        /// `ι_k: summands[k] → total`.
+        pub inclusions() -> &[Morphism] = |this| &this.inclusions;
+        /// `π_k: total → summands[k]`.
+        pub projections() -> &[Morphism] = |this| &this.projections;
     }
 }
 
@@ -207,32 +213,19 @@ pub struct Decomposition {
 }
 
 impl Decomposition {
-    /// The verified split of the input module.
-    #[inline]
-    pub fn split(&self) -> &Split {
-        &self.split
-    }
-
-    /// One certificate per summand, in summand order.
-    #[inline]
-    pub fn certificates(&self) -> &[Certificate] {
-        &self.certificates
-    }
-
-    /// The summands, in certificate order.
-    #[inline]
-    pub fn summands(&self) -> &[Module] {
-        self.split.summands()
-    }
-
-    /// `End(S_k)` for each summand, in summand order, as the split produced it.
-    /// Entry `k` is built from `summands()[k]` itself, so it is the algebra
-    /// [`crate::indec::IndecomposableModule::from_endo`] and the radical
-    /// criterion want; rebuilding it with [`EndoAlgebra::new`] gives the same
-    /// value at the cost of a second radical computation.
-    #[inline]
-    pub fn endos(&self) -> &[EndoAlgebra] {
-        &self.endos
+    accessor_methods! {
+        /// The verified split of the input module.
+        pub split() -> &Split = |this| &this.split;
+        /// One certificate per summand, in summand order.
+        pub certificates() -> &[Certificate] = |this| &this.certificates;
+        /// The summands, in certificate order.
+        pub summands() -> &[Module] = |this| this.split.summands();
+        /// `End(S_k)` for each summand, in summand order, as the split produced it.
+        /// Entry `k` is built from `summands()[k]` itself, the algebra
+        /// [`crate::indec::IndecomposableModule::from_endo`] and the radical
+        /// criterion expect. Rebuilding it with [`EndoAlgebra::new`] gives the
+        /// same value at the cost of a second radical computation.
+        pub endos() -> &[EndoAlgebra] = |this| &this.endos;
     }
 }
 
@@ -271,7 +264,21 @@ pub enum KrullSchmidtOutcome {
 /// those leave open. Every summand's `End` comes from
 /// [`Decomposition::endos`]; nothing is rebuilt here.
 pub fn krull_schmidt(m: &Module) -> KrullSchmidtOutcome {
+    hit(Site::KrullSchmidt);
     let d = decompose(m);
+    krull_schmidt_from_decomposition(&d)
+}
+
+pub(crate) fn krull_schmidt_with_context(
+    m: &Module,
+    context: &VerificationContext,
+) -> KrullSchmidtOutcome {
+    hit(Site::KrullSchmidt);
+    let d = context.decompose_for(m);
+    krull_schmidt_from_decomposition(&d)
+}
+
+fn krull_schmidt_from_decomposition(d: &Decomposition) -> KrullSchmidtOutcome {
     let mut classes: Vec<(usize, Fingerprint, usize)> = Vec::new();
     for (k, certificate) in d.certificates().iter().enumerate() {
         if let Certificate::Undetermined { attempts } = certificate {
@@ -308,10 +315,15 @@ const DECOMPOSE_SEED: u64 = 0x000a_0512_a11d_e12b;
 /// Splits `m` into summands with certificates; the zero module decomposes into
 /// no summands. Deterministic: all randomness is seeded per call.
 pub fn decompose(m: &Module) -> Decomposition {
+    let root = (!m.is_zero()).then(|| EndoAlgebra::new(m));
+    decompose_with_root_endo(m, root)
+}
+
+pub(crate) fn decompose_with_root_endo(m: &Module, root: Option<EndoAlgebra>) -> Decomposition {
+    hit_module(Site::Decompose, m);
     let mut rng = SplitMix64(DECOMPOSE_SEED);
     let mut parts = Vec::new();
-    if !m.is_zero() {
-        let endo = EndoAlgebra::new(m);
+    if let Some(endo) = root {
         split_recursively(m, endo, identity(m), identity(m), &mut rng, &mut parts);
     }
     let mut summands = Vec::with_capacity(parts.len());
@@ -357,28 +369,23 @@ fn split_recursively(
     out: &mut Vec<Part>,
 ) {
     if endo.is_local() {
-        out.push(Part {
-            summand: m.clone(),
-            endo,
-            include,
-            project,
-            certificate: Certificate::Indecomposable,
-        });
+        finish_part(m, endo, include, project, Certificate::Indecomposable, out);
         return;
     }
     let split = deterministic_split(m, &endo, rng)
         .or_else(|| singular_split(m, &endo, rng))
         .or_else(|| fitting_split(m, &endo, rng));
     let Some(split) = split else {
-        out.push(Part {
-            summand: m.clone(),
+        finish_part(
+            m,
             endo,
             include,
             project,
-            certificate: Certificate::Undetermined {
+            Certificate::Undetermined {
                 attempts: FITTING_ATTEMPTS,
             },
-        });
+            out,
+        );
         return;
     };
     for k in 0..split.summands().len() {
@@ -409,6 +416,23 @@ fn split_recursively(
     }
 }
 
+fn finish_part(
+    m: &Module,
+    endo: EndoAlgebra,
+    include: Morphism,
+    project: Morphism,
+    certificate: Certificate,
+    out: &mut Vec<Part>,
+) {
+    out.push(Part {
+        summand: m.clone(),
+        endo,
+        include,
+        project,
+        certificate,
+    });
+}
+
 // M = im(e) ⊕ im(1 − e) for a lifted idempotent e of End(M).
 fn deterministic_split(m: &Module, endo: &EndoAlgebra, rng: &mut SplitMix64) -> Option<Split> {
     let e = endo.morphism(&endo.split_idempotent(rng)?);
@@ -419,11 +443,7 @@ fn deterministic_split(m: &Module, endo: &EndoAlgebra, rng: &mut SplitMix64) -> 
     for v in 0..n {
         let ev = e.map_at(v);
         let mut complement = DenseMat::identity(ev.rows());
-        for r in 0..ev.rows() {
-            for c in 0..ev.cols() {
-                complement.set(r, c, field.sub(complement.get(r, c), ev.get(r, c)));
-            }
-        }
+        complement.add_scaled_assign(ev, field.neg(field.one()), &field);
         first.push(ev.row_space_basis(&field));
         second.push(complement.row_space_basis(&field));
     }
@@ -472,17 +492,10 @@ fn fitting_split_along(m: &Module, phi: &Morphism) -> Option<Split> {
     split_from_bases(m, kernel, image)
 }
 
-fn morphism_power(m: &Module, phi: &Morphism, mut exp: usize) -> Morphism {
-    let mut base = phi.clone();
-    let mut acc = identity(m);
-    while exp > 0 {
-        if exp & 1 == 1 {
-            acc = acc.then(&base).expect("endomorphisms compose");
-        }
-        base = base.then(&base).expect("endomorphisms compose");
-        exp >>= 1;
-    }
-    acc
+fn morphism_power(m: &Module, phi: &Morphism, exp: usize) -> Morphism {
+    binary_power!(phi.clone(), identity(m), exp, |left, right| left
+        .then(right)
+        .expect("endomorphisms compose"))
 }
 
 /// A verified two-summand split from per-vertex row bases of two invariant
@@ -504,9 +517,9 @@ fn morphism_power(m: &Module, phi: &Morphism, mut exp: usize) -> Morphism {
 /// `proj_first[s(a)] · S(a) = M(a) · proj_first[t(a)]` for the induced `S(a)` of
 /// the submodule. The shapes are right because `proj_first[v]` is
 /// `dim M_v x k1` and `k1` is `sub1.dim_at(v)`, and the entries come from
-/// [`DenseMat::inverse`] over the module's own field. Nothing is claimed on the
-/// strength of that argument alone: [`Split::new`] still rechecks every
-/// split identity on the returned maps, and returns `None` here if one fails.
+/// [`DenseMat::inverse`] over the module's own field. That argument is not
+/// the certificate: [`Split::new`] still rechecks every split identity on
+/// the returned maps, and this returns `None` if one fails.
 fn split_from_bases(m: &Module, first: Vec<DenseMat>, second: Vec<DenseMat>) -> Option<Split> {
     let field = m.field();
     let n = m.algebra().quiver().num_vertices() as usize;
@@ -518,17 +531,7 @@ fn split_from_bases(m: &Module, first: Vec<DenseMat>, second: Vec<DenseMat>) -> 
         if k1 + k2 != m.dim_vector()[v] {
             return None;
         }
-        let mut stacked = DenseMat::zero(k1 + k2, m.dim_vector()[v]);
-        for r in 0..k1 {
-            for c in 0..first[v].cols() {
-                stacked.set(r, c, first[v].get(r, c));
-            }
-        }
-        for r in 0..k2 {
-            for c in 0..second[v].cols() {
-                stacked.set(k1 + r, c, second[v].get(r, c));
-            }
-        }
+        let stacked = DenseMat::stack(&[&first[v], &second[v]], m.dim_vector()[v]);
         // The two row counts add up to the vertex dimension, checked above,
         // so the stack is square.
         let inverse = stacked.inverse(&field)?;

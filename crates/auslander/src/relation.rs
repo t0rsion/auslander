@@ -2,10 +2,9 @@
 //!
 //! A relation is a k-linear combination of parallel paths: every word has the
 //! same source and the same target. Non-uniform input is rejected, not
-//! decomposed. Terms are stored in strictly descending order under the sealed
-//! order of [`crate::order`], so the leading term is always `terms[0]`.
-
-use std::fmt;
+//! decomposed. Terms are stored in strictly descending order under the
+//! admissible order [`crate::order::ORDER_ID`], so the leading term is always
+//! `terms[0]`.
 
 use crate::field::{Fp, PrimeField};
 use crate::order::word_cmp;
@@ -43,49 +42,22 @@ pub enum RelationError {
     MixedTarget { index: usize },
 }
 
-impl fmt::Display for RelationError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty => f.write_str("relation needs at least one term"),
-            Self::FieldMismatch { expected, found } => write!(
-                f,
-                "relation is over the field with modulus {found}, the presentation over {expected}"
-            ),
-            Self::ZeroCoefficient { index } => {
-                write!(f, "term {index} has coefficient zero")
-            }
-            Self::NonCanonicalCoefficient { index } => write!(
-                f,
-                "term {index} has a coefficient outside 0..p; its field has a larger modulus"
-            ),
-            Self::DuplicateWord { index } => {
-                write!(f, "term {index} repeats the word of an earlier term")
-            }
-            Self::InvalidWord { index, error } => {
-                write!(f, "term {index} is not a path: {error}")
-            }
-            Self::WordTooShort { index, len } => write!(
-                f,
-                "term {index} has length {len}; admissibility needs length >= 2"
-            ),
-            Self::MixedSource { index } => {
-                write!(f, "term {index} starts at a different vertex than term 0")
-            }
-            Self::MixedTarget { index } => {
-                write!(f, "term {index} ends at a different vertex than term 0")
-            }
-        }
-    }
-}
+display_error! { RelationError {
+    Self::Empty => "relation needs at least one term";
+    Self::FieldMismatch { expected, found } => "relation is over the field with modulus {found}, the presentation over {expected}";
+    Self::ZeroCoefficient { index } => "term {index} has coefficient zero";
+    Self::NonCanonicalCoefficient { index } => "term {index} has a coefficient outside 0..p; its field has a larger modulus";
+    Self::DuplicateWord { index } => "term {index} repeats the word of an earlier term";
+    Self::InvalidWord { index, error } => "term {index} is not a path: {error}";
+    Self::WordTooShort { index, len } => "term {index} has length {len}; admissibility needs length >= 2";
+    Self::MixedSource { index } => "term {index} starts at a different vertex than term 0";
+    Self::MixedTarget { index } => "term {index} ends at a different vertex than term 0";
+} }
 
-impl std::error::Error for RelationError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::InvalidWord { error, .. } => Some(error),
-            _ => None,
-        }
-    }
-}
+error_source! { RelationError {
+    Self::InvalidWord { error, .. } => Some(error),
+    _ => None,
+} }
 
 /// A uniform relation: a nonzero k-combination of distinct parallel paths of
 /// length >= 2.
@@ -105,13 +77,12 @@ pub struct Relation {
 }
 
 impl Relation {
-    /// Validates `terms` and sorts them into a relation over `quiver` and
-    /// `field`.
+    /// A uniform relation over `quiver` and `field` from the given `terms`.
     ///
     /// Rejects an empty term list, zero or non-canonical coefficients,
     /// duplicate words, non-path words, words of length < 2, and mixed
     /// sources or targets. Sorts the terms in strictly descending order.
-    /// Coefficients are kept as given: nothing here scales the relation to a
+    /// Coefficients stay as given: this constructor does not scale to a
     /// monic leading term.
     pub fn new(
         quiver: &Quiver,
@@ -158,36 +129,18 @@ impl Relation {
         })
     }
 
-    /// The field the relation was built over. Its coefficients are canonical
-    /// representatives for this field and mean something else in any other.
-    #[inline]
-    pub fn field(&self) -> PrimeField {
-        self.field
-    }
-
-    /// Terms in strictly descending order under the sealed order.
-    #[inline]
-    pub fn terms(&self) -> &[(Fp, PathWord)] {
-        &self.terms
-    }
-
-    /// The term with the largest word, `terms[0]`.
-    #[inline]
-    pub fn leading(&self) -> (&Fp, &PathWord) {
-        let (coeff, word) = &self.terms[0];
-        (coeff, word)
-    }
-
-    /// The common source vertex of all words.
-    #[inline]
-    pub fn source(&self) -> u32 {
-        self.terms[0].1.source()
-    }
-
-    /// The common target vertex of all words.
-    #[inline]
-    pub fn target(&self) -> u32 {
-        self.terms[0].1.target()
+    accessor_methods! {
+        /// The field the relation was built over. Coefficients are canonical
+        /// for this field and mean something else in any other.
+        pub field() -> PrimeField = |this| this.field;
+        /// Terms in strictly descending order under [`crate::order::ORDER_ID`].
+        pub terms() -> &[(Fp, PathWord)] = |this| &this.terms;
+        /// The term with the largest word, `terms[0]`.
+        pub leading() -> (&Fp, &PathWord) = |this| (&this.terms[0].0, &this.terms[0].1);
+        /// The common source vertex of all words.
+        pub source() -> u32 = |this| this.terms[0].1.source();
+        /// The common target vertex of all words.
+        pub target() -> u32 = |this| this.terms[0].1.target();
     }
 }
 
@@ -201,15 +154,15 @@ pub struct Presentation {
 }
 
 impl Presentation {
-    /// Bundles relations with the quiver and field they were built over.
+    /// A presentation of the given quiver, field, and relations.
     ///
     /// Each relation must already be a [`Relation`] over this quiver and
     /// field. Two things are checked: [`Relation::field`] must equal `field`,
     /// and every word must be a path of `quiver`. Coefficients, uniformity,
     /// word length, and term order are not rechecked; [`Relation::new`]
-    /// established them over the field the relation carries, and that is now
-    /// this field. A rejected word names its term index inside the offending
-    /// relation, never which relation failed.
+    /// established them over the field the relation carries. A rejected word
+    /// names its term index inside the offending relation, never which
+    /// relation failed.
     pub fn new(
         quiver: Quiver,
         field: PrimeField,
@@ -234,19 +187,10 @@ impl Presentation {
         })
     }
 
-    #[inline]
-    pub fn quiver(&self) -> &Quiver {
-        &self.quiver
-    }
-
-    #[inline]
-    pub fn field(&self) -> PrimeField {
-        self.field
-    }
-
-    #[inline]
-    pub fn relations(&self) -> &[Relation] {
-        &self.relations
+    accessor_methods! {
+        pub quiver() -> &Quiver = |this| &this.quiver;
+        pub field() -> PrimeField = |this| this.field;
+        pub relations() -> &[Relation] = |this| &this.relations;
     }
 }
 

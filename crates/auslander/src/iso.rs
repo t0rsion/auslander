@@ -17,12 +17,13 @@
 
 use std::sync::OnceLock;
 
-use crate::decompose::{Certificate, Decomposition, add_morphisms, decompose};
+use crate::decompose::{Certificate, Decomposition, add_morphisms, decompose, mutually_inverse};
 use crate::endo::EndoAlgebra;
 use crate::hom::{HomError, Morphism, hom_dim, identity, zero_morphism};
 use crate::homspace::HomSpace;
 use crate::module::Module;
-use crate::radical::radical;
+use crate::profile::{Site, hit};
+use crate::radical::radical_series as module_radical_series;
 
 /// A proof that two modules are not isomorphic.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,10 +91,10 @@ pub enum IsoOutcome {
 /// isomorphic; equal fingerprints decide nothing.
 ///
 /// The first three are read at construction. The two series cost a submodule
-/// construction per layer, so they are computed on the first comparison the
-/// other three leave open, and only for the two fingerprints in it. On the
-/// regular `linear_an(12)` summands the dimension vectors already separate
-/// every class, so no series is built at all.
+/// construction per layer. They are computed on the first comparison the
+/// other three leave open, and only for the two fingerprints in that
+/// comparison. On the regular `linear_an(12)` summands the dimension vectors
+/// already separate every class, so no series is built at all.
 ///
 /// [`crate::decompose::krull_schmidt`] keeps one per class, so a summand pays
 /// the radical criterion only against classes the invariants leave open.
@@ -112,8 +113,8 @@ struct Loewy {
     socle: Vec<Vec<usize>>,
 }
 
-/// Fingerprints compare on the three eager invariants first and reach the
-/// series only when those agree, which is where the series are built.
+/// Compares the three eager invariants first. The series are built only when
+/// those agree.
 impl PartialEq for Fingerprint {
     fn eq(&self, other: &Fingerprint) -> bool {
         self.endo_dim == other.endo_dim
@@ -128,6 +129,7 @@ impl Eq for Fingerprint {}
 impl Fingerprint {
     /// The invariants of `m`. `endo` must be `End(m)`.
     pub(crate) fn of(m: &Module, endo: &EndoAlgebra) -> Fingerprint {
+        hit(Site::FingerprintOf);
         Fingerprint {
             module: m.clone(),
             endo_dim: endo.dim(),
@@ -155,12 +157,12 @@ impl Fingerprint {
 /// isomorphism gives the identity as one of the composites, so no pair is
 /// missed.
 ///
-/// The three tests before it only save work, and each is a proof of
-/// non-isomorphism on its own: an [`crate::algebra::Algebra`] has nominal
+/// The three tests before the scan only save work. Each is a proof of
+/// non-isomorphism on its own. An [`crate::algebra::Algebra`] has nominal
 /// identity, so modules over separately built algebras are never isomorphic
-/// here, and an isomorphism forces equal dimension vectors and carries
-/// `Hom(m, n)` and `Hom(n, m)` onto `End(m)`. A [`HomSpace`] is its kernel rows,
-/// so a pair rejected on a Hom dimension has built no morphism at all.
+/// here. An isomorphism forces equal dimension vectors and carries
+/// `Hom(m, n)` and `Hom(n, m)` onto `End(m)`. A [`HomSpace`] is its kernel
+/// rows, so a pair rejected on a Hom dimension has built no morphism at all.
 ///
 /// The radical and socle series are not tested here. They stay isomorphism
 /// invariants, and [`Fingerprint`] carries them for
@@ -168,6 +170,7 @@ impl Fingerprint {
 /// rejected no pair the Hom dimensions let through: on the D_4 support
 /// tau-tilting graph the composite count is the same without them.
 pub(crate) fn indecomposable_iso(m: &Module, n: &Module, endo_m: &EndoAlgebra) -> Option<Morphism> {
+    hit(Site::IndecomposableIso);
     if !std::sync::Arc::ptr_eq(m.algebra(), n.algebra()) || m.dim_vector() != n.dim_vector() {
         return None;
     }
@@ -202,23 +205,19 @@ fn undetermined_reason(d: &Decomposition) -> Option<String> {
     })
 }
 
+fn dimension_vectors<'a>(modules: impl Iterator<Item = &'a Module>) -> Vec<Vec<usize>> {
+    modules.map(|module| module.dim_vector().to_vec()).collect()
+}
+
 fn radical_series(m: &Module) -> Vec<Vec<usize>> {
-    let mut series = Vec::new();
-    let mut layer = radical(m).0;
-    while !layer.is_zero() {
-        series.push(layer.dim_vector().to_vec());
-        layer = radical(&layer).0;
-    }
-    series
+    let series = module_radical_series(m);
+    dimension_vectors(series.iter().skip(1).take_while(|layer| !layer.is_zero()))
 }
 
 // Dimension vectors of soc^k m for k ≥ 1, up to and including m itself.
 fn socle_series(m: &Module) -> Vec<Vec<usize>> {
-    crate::radical::socle_series(m)
-        .iter()
-        .skip(1)
-        .map(|layer| layer.dim_vector().to_vec())
-        .collect()
+    let series = crate::radical::socle_series(m);
+    dimension_vectors(series.iter().skip(1))
 }
 
 fn certified_single(d: &Decomposition) -> bool {
@@ -231,6 +230,7 @@ fn certified_single(d: &Decomposition) -> bool {
 /// both carry a `reason`. Errors only when the modules do not share one algebra
 /// (the same `Arc`).
 pub fn is_isomorphic(m: &Module, n: &Module) -> Result<IsoOutcome, HomError> {
+    hit(Site::IsIsomorphic);
     let zero = zero_morphism(m, n)?;
     if m.dim_vector() != n.dim_vector() {
         return Ok(IsoOutcome::NotIsomorphic(Obstruction::DimensionVector {
@@ -243,8 +243,8 @@ pub fn is_isomorphic(m: &Module, n: &Module) -> Result<IsoOutcome, HomError> {
     }
     // One module is isomorphic to itself by the identity, whatever the
     // decomposition routes below can certify. Without this the relation is not
-    // reflexive in practice: a module whose summands stay undetermined would be
-    // reported `Unknown` against itself.
+    // reflexive: a module whose summands stay undetermined would be reported
+    // `Unknown` against itself.
     if Module::ptr_eq(m, n) {
         return Ok(IsoOutcome::Isomorphic(identity(m)));
     }
@@ -325,20 +325,17 @@ fn verified(m: &Module, n: &Module, witness: Morphism) -> IsoOutcome {
     let unknown = |reason: &str| IsoOutcome::Unknown {
         reason: reason.to_string(),
     };
-    let mut inverse_maps = Vec::new();
-    for v in 0..m.algebra().quiver().num_vertices() {
-        // is_isomorphic rejects unequal dimension vectors before it builds a
-        // witness, so every vertex block here is square.
-        match witness.map_at(v).inverse(&field) {
-            Some(inv) => inverse_maps.push(inv),
-            None => return unknown("assembled witness is singular at a vertex"),
-        }
-    }
+    // is_isomorphic rejects unequal dimension vectors before it builds a
+    // witness, so every vertex block here is square.
+    let Some(inverse_maps) = (0..m.algebra().quiver().num_vertices())
+        .map(|v| witness.map_at(v).inverse(&field))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return unknown("assembled witness is singular at a vertex");
+    };
     match Morphism::new(n, m, inverse_maps) {
         Ok(inverse) => {
-            let round = witness.then(&inverse).expect("endpoints agree");
-            let round_back = inverse.then(&witness).expect("endpoints agree");
-            if round == identity(m) && round_back == identity(n) {
+            if mutually_inverse(&witness, &inverse) {
                 IsoOutcome::Isomorphic(witness)
             } else {
                 unknown("assembled witness has no two-sided inverse")

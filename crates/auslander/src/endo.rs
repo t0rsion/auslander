@@ -14,7 +14,6 @@
 //! trace form alone is not enough in small characteristic, so the chain is run to
 //! the end rather than trusted after its first step.
 
-use std::fmt;
 use std::sync::OnceLock;
 
 use crate::field::{Fp, PrimeField};
@@ -22,6 +21,7 @@ use crate::hom::{Morphism, express_in_row_basis, identity};
 use crate::homspace::{HomSpace, flat_row, row_times};
 use crate::linalg::{DenseMat, RowReducer};
 use crate::module::Module;
+use crate::profile::{Site, hit, hit_module};
 
 /// Columns at which a coordinate row can be read off `flat`, and the inverse of
 /// the submatrix there when that submatrix is not the identity.
@@ -76,6 +76,12 @@ fn coordinate_columns(flat: &DenseMat, field: &PrimeField) -> (Vec<usize>, Optio
     (pivots, Some(inverse))
 }
 
+fn unit_row(dim: usize, index: usize) -> Vec<Fp> {
+    let mut row = vec![Fp::ZERO; dim];
+    row[index] = Fp::ONE;
+    row
+}
+
 /// The endomorphism algebra of a fixed module, with its `Hom(M, M)` basis,
 /// exact Jacobson radical, and structure constants built on demand.
 #[derive(Clone)]
@@ -114,19 +120,16 @@ pub struct EndoAlgebra {
     fixed: DenseMat,
 }
 
-impl fmt::Debug for EndoAlgebra {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("EndoAlgebra")
-            .field("dim_vector", &self.module.dim_vector())
-            .field("dim", &self.dim())
-            .field("radical_dim", &self.radical_dim())
-            .finish()
-    }
-}
+debug_fields!(EndoAlgebra |this| {
+    "dim_vector" => this.module.dim_vector();
+    "dim" => this.dim();
+    "radical_dim" => this.radical_dim();
+});
 
 impl EndoAlgebra {
     /// Builds `End(m)` from the [`HomSpace`] basis and runs the radical chain.
     pub fn new(m: &Module) -> EndoAlgebra {
+        hit_module(Site::EndoNew, m);
         let mut endo = EndoAlgebra::over(
             m,
             HomSpace::new(m, m).expect("a module shares its own algebra"),
@@ -155,6 +158,7 @@ impl EndoAlgebra {
         include: &Morphism,
         project: &Morphism,
     ) -> EndoAlgebra {
+        hit(Site::EndoFromSummand);
         let mut endo = EndoAlgebra::over(
             s,
             HomSpace::new(s, s).expect("a summand shares its algebra"),
@@ -169,11 +173,8 @@ impl EndoAlgebra {
                 endo.express(&corner)
             })
             .collect();
-        endo.radical = if rows.is_empty() {
-            DenseMat::zero(0, endo.dim())
-        } else {
-            DenseMat::from_rows(&rows).row_space_basis(&endo.field)
-        };
+        endo.radical =
+            DenseMat::from_rows_with_cols(&rows, endo.dim()).row_space_basis(&endo.field);
         endo.analyze_quotient();
         endo
     }
@@ -184,6 +185,7 @@ impl EndoAlgebra {
     // The whole basis is materialized here, unlike elsewhere: `multiply`
     // composes every pair of basis elements, so each one is used `2 dim` times.
     fn over(m: &Module, space: HomSpace) -> EndoAlgebra {
+        hit(Site::EndoOver);
         let field = m.field();
         let (flat, basis) = space.into_parts();
         let (coord_cols, coord_inverse) = coordinate_columns(&flat, &field);
@@ -244,20 +246,10 @@ impl EndoAlgebra {
             reducer.push(self.radical.row(r), &field);
         }
         let complement_cols: Vec<usize> = (0..dim)
-            .filter(|&i| {
-                let mut unit = vec![Fp::ZERO; dim];
-                unit[i] = Fp::ONE;
-                reducer.push(&unit, &field)
-            })
+            .filter(|&i| reducer.push(&unit_row(dim, i), &field))
             .collect();
-        let complement_rows: Vec<Vec<Fp>> = complement_cols
-            .iter()
-            .map(|&i| {
-                let mut unit = vec![Fp::ZERO; dim];
-                unit[i] = Fp::ONE;
-                unit
-            })
-            .collect();
+        let complement_rows: Vec<Vec<Fp>> =
+            complement_cols.iter().map(|&i| unit_row(dim, i)).collect();
         self.complement = DenseMat::from_rows(&complement_rows);
         let q = complement_cols.len();
         let radical_rows = self.radical.rows();
@@ -271,59 +263,53 @@ impl EndoAlgebra {
             let inverse = DenseMat::from_rows(&full)
                 .inverse(&field)
                 .expect("a complement of the radical completes it to a basis");
-            let mut map = DenseMat::zero(dim, q);
-            for r in 0..dim {
-                for c in 0..q {
-                    map.set(r, c, inverse.get(r, radical_rows + c));
-                }
-            }
-            map
+            let rows: Vec<Vec<Fp>> = (0..dim)
+                .map(|r| inverse.row(r)[radical_rows..].to_vec())
+                .collect();
+            DenseMat::from_rows_with_cols(&rows, q)
         };
         // Each complement row is a unit vector, so its products are single
         // structure constants and the full dim² table stays unbuilt.
-        let mut qtable = Vec::with_capacity(q * q);
-        for i in 0..q {
-            for j in 0..q {
-                let product = self.basis[complement_cols[i]]
-                    .then(&self.basis[complement_cols[j]])
-                    .expect("endomorphisms compose");
-                let coords = self.express(&product);
-                qtable.push(self.reduce(&coords));
-            }
-        }
-        self.qtable = qtable;
+        let endo: &EndoAlgebra = &*self;
+        let columns = &complement_cols;
+        self.qtable = (0..q)
+            .flat_map(|i| {
+                (0..q).map(move |j| {
+                    let product = endo.basis[columns[i]]
+                        .then(&endo.basis[columns[j]])
+                        .expect("endomorphisms compose");
+                    endo.reduce(&endo.express(&product))
+                })
+            })
+            .collect();
         self.qone = self.reduce(&self.one);
         self.quotient_commutative =
             (0..q).all(|i| (0..i).all(|j| self.qtable[i * q + j] == self.qtable[j * q + i]));
-        let mut cond_rows = Vec::new();
-        for j in 0..q {
-            for comp in 0..q {
-                let mut row = vec![Fp::ZERO; q];
-                for (i, entry) in row.iter_mut().enumerate() {
-                    *entry = field.sub(self.qtable[i * q + j][comp], self.qtable[j * q + i][comp]);
-                }
-                cond_rows.push(row);
-            }
-        }
+        let qtable = &self.qtable;
+        let cond_rows: Vec<Vec<Fp>> = (0..q)
+            .flat_map(|j| {
+                (0..q).map(move |comp| {
+                    (0..q)
+                        .map(|i| field.sub(qtable[i * q + j][comp], qtable[j * q + i][comp]))
+                        .collect()
+                })
+            })
+            .collect();
         self.center = if q == 0 {
             DenseMat::zero(0, 0)
         } else {
             DenseMat::from_rows(&cond_rows).kernel_basis(&field)
         };
         let c = self.center.rows();
-        let mut frobenius = DenseMat::zero(c, c);
-        for r in 0..c {
-            let zp = self.qpow(self.center.row(r), field.modulus());
-            let mut as_matrix = DenseMat::zero(1, q);
-            for (col, &v) in zp.iter().enumerate() {
-                as_matrix.set(0, col, v);
-            }
-            let in_center = express_in_row_basis(&self.center, &as_matrix, &field);
-            for col in 0..c {
-                frobenius.set(r, col, in_center.get(0, col));
-            }
-        }
-        let mut shifted = frobenius;
+        let frobenius_rows: Vec<Vec<Fp>> = (0..c)
+            .map(|r| {
+                let zp = self.qpow(self.center.row(r), field.modulus());
+                let as_matrix = DenseMat::from_rows(std::slice::from_ref(&zp));
+                let in_center = express_in_row_basis(&self.center, &as_matrix, &field);
+                in_center.row(0).to_vec()
+            })
+            .collect();
+        let mut shifted = DenseMat::from_rows_with_cols(&frobenius_rows, c);
         for i in 0..c {
             shifted.set(i, i, field.sub(shifted.get(i, i), Fp::ONE));
         }
@@ -338,71 +324,29 @@ impl EndoAlgebra {
 
     // Product in the quotient, both factors in quotient coordinates.
     fn qmul(&self, a: &[Fp], b: &[Fp]) -> Vec<Fp> {
-        let q = self.quotient_dim();
-        let mut out = vec![Fp::ZERO; q];
-        for (i, &ai) in a.iter().enumerate() {
-            if ai.is_zero() {
-                continue;
-            }
-            for (j, &bj) in b.iter().enumerate() {
-                if bj.is_zero() {
-                    continue;
-                }
-                let c = self.field.mul(ai, bj);
-                for (k, out_k) in out.iter_mut().enumerate() {
-                    let t = self.field.mul(c, self.qtable[i * q + j][k]);
-                    *out_k = self.field.add(*out_k, t);
-                }
-            }
-        }
-        out
+        coordinate_product(a, b, &self.qtable, self.field)
     }
 
-    fn qpow(&self, a: &[Fp], mut exp: u64) -> Vec<Fp> {
-        let mut base = a.to_vec();
-        let mut acc = self.qone.clone();
-        while exp > 0 {
-            if exp & 1 == 1 {
-                acc = self.qmul(&acc, &base);
-            }
-            base = self.qmul(&base, &base);
-            exp >>= 1;
-        }
-        acc
+    fn qpow(&self, a: &[Fp], exp: u64) -> Vec<Fp> {
+        binary_power!(a.to_vec(), self.qone.clone(), exp, |left, right| self
+            .qmul(left, right))
     }
 
-    /// The module this is the endomorphism algebra of.
-    #[inline]
-    pub fn module(&self) -> &Module {
-        &self.module
-    }
-
-    /// The field every coordinate is over: the field of [`EndoAlgebra::module`].
-    ///
-    /// Coordinates passed to [`EndoAlgebra::morphism`], [`EndoAlgebra::multiply`]
-    /// and [`EndoAlgebra::in_radical`] must be canonical elements of this field;
-    /// [`Fp`] carries no field identity, so the types do not check this.
-    #[inline]
-    pub fn field(&self) -> PrimeField {
-        self.field
-    }
-
-    /// `dim_k End(M)`.
-    #[inline]
-    pub fn dim(&self) -> usize {
-        self.basis.len()
-    }
-
-    /// The basis endomorphisms; coordinates index into this list.
-    #[inline]
-    pub fn basis(&self) -> &[Morphism] {
-        &self.basis
-    }
-
-    /// Coordinates of the identity endomorphism.
-    #[inline]
-    pub fn one(&self) -> &[Fp] {
-        &self.one
+    accessor_methods! {
+        /// The module this is the endomorphism algebra of.
+        pub module() -> &Module = |this| &this.module;
+        /// The field every coordinate is over: the field of [`EndoAlgebra::module`].
+        ///
+        /// Coordinates passed to [`EndoAlgebra::morphism`], [`EndoAlgebra::multiply`]
+        /// and [`EndoAlgebra::in_radical`] must be canonical elements of this field;
+        /// [`Fp`] carries no field identity, so the types do not check this.
+        pub field() -> PrimeField = |this| this.field;
+        /// `dim_k End(M)`.
+        pub dim() -> usize = |this| this.basis.len();
+        /// The basis endomorphisms; coordinates index into this list.
+        pub basis() -> &[Morphism] = |this| &this.basis;
+        /// Coordinates of the identity endomorphism.
+        pub one() -> &[Fp] = |this| &this.one;
     }
 
     /// Coordinates of `f` in the basis, read off its flattened row.
@@ -445,13 +389,7 @@ impl EndoAlgebra {
                 continue;
             }
             for (v, map) in maps.iter_mut().enumerate() {
-                let block = self.basis[k].map_at(v as u32);
-                for r in 0..map.rows() {
-                    for j in 0..map.cols() {
-                        let t = self.field.mul(c, block.get(r, j));
-                        map.set(r, j, self.field.add(map.get(r, j), t));
-                    }
-                }
+                map.add_scaled_assign(self.basis[k].map_at(v as u32), c, &self.field);
             }
         }
         Morphism::new_unchecked(&self.module, &self.module, maps)
@@ -484,45 +422,20 @@ impl EndoAlgebra {
             }
             table
         });
-        let mut out = vec![Fp::ZERO; dim];
-        for (i, &ai) in a.iter().enumerate() {
-            if ai.is_zero() {
-                continue;
-            }
-            for (j, &bj) in b.iter().enumerate() {
-                if bj.is_zero() {
-                    continue;
-                }
-                let c = self.field.mul(ai, bj);
-                for (k, out_k) in out.iter_mut().enumerate() {
-                    let t = self.field.mul(c, table[i * dim + j][k]);
-                    *out_k = self.field.add(*out_k, t);
-                }
-            }
-        }
-        out
+        coordinate_product(a, b, table, self.field)
     }
 
-    /// A basis of the Jacobson radical, one coordinate vector per row, in
-    /// reduced row echelon form.
-    #[inline]
-    pub fn radical_basis(&self) -> &DenseMat {
-        &self.radical
-    }
-
-    /// `dim_k rad End(M)`.
-    #[inline]
-    pub fn radical_dim(&self) -> usize {
-        self.radical.rows()
-    }
-
-    /// `dim_k End(M)/rad End(M)`, the dimension of the semisimple quotient.
-    /// This is the residue degree only when `End(M)` is local, which
-    /// [`EndoAlgebra::is_local`] decides; see
-    /// [`crate::indec::IndecomposableModule::residue_degree`].
-    #[inline]
-    pub fn quotient_dim(&self) -> usize {
-        self.complement.rows()
+    accessor_methods! {
+        /// A basis of the Jacobson radical, one coordinate vector per row, in
+        /// reduced row echelon form.
+        pub radical_basis() -> &DenseMat = |this| &this.radical;
+        /// `dim_k rad End(M)`.
+        pub radical_dim() -> usize = |this| this.radical.rows();
+        /// `dim_k End(M)/rad End(M)`, the dimension of the semisimple quotient.
+        /// This is the residue degree only when `End(M)` is local, which
+        /// [`EndoAlgebra::is_local`] decides; see
+        /// [`crate::indec::IndecomposableModule::residue_degree`].
+        pub quotient_dim() -> usize = |this| this.complement.rows();
     }
 
     /// Whether the element with the given coordinates lies in the radical.
@@ -549,18 +462,13 @@ impl EndoAlgebra {
         v.iter().all(|x| x.is_zero())
     }
 
-    /// Whether the semisimple quotient `End(M)/rad` is commutative.
-    #[inline]
-    pub fn quotient_is_commutative(&self) -> bool {
-        self.quotient_commutative
-    }
-
-    /// The number of Wedderburn factors of `End(M)/rad`: the dimension of the
-    /// fixed space of the Frobenius `x ↦ x^p` on the center of the quotient
-    /// (Berlekamp-style factor counting).
-    #[inline]
-    pub fn semisimple_factor_count(&self) -> usize {
-        self.fixed.rows()
+    accessor_methods! {
+        /// Whether the semisimple quotient `End(M)/rad` is commutative.
+        pub quotient_is_commutative() -> bool = |this| this.quotient_commutative;
+        /// The number of Wedderburn factors of `End(M)/rad`: the dimension of the
+        /// fixed space of the Frobenius `x ↦ x^p` on the center of the quotient
+        /// (Berlekamp-style factor counting).
+        pub semisimple_factor_count() -> usize = |this| this.fixed.rows();
     }
 
     /// Whether `End(M)` is local: the quotient by the radical is a division
@@ -589,10 +497,10 @@ impl EndoAlgebra {
     /// `radical_dim + 1`, so `ceil(log2(radical_dim + 1))` rounds suffice. The
     /// 64 is a defensive stop, not a reachable budget.
     ///
-    /// One budget is genuinely probabilistic: for `p > 4096` the seeded
+    /// One budget is probabilistic: for `p > 4096` the seeded
     /// Cantor-Zassenhaus root search gives up after 64 draws (never observed in
     /// the test suite) and this returns `None`. Callers fall back to Fitting
-    /// splits and, at worst, an honest `Undetermined`.
+    /// splits and, at worst, [`crate::decompose::Certificate::Undetermined`].
     pub(crate) fn split_idempotent(&self, rng: &mut SplitMix64) -> Option<Vec<Fp>> {
         if self.semisimple_factor_count() < 2 {
             return None;
@@ -626,23 +534,12 @@ impl EndoAlgebra {
             }
             projector = next;
         }
-        let mut ebar = vec![Fp::ZERO; q];
-        for &c in projector.iter().rev() {
-            ebar = self.qmul(&ebar, f);
-            for (k, e_k) in ebar.iter_mut().enumerate() {
-                *e_k = field.add(*e_k, field.mul(c, self.qone[k]));
-            }
-        }
+        let ebar = self.qpoly_eval(&projector, f);
         if self.qmul(&ebar, &ebar) != ebar || ebar.iter().all(|c| c.is_zero()) || ebar == self.qone
         {
             return None;
         }
-        let mut e = vec![Fp::ZERO; self.dim()];
-        for (i, &c) in ebar.iter().enumerate() {
-            for (k, e_k) in e.iter_mut().enumerate() {
-                *e_k = field.add(*e_k, field.mul(c, self.complement.get(i, k)));
-            }
-        }
+        let mut e = self.lift_quotient(&ebar);
         for _ in 0..64 {
             let square = self.multiply(&e, &e);
             if square == e {
@@ -691,8 +588,7 @@ impl EndoAlgebra {
     /// Returns `None` when the quotient is a division ring, and may return
     /// `None` after an unlucky streak: every drawn minimal polynomial was a
     /// prime power or not squarefree, or the shifts inside [`coprime_split`]
-    /// never separated the factors. Callers treat that as an honest failure to
-    /// split.
+    /// never separated the factors. Callers treat that as a failure to split.
     pub(crate) fn singular_element(&self, rng: &mut SplitMix64, attempts: u32) -> Option<Vec<Fp>> {
         let field = self.field;
         let p = field.modulus();
@@ -712,13 +608,7 @@ impl EndoAlgebra {
                 continue;
             };
             let value = self.qpoly_eval(&g, &abar);
-            let mut lifted = vec![Fp::ZERO; self.dim()];
-            for (i, &c) in value.iter().enumerate() {
-                for (k, out) in lifted.iter_mut().enumerate() {
-                    *out = field.add(*out, field.mul(c, self.complement.get(i, k)));
-                }
-            }
-            return Some(lifted);
+            return Some(self.lift_quotient(&value));
         }
         None
     }
@@ -736,6 +626,10 @@ impl EndoAlgebra {
         acc
     }
 
+    fn lift_quotient(&self, value: &[Fp]) -> Vec<Fp> {
+        row_times(value, &self.complement, &self.field)
+    }
+
     // The minimal polynomial (ascending, monic) of a quotient element: the
     // first power dependent on the earlier ones.
     fn quotient_min_poly(&self, f: &[Fp]) -> Vec<Fp> {
@@ -751,6 +645,21 @@ impl EndoAlgebra {
             powers.push(next);
         }
     }
+}
+
+/// Multiplies two coordinate rows through square structure constants.
+fn coordinate_product(a: &[Fp], b: &[Fp], table: &[Vec<Fp>], field: PrimeField) -> Vec<Fp> {
+    let dim = a.len();
+    let mut out = vec![Fp::ZERO; dim];
+    for (i, &ai) in a.iter().enumerate().filter(|(_, c)| !c.is_zero()) {
+        for (j, &bj) in b.iter().enumerate().filter(|(_, c)| !c.is_zero()) {
+            let scale = field.mul(ai, bj);
+            for (out, &c) in out.iter_mut().zip(&table[i * dim + j]) {
+                *out = field.add(*out, field.mul(scale, c));
+            }
+        }
+    }
+    out
 }
 
 /// Seeded deterministic PRNG (splitmix64). The only randomness in the crate.
@@ -785,13 +694,21 @@ fn poly_eval(a: &[Fp], x: Fp, field: &PrimeField) -> Fp {
     acc
 }
 
-// Remainder of a modulo monic b (ascending coefficients, b nonempty).
-fn poly_rem(a: &[Fp], b: &[Fp], field: &PrimeField) -> Vec<Fp> {
+// Division by monic b (ascending coefficients, b nonempty).
+fn poly_division(a: &[Fp], b: &[Fp], field: &PrimeField, quotient: bool) -> Vec<Fp> {
     let mut r = a.to_vec();
     let db = b.len() - 1;
+    let mut out = if quotient {
+        vec![Fp::ZERO; a.len() - db]
+    } else {
+        Vec::new()
+    };
     while r.len() > db {
         let lead = *r.last().expect("r is longer than b");
         let shift = r.len() - 1 - db;
+        if quotient {
+            out[shift] = lead;
+        }
         if !lead.is_zero() {
             for (i, &c) in b.iter().enumerate() {
                 let t = field.mul(lead, c);
@@ -800,27 +717,17 @@ fn poly_rem(a: &[Fp], b: &[Fp], field: &PrimeField) -> Vec<Fp> {
         }
         r.pop();
     }
-    poly_trim(r)
+    if quotient { out } else { poly_trim(r) }
+}
+
+// Remainder of a modulo monic b.
+fn poly_rem(a: &[Fp], b: &[Fp], field: &PrimeField) -> Vec<Fp> {
+    poly_division(a, b, field, false)
 }
 
 // Quotient of a by monic b, assuming b divides a exactly.
 fn poly_quotient(a: &[Fp], b: &[Fp], field: &PrimeField) -> Vec<Fp> {
-    let db = b.len() - 1;
-    let mut r = a.to_vec();
-    let mut quot = vec![Fp::ZERO; a.len() - db];
-    while r.len() > db {
-        let lead = *r.last().expect("r is longer than b");
-        let shift = r.len() - 1 - db;
-        quot[shift] = lead;
-        if !lead.is_zero() {
-            for (i, &c) in b.iter().enumerate() {
-                let t = field.mul(lead, c);
-                r[shift + i] = field.sub(r[shift + i], t);
-            }
-        }
-        r.pop();
-    }
-    quot
+    poly_division(a, b, field, true)
 }
 
 // Monic gcd; zero polynomials are empty vectors.
@@ -836,17 +743,13 @@ fn poly_gcd(a: &[Fp], b: &[Fp], field: &PrimeField) -> Vec<Fp> {
     x.iter().map(|&c| field.mul(c, lead_inv)).collect()
 }
 
-fn poly_powmod(base: &[Fp], mut exp: u64, modulus: &[Fp], field: &PrimeField) -> Vec<Fp> {
-    let mut b = poly_rem(base, modulus, field);
-    let mut acc = vec![Fp::ONE];
-    while exp > 0 {
-        if exp & 1 == 1 {
-            acc = poly_rem(&poly_mul(&acc, &b, field), modulus, field);
-        }
-        b = poly_rem(&poly_mul(&b, &b, field), modulus, field);
-        exp >>= 1;
-    }
-    acc
+fn poly_powmod(base: &[Fp], exp: u64, modulus: &[Fp], field: &PrimeField) -> Vec<Fp> {
+    binary_power!(
+        poly_rem(base, modulus, field),
+        vec![Fp::ONE],
+        exp,
+        |left, right| poly_rem(&poly_mul(left, right, field), modulus, field)
+    )
 }
 
 fn poly_derivative(a: &[Fp], field: &PrimeField) -> Vec<Fp> {

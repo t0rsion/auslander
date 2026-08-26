@@ -34,24 +34,25 @@
 //! `D_i = End(N_i) / rad End(N_i)`. With `d_i = dim_{F_p} D_i` the residue
 //! degree of `N_i`, an `F_p` basis of `Hom(X, N_i)` gives `d_i` times too many
 //! copies. Over an algebraically closed field every `d_i` is 1 and the two
-//! counts agree, which is where that assumption hides. The prime fields here
-//! have `d_i > 1`: the Kronecker module `(I_3, C)` over `F_2` for `C` the
-//! companion matrix of `x^3 + x + 1` has `End = F_8` and `d = 3`.
+//! counts agree. That is the only place the algebraically closed hypothesis
+//! enters this construction. The prime fields here have `d_i > 1`: the
+//! Kronecker module `(I_3, C)` over `F_2` for `C` the companion matrix of
+//! `x^3 + x + 1` has `End = F_8` and `d = 3`.
 //!
 //! [`left_approximation`] therefore picks generators over `D_i`, not over
 //! `F_p`. See its docstring for the loop.
 
-use std::fmt;
-
-use crate::decompose::add_morphisms;
+use crate::context::VerificationContext;
+use crate::decompose::{add_morphisms, direct_sum_or_zero};
 use crate::endo::EndoAlgebra;
-use crate::field::{Fp, PrimeField};
+use crate::field::{Fp, PrimeField, unit_vector};
 use crate::hom::{HomError, Morphism, hom, identity, zero_morphism};
-use crate::homspace::{HomSpace, HomSpaceError};
+use crate::homspace::{HomSpace, HomSpaceError, row_times};
 use crate::indec::{IndecError, IndecomposableModule};
 use crate::iso::indecomposable_iso;
 use crate::linalg::{DenseMat, RowReducer};
-use crate::module::{Module, direct_sum};
+use crate::module::Module;
+use crate::profile::{Site, hit};
 
 /// A failed internal cross-check of the approximation layer. Every variant
 /// signals a crate defect: the construction checked a consequence of a theorem
@@ -91,40 +92,14 @@ pub enum ApproxDefect {
     },
 }
 
-impl fmt::Display for ApproxDefect {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::GeneratorGrowth {
-                summand,
-                growth,
-                residue_degree,
-            } => write!(
-                f,
-                "a generator for summand {summand} raised the span by {growth}, not by the \
-                 residue degree {residue_degree}; crate defect"
-            ),
-            Self::FactorizationMissing {
-                summand,
-                basis_index,
-            } => write!(
-                f,
-                "basis map {basis_index} for summand {summand} does not factor through the \
-                 built map; crate defect"
-            ),
-            Self::KernelOutsideRadical {
-                row,
-                kernel_dim,
-                radical_dim,
-            } => write!(
-                f,
-                "row {row} of the {kernel_dim}-dimensional kernel lies outside the \
-                 {radical_dim}-dimensional radical; crate defect"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for ApproxDefect {}
+display_error! { error ApproxDefect {
+    Self::GeneratorGrowth { summand, growth, residue_degree } => "a generator for summand {summand} raised the span by {growth}, not by the \
+                                                                  residue degree {residue_degree}; crate defect";
+    Self::FactorizationMissing { summand, basis_index } => "basis map {basis_index} for summand {summand} does not factor through the \
+                                                            built map; crate defect";
+    Self::KernelOutsideRadical { row, kernel_dim, radical_dim } => "row {row} of the {kernel_dim}-dimensional kernel lies outside the \
+                                                                   {radical_dim}-dimensional radical; crate defect";
+} }
 
 /// Rejected approximation input, or a failed internal cross-check.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,41 +128,21 @@ pub enum ApproxError {
     Defect(ApproxDefect),
 }
 
-impl fmt::Display for ApproxError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::SummandNotIndecomposable { index, reason } => {
-                write!(f, "add-generator {index} is not indecomposable: {reason}")
-            }
-            Self::RepeatedSummand { first, second } => write!(
-                f,
-                "add-generators {first} and {second} are isomorphic; give one module per class"
-            ),
-            Self::Hom(error) => write!(f, "hom: {error}"),
-            Self::HomSpace(error) => write!(f, "hom space: {error}"),
-            Self::Defect(defect) => write!(f, "{defect}"),
-        }
-    }
-}
+display_error! { ApproxError {
+    Self::SummandNotIndecomposable { index, reason } => "add-generator {index} is not indecomposable: {reason}";
+    Self::RepeatedSummand { first, second } => "add-generators {first} and {second} are isomorphic; give one module per class";
+    Self::Hom(error) => "hom: {error}";
+    Self::HomSpace(error) => "hom space: {error}";
+    Self::Defect(defect) => "{defect}";
+} }
 
-impl std::error::Error for ApproxError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::SummandNotIndecomposable { reason, .. } => Some(reason),
-            Self::Hom(error) => Some(error),
-            Self::HomSpace(error) => Some(error),
-            Self::Defect(defect) => Some(defect),
-            Self::RepeatedSummand { .. } => None,
-        }
-    }
-}
-
-/// The `k`-th unit vector of length `dim`.
-fn unit(dim: usize, k: usize, field: &PrimeField) -> Vec<Fp> {
-    let mut v = vec![Fp::ZERO; dim];
-    v[k] = field.one();
-    v
-}
+error_source!(ApproxError {
+    Self::SummandNotIndecomposable { reason, .. } => Some(reason),
+    Self::Hom(error) => Some(error),
+    Self::HomSpace(error) => Some(error),
+    Self::Defect(defect) => Some(defect),
+    Self::RepeatedSummand { .. } => None,
+});
 
 /// Certifies each add-generator indecomposable and the list free of repeats.
 fn certify(n_summands: &[Module]) -> Result<Vec<IndecomposableModule>, ApproxError> {
@@ -212,62 +167,45 @@ fn certify(n_summands: &[Module]) -> Result<Vec<IndecomposableModule>, ApproxErr
     Ok(certified)
 }
 
-/// The direct sum of the slot modules with its inclusions and projections. An
-/// empty slot list gives the zero module and no maps, which [`direct_sum`]
-/// itself rejects.
-fn slot_sum(
-    algebra_source: &Module,
-    summands: &[IndecomposableModule],
-    slots: &[usize],
-) -> (Module, Vec<Morphism>, Vec<Morphism>) {
-    if slots.is_empty() {
-        return (
-            Module::zero(algebra_source.algebra()),
-            Vec::new(),
-            Vec::new(),
-        );
-    }
-    let parts: Vec<&Module> = slots.iter().map(|&i| summands[i].module()).collect();
-    direct_sum(&parts)
-}
-
 /// The RREF basis of `{y : sum_t y_t rows[t] = 0}`, one vector per row.
 ///
 /// The caller passes `rows[t]` as the image of the `t`-th basis endomorphism
-/// of `End(B)`, so a result row is a `K_f` element in `End(B)` coordinates. `width` sizes the coordinate system of the images,
-/// which `DenseMat::from_rows` cannot recover when it is zero.
+/// of `End(B)`, so a result row is a `K_f` element in `End(B)` coordinates.
+/// `width` sizes the coordinate system of the images, and is required when
+/// that system is empty.
 fn row_relations(rows: &[Vec<Fp>], width: usize, field: &PrimeField) -> DenseMat {
-    if rows.is_empty() {
-        return DenseMat::zero(0, 0);
-    }
-    let stacked = if width == 0 {
-        DenseMat::zero(rows.len(), 0)
-    } else {
-        DenseMat::from_rows(rows)
-    };
-    stacked
+    DenseMat::from_rows_with_cols(rows, width)
         .transpose()
         .into_kernel_basis(field)
         .into_row_space_basis(field)
 }
 
-/// Coordinates placing each row of `kernel` inside `rad End(B)`, or the index
-/// of the first row that lies outside.
-///
-/// One [`DenseMat::solve_many`] serves every row. Only the failure path needs
-/// the index, so it alone repeats the solve row by row.
-fn radical_coordinates(endo: &EndoAlgebra, kernel: &DenseMat) -> Result<Vec<Vec<Fp>>, usize> {
-    let field = endo.field();
-    if kernel.rows() == 0 {
-        return Ok(Vec::new());
-    }
-    let radical = endo.radical_basis().transpose();
-    let Some(x) = radical.solve_many(&kernel.transpose(), &field) else {
-        return Err((0..kernel.rows())
-            .position(|r| radical.solve(kernel.row(r), &field).is_none())
+/// Solves many right-hand sides and reports the first one outside the image.
+fn solve_many_or_index(
+    system: &DenseMat,
+    rhs: &DenseMat,
+    field: &PrimeField,
+    row: impl Fn(usize) -> Vec<Fp>,
+) -> Result<Vec<Vec<Fp>>, usize> {
+    let Some(x) = system.solve_many(rhs, field) else {
+        return Err((0..rhs.cols())
+            .position(|index| system.solve(&row(index), field).is_none())
             .expect("solve_many rejects only when some row lies outside"));
     };
     Ok(columns_of(&x))
+}
+
+/// Coordinates placing each row of `kernel` inside `rad End(B)`, or the index
+/// of the first row that lies outside.
+///
+/// One [`DenseMat::solve_many`] covers every row. The failure path alone
+/// repeats the solve to recover the first failing index.
+fn radical_coordinates(endo: &EndoAlgebra, kernel: &DenseMat) -> Result<Vec<Vec<Fp>>, usize> {
+    let field = endo.field();
+    let radical = endo.radical_basis().transpose();
+    solve_many_or_index(&radical, &kernel.transpose(), &field, |r| {
+        kernel.row(r).to_vec()
+    })
 }
 
 /// The columns of `x`, one vector per column. [`DenseMat::solve_many`] puts
@@ -282,38 +220,20 @@ fn columns_of(x: &DenseMat) -> Vec<Vec<Fp>> {
 /// index of the first unit that lies outside the column space.
 ///
 /// The unit vectors are the identity matrix, so one [`DenseMat::solve_many`]
-/// replaces one `solve` per unit. Only the failure path needs the index, so it
-/// alone repeats the solve unit by unit.
+/// replaces one `solve` per unit. The failure path alone repeats the solve
+/// to recover the first failing index.
 fn unit_factorizations(system: &DenseMat, field: &PrimeField) -> Result<Vec<Vec<Fp>>, usize> {
     let dim = system.rows();
-    if dim == 0 {
-        return Ok(Vec::new());
-    }
-    let Some(x) = system.solve_many(&DenseMat::identity(dim), field) else {
-        return Err((0..dim)
-            .position(|j| system.solve(&unit(dim, j, field), field).is_none())
-            .expect("solve_many rejects only when some unit lies outside"));
-    };
-    Ok(columns_of(&x))
+    solve_many_or_index(system, &DenseMat::identity(dim), field, |j| {
+        unit_vector(dim, j)
+    })
 }
 
 /// Whether `coords` against the radical basis reproduces `row`.
 fn radical_combination_matches(endo: &EndoAlgebra, coords: &[Fp], row: &[Fp]) -> bool {
-    let field = endo.field();
     let radical = endo.radical_basis();
-    if coords.len() != radical.rows() || row.len() != endo.dim() {
-        return false;
-    }
-    for (c, &want) in row.iter().enumerate() {
-        let mut acc = Fp::ZERO;
-        for (t, &x) in coords.iter().enumerate() {
-            acc = field.add(acc, field.mul(x, radical.get(t, c)));
-        }
-        if acc != want {
-            return false;
-        }
-    }
-    true
+    verify_guard!(coords.len() == radical.rows() && row.len() == endo.dim());
+    row_times(coords, radical, &endo.field()) == row
 }
 
 /// Whether the stored maps decompose `total` as the sum of the slot modules.
@@ -324,25 +244,16 @@ fn decomposition_holds(
     inclusions: &[Morphism],
     projections: &[Morphism],
 ) -> bool {
-    if inclusions.len() != slots.len() || projections.len() != slots.len() {
-        return false;
-    }
-    let mut sum = match zero_morphism(total, total) {
-        Ok(z) => z,
-        Err(_) => return false,
-    };
+    verify_guard!(inclusions.len() == slots.len() && projections.len() == slots.len());
+    let_or_false!(Ok(mut sum) = zero_morphism(total, total));
     for (c, &i) in slots.iter().enumerate() {
         let part = summands[i].module();
-        if !inclusions[c].source().ptr_eq(part) || !inclusions[c].target().ptr_eq(total) {
-            return false;
-        }
-        if !projections[c].source().ptr_eq(total) || !projections[c].target().ptr_eq(part) {
-            return false;
-        }
+        verify_guard!(inclusions[c].source().ptr_eq(part) && inclusions[c].target().ptr_eq(total));
+        verify_guard!(
+            projections[c].source().ptr_eq(total) && projections[c].target().ptr_eq(part)
+        );
         for (d, incl) in inclusions.iter().enumerate() {
-            let Ok(composite) = incl.then(&projections[c]) else {
-                return false;
-            };
+            let_or_false!(Ok(composite) = incl.then(&projections[c]));
             if c == d {
                 if composite != identity(part) {
                     return false;
@@ -351,9 +262,7 @@ fn decomposition_holds(
                 return false;
             }
         }
-        let Ok(idempotent) = projections[c].then(&inclusions[c]) else {
-            return false;
-        };
+        let_or_false!(Ok(idempotent) = projections[c].then(&inclusions[c]));
         sum = add_morphisms(&sum, &idempotent);
     }
     sum == identity(total)
@@ -362,10 +271,10 @@ fn decomposition_holds(
 /// A left `add(N)`-approximation `f: X -> B` that is left minimal, with the
 /// data that proves both properties.
 ///
-/// Fields are private and the only public constructor is
-/// [`left_approximation`], so every value carries checked factorization
-/// coordinates and a checked radical containment. [`MinimalLeftApproximation::verify`]
-/// recomputes all of it from the stored maps.
+/// The only public constructor is [`left_approximation`], so every value
+/// carries checked factorization coordinates and a checked radical
+/// containment. [`MinimalLeftApproximation::verify`] recomputes all of it
+/// from the stored maps.
 #[derive(Debug)]
 pub struct MinimalLeftApproximation {
     // f: X -> B. The endpoints are `map.source()` and `map.target()`.
@@ -385,136 +294,80 @@ pub struct MinimalLeftApproximation {
 }
 
 impl MinimalLeftApproximation {
-    /// The approximation `f: X -> B`.
-    #[inline]
-    pub fn map(&self) -> &Morphism {
-        &self.map
+    accessor_methods! {
+        /// The approximation `f: X -> B`.
+        pub map() -> &Morphism = |this| &this.map;
+        /// The certified add-generators `N_1, ..., N_k`, in the given order.
+        pub summands() -> &[IndecomposableModule] = |this| &this.summands;
+        /// The slot list: `B` is the direct sum of `summands()[slots()[c]]`.
+        pub slots() -> &[usize] = |this| &this.slots;
+        /// The block inclusions `N_{slots[c]} -> B`, in slot order.
+        pub inclusions() -> &[Morphism] = |this| &this.inclusions;
+        /// The block projections `B -> N_{slots[c]}`, in slot order.
+        pub projections() -> &[Morphism] = |this| &this.projections;
     }
 
-    /// The certified add-generators `N_1, ..., N_k`, in the given order.
-    #[inline]
-    pub fn summands(&self) -> &[IndecomposableModule] {
-        &self.summands
+    accessor_methods! {
+        /// How many copies of add-generator `summand` occur in `B`.
+        pub multiplicity(summand: usize) -> usize = |this| this.slots.iter().filter(|&&i| i == summand).count();
+        /// Coordinates in `Hom(B, N_i)` of an `h` with `f.then(h)` equal to basis
+        /// map `basis_index` of `Hom(X, N_i)`, for `i` equal to `summand`.
+        ///
+        /// # Panics
+        /// Panics if either index is out of range.
+        pub factorization(summand: usize, basis_index: usize) -> &[Fp] = |this| &this.factorizations[summand][basis_index];
+        /// The RREF basis of `K_f = ker(End(B) -> Hom(X, B))` in `End(B)`
+        /// coordinates, one vector per row.
+        pub kernel_basis() -> &DenseMat = |this| &this.kernel;
+        /// Coordinates of kernel basis row `row` over the RREF basis of
+        /// `rad End(B)`.
+        ///
+        /// # Panics
+        /// Panics if `row` is out of range.
+        pub radical_coordinates(row: usize) -> &[Fp] = |this| &this.radical[row];
     }
 
-    /// The slot list: `B` is the direct sum of `summands()[slots()[c]]`.
-    #[inline]
-    pub fn slots(&self) -> &[usize] {
-        &self.slots
-    }
-
-    /// The block inclusions `N_{slots[c]} -> B`, in slot order.
-    #[inline]
-    pub fn inclusions(&self) -> &[Morphism] {
-        &self.inclusions
-    }
-
-    /// The block projections `B -> N_{slots[c]}`, in slot order.
-    #[inline]
-    pub fn projections(&self) -> &[Morphism] {
-        &self.projections
-    }
-
-    /// How many copies of add-generator `summand` occur in `B`.
-    pub fn multiplicity(&self, summand: usize) -> usize {
-        self.slots.iter().filter(|&&i| i == summand).count()
-    }
-
-    /// Coordinates in `Hom(B, N_i)` of an `h` with `f.then(h)` equal to basis
-    /// map `basis_index` of `Hom(X, N_i)`, for `i` equal to `summand`.
-    ///
-    /// # Panics
-    /// Panics if either index is out of range.
-    pub fn factorization(&self, summand: usize, basis_index: usize) -> &[Fp] {
-        &self.factorizations[summand][basis_index]
-    }
-
-    /// The RREF basis of `K_f = ker(End(B) -> Hom(X, B))` in `End(B)`
-    /// coordinates, one vector per row.
-    #[inline]
-    pub fn kernel_basis(&self) -> &DenseMat {
-        &self.kernel
-    }
-
-    /// Coordinates of kernel basis row `row` over the RREF basis of
-    /// `rad End(B)`.
-    ///
-    /// # Panics
-    /// Panics if `row` is out of range.
-    pub fn radical_coordinates(&self, row: usize) -> &[Fp] {
-        &self.radical[row]
-    }
-
-    /// Recomputes every stored claim from the stored maps and reports whether
-    /// all of it holds.
-    ///
-    /// The checks: the stored inclusions and projections decompose `B` into the
-    /// slot modules; `Hom(X, N_i)` and `Hom(B, N_i)` rebuild and every stored
-    /// factorization reproduces its basis map under `f.then(h)`; `End(B)`
-    /// rebuilds and its recomputed `K_f` equals the stored RREF basis; each
-    /// stored radical coordinate vector reproduces its kernel row against
-    /// `rad End(B)`. Nothing is replayed from the build.
-    pub fn verify(&self) -> bool {
+    verify_methods!(pub(crate), { hit(Site::LeftApproximationVerify); },
+        /// Recomputes every stored claim from the stored maps.
+        ///
+        /// The stored inclusions and projections must decompose `B` into the
+        /// slot modules. `Hom(X, N_i)` and `Hom(B, N_i)` rebuild, and every
+        /// stored factorization must reproduce its basis map under
+        /// `f.then(h)`. `End(B)` rebuilds, and its recomputed `K_f` must equal
+        /// the stored RREF basis. Each stored radical coordinate vector must
+        /// reproduce its kernel row against `rad End(B)`. Nothing is replayed
+        /// from the build.
+        |self, context| {
         let x = self.map.source();
         let b = self.map.target();
-        if self.factorizations.len() != self.summands.len() {
-            return false;
-        }
-        if self.slots.iter().any(|&i| i >= self.summands.len()) {
-            return false;
-        }
-        if !decomposition_holds(
+        verify_guard!(self.factorizations.len() == self.summands.len());
+        verify_guard!(self.slots.iter().all(|&i| i < self.summands.len()));
+        verify_guard!(decomposition_holds(
             b,
             &self.summands,
             &self.slots,
             &self.inclusions,
             &self.projections,
-        ) {
-            return false;
-        }
+        ));
         for (i, n) in self.summands.iter().enumerate() {
-            let (Ok(target_space), Ok(source_space)) =
-                (HomSpace::new(x, n.module()), HomSpace::new(b, n.module()))
-            else {
-                return false;
-            };
-            if self.factorizations[i].len() != target_space.dim() {
-                return false;
-            }
+            let_or_false!((Ok(target_space), Ok(source_space)) =
+                (HomSpace::new(x, n.module()), HomSpace::new(b, n.module())));
+            verify_guard!(self.factorizations[i].len() == target_space.dim());
             for (j, coords) in self.factorizations[i].iter().enumerate() {
-                if coords.len() != source_space.dim() {
-                    return false;
-                }
-                let Ok(composite) = self.map.then(&source_space.morphism(coords)) else {
-                    return false;
-                };
-                if composite != target_space.basis()[j] {
-                    return false;
-                }
+                verify_guard!(coords.len() == source_space.dim());
+                let_or_false!(Ok(composite) = self.map.then(&source_space.morphism(coords)));
+                verify_guard!(composite == target_space.basis()[j]);
             }
         }
-        let endo = EndoAlgebra::new(b);
-        let Ok(space) = HomSpace::new(x, b) else {
-            return false;
-        };
+        let endo = context.endo_for(b);
+        let_or_false!(Ok(space) = HomSpace::new(x, b));
         let field = x.field();
-        let mut rows = Vec::with_capacity(endo.dim());
-        for e in endo.basis() {
-            let Ok(composite) = self.map.then(e) else {
-                return false;
-            };
-            match space.coords(&composite) {
-                Ok(c) => rows.push(c),
-                Err(_) => return false,
-            }
-        }
+        let_or_false!(Ok(rows) = composition_rows(&self.map, &endo, &space));
         let kernel = row_relations(&rows, space.dim(), &field);
-        if kernel != self.kernel || self.radical.len() != kernel.rows() {
-            return false;
-        }
+        verify_guard!(kernel == self.kernel && self.radical.len() == kernel.rows());
         (0..kernel.rows())
             .all(|r| radical_combination_matches(&endo, &self.radical[r], kernel.row(r)))
-    }
+    });
 }
 
 /// The minimal left `add(N)`-approximation of `x`, with `N` given by its
@@ -545,9 +398,9 @@ impl MinimalLeftApproximation {
 ///
 /// The accepted generators are a minimal generating set of `Hom(x, N)` as a
 /// right `End(N)`-module, by Nakayama, so `Hom(B, N) -> Hom(x, N)` is a
-/// projective cover and `f` is a minimal left approximation. No reduction pass
-/// follows: the constructor checks both properties and reports a defect rather
-/// than repairing the result.
+/// projective cover and `f` is a minimal left approximation. No reduction
+/// pass follows. The constructor checks both properties and reports a defect
+/// rather than repairing the result.
 ///
 /// # Errors
 /// [`ApproxError::SummandNotIndecomposable`] when an add-generator fails the
@@ -558,6 +411,7 @@ pub fn left_approximation(
     x: &Module,
     n_summands: &[Module],
 ) -> Result<MinimalLeftApproximation, ApproxError> {
+    hit(Site::LeftApproximation);
     let summands = certify(n_summands)?;
     let field = x.field();
     let mut spaces = Vec::with_capacity(summands.len());
@@ -597,7 +451,7 @@ pub fn left_approximation(
             // span. The unit is `g` composed with the identity of End(N_i),
             // one of the rows pushed below, so keeping it here leaves the
             // span that `growth` measures unchanged.
-            if !span.push(&unit(width, t, &field), &field) {
+            if !span.push(&unit_vector(width, t), &field) {
                 continue;
             }
             let before = span.rank() - 1;
@@ -618,7 +472,8 @@ pub fn left_approximation(
         }
     }
 
-    let (b, inclusions, projections) = slot_sum(x, &summands, &slots);
+    let (b, inclusions, projections) =
+        direct_sum_or_zero(x.algebra(), slots.iter().map(|&i| summands[i].module()));
     let mut map = zero_morphism(x, &b).map_err(ApproxError::Hom)?;
     for (c, component) in components.iter().enumerate() {
         let block = component
@@ -639,11 +494,7 @@ pub fn left_approximation(
                     .map_err(ApproxError::HomSpace)?,
             );
         }
-        let system = if images.is_empty() {
-            DenseMat::zero(spaces[i].dim(), 0)
-        } else {
-            DenseMat::from_rows(&images).transpose()
-        };
+        let system = DenseMat::from_rows_with_cols(&images, spaces[i].dim()).transpose();
         factorizations.push(unit_factorizations(&system, &field).map_err(|basis_index| {
             ApproxError::Defect(ApproxDefect::FactorizationMissing {
                 summand: i,
@@ -654,11 +505,7 @@ pub fn left_approximation(
 
     let endo = EndoAlgebra::new(&b);
     let space = HomSpace::new(x, &b).map_err(ApproxError::Hom)?;
-    let mut rows = Vec::with_capacity(endo.dim());
-    for e in endo.basis() {
-        let composite = map.then(e).expect("f composes with an endomorphism of B");
-        rows.push(space.coords(&composite).map_err(ApproxError::HomSpace)?);
-    }
+    let rows = composition_rows(&map, &endo, &space)?;
     let kernel = row_relations(&rows, space.dim(), &field);
     let radical = radical_coordinates(&endo, &kernel).map_err(|row| {
         ApproxError::Defect(ApproxDefect::KernelOutsideRadical {
@@ -690,6 +537,17 @@ fn compose_into(
     space.coords(&composite).map_err(ApproxError::HomSpace)
 }
 
+fn composition_rows(
+    map: &Morphism,
+    endo: &EndoAlgebra,
+    space: &HomSpace,
+) -> Result<Vec<Vec<Fp>>, ApproxError> {
+    endo.basis()
+        .iter()
+        .map(|e| compose_into(space, map, e))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -697,8 +555,20 @@ mod tests {
     use crate::dynkin::{DynkinType, dynkin_quiver};
     use crate::field::PrimeField;
     use crate::hom::kernel;
+    use crate::module::direct_sum;
     use crate::quiver::Quiver;
     use std::sync::Arc;
+
+    fn slot_sum(
+        source: &Module,
+        summands: &[IndecomposableModule],
+        slots: &[usize],
+    ) -> (Module, Vec<Morphism>, Vec<Morphism>) {
+        direct_sum_or_zero(
+            source.algebra(),
+            slots.iter().map(|&i| summands[i].module()),
+        )
+    }
 
     fn f2() -> PrimeField {
         PrimeField::new(2).unwrap()
@@ -756,7 +626,7 @@ mod tests {
     }
 
     // The approximation property, re-solved from scratch rather than read off
-    // the witness: every basis map of Hom(X, N_i) is f.then(h) for some h.
+    // the witness. Every basis map of Hom(X, N_i) is f.then(h) for some h.
     fn left_property_holds(a: &MinimalLeftApproximation) -> bool {
         let x = a.map().source();
         let b = a.map().target();
@@ -1030,13 +900,13 @@ mod tests {
         assert!(left_property_holds(&left));
     }
 
-    // The teeth of the minimality check. Take the genuine minimal left
-    // approximation f: X -> B and pad it: B~ = B (+) N_k with f~ = f followed
-    // by the inclusion of B, so the component into the extra copy is zero. f~ is
-    // still a left approximation, since every map that factors through f factors
-    // through f~. It is not minimal: the projection-inclusion idempotent of the
-    // extra copy kills f~, and an idempotent outside the radical proves
-    // K_{f~} leaves rad End(B~).
+    // Take the genuine minimal left approximation f: X -> B and pad it:
+    // B~ = B (+) N_k with f~ = f followed by the inclusion of B, so the
+    // component into the extra copy is zero. f~ is still a left approximation,
+    // since every map that factors through f factors through f~. It is not
+    // minimal: the projection-inclusion idempotent of the extra copy kills
+    // f~, and an idempotent outside the radical proves K_{f~} leaves
+    // rad End(B~).
     #[test]
     fn a_padded_approximation_is_rejected_by_the_minimality_check() {
         let mut cases = 0;
@@ -1148,7 +1018,7 @@ mod tests {
         }
     }
 
-    // The same rejection through the public witness: a hand-built
+    // The same rejection through the public witness. A hand-built
     // MinimalLeftApproximation carrying the padded map fails verify(), because
     // verify() recomputes K_f and rechecks the radical containment.
     #[test]

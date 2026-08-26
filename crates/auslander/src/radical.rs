@@ -1,28 +1,15 @@
-//! Radical, top, socle, and Loewy series of right modules.
+//! Radical, top, socle, and Loewy series of modules.
 //!
-//! The formulas come out of the row-vector convention (see [`crate::module`]).
-//! The part of `rad M = M·J` at `v` is the sum over arrows `a: u → v` of the row
-//! spaces of `M(a)`, because the row action `x ↦ x M(a)` lands at the arrow's
-//! target. The part of `soc M` at `v` is
-//! `{x ∈ M_v : x M(a) = 0 for every arrow a out of v}`, because every nontrivial
-//! path starts with an arrow leaving its source vertex.
+//! The part of `rad M = M·J` at `v` is the sum over arrows `a: u → v` of the
+//! row spaces of `M(a)`: the action `x ↦ x M(a)` lands at the arrow's target.
+//! The part of `soc M` at `v` is
+//! `{x ∈ M_v : x M(a) = 0 for every arrow a out of v}`: every nontrivial path
+//! starts with an arrow leaving its source vertex.
 
 use crate::field::Fp;
 use crate::hom::{Morphism, quotient_with_projection, submodule_with_inclusion};
 use crate::linalg::DenseMat;
 use crate::module::Module;
-
-/// Rows stacked into a matrix with an explicit column count (so zero rows keep the
-/// right width).
-fn stacked(rows: &[Vec<Fp>], cols: usize) -> DenseMat {
-    let mut out = DenseMat::zero(rows.len(), cols);
-    for (r, row) in rows.iter().enumerate() {
-        for (c, &v) in row.iter().enumerate() {
-            out.set(r, c, v);
-        }
-    }
-    out
-}
 
 fn radical_bases(m: &Module) -> Vec<DenseMat> {
     let field = m.field();
@@ -36,7 +23,7 @@ fn radical_bases(m: &Module) -> Vec<DenseMat> {
                     rows.push(map.row(r).to_vec());
                 }
             }
-            stacked(&rows, m.dim_at(v)).into_row_space_basis(&field)
+            DenseMat::from_rows_with_cols(&rows, m.dim_at(v)).into_row_space_basis(&field)
         })
         .collect()
 }
@@ -77,7 +64,7 @@ fn joint_kernel_bases(m: &Module, k: usize) -> Vec<DenseMat> {
                     }
                 }
             }
-            stacked(&rows, m.dim_at(v)).into_kernel_basis(&field)
+            DenseMat::from_rows_with_cols(&rows, m.dim_at(v)).into_kernel_basis(&field)
         })
         .collect()
 }
@@ -107,7 +94,7 @@ pub fn radical_series(m: &Module) -> Vec<Module> {
     series
 }
 
-/// The ascending chain `0 = soc⁰ M ⊆ soc M ⊆ soc² M ⊆ …`, ending with `M` itself
+/// The ascending chain `0 = soc⁰ M ⊆ soc M ⊆ soc² M ⊆ …`, ending with `M`
 /// (each entry as an abstract module, not embedded in `m`).
 pub fn socle_series(m: &Module) -> Vec<Module> {
     // soc^k M = {x : x J^k = 0}. At k = nilpotency_degree, J^k = 0 and the

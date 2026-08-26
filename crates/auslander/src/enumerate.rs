@@ -1,14 +1,13 @@
 //! Indecomposable enumeration for Nakayama algebras.
 //!
-//! An algebra here is Nakayama exactly when every vertex of its quiver has at
-//! most one incoming and at most one outgoing arrow (a linear or cyclic Kupisch
-//! series). The classification of these algebras makes the list below complete:
-//! every indecomposable is uniserial, and the uniserials are precisely the
-//! quotients `P_i / rad^l P_i` for `1 ≤ l ≤ c_i`, where `c_i = dim_k P_i` is the
-//! Kupisch entry. Distinct pairs `(i, l)` give non-isomorphic modules, so the
-//! count is `Σ_i c_i = dim_k A`.
+//! A bound quiver algebra is Nakayama exactly when every vertex of its quiver
+//! has at most one incoming and at most one outgoing arrow (a linear or cyclic
+//! Kupisch series). The classification of these algebras makes the list below
+//! complete: every indecomposable is uniserial, and the uniserials are
+//! precisely the quotients `P_i / rad^l P_i` for `1 ≤ l ≤ c_i`, where
+//! `c_i = dim_k P_i` is the Kupisch entry. Distinct pairs `(i, l)` give
+//! non-isomorphic modules, so the count is `Σ_i c_i = dim_k A`.
 
-use std::fmt;
 use std::sync::Arc;
 
 use crate::algebra::Algebra;
@@ -30,23 +29,9 @@ pub enum EnumerateError {
     },
 }
 
-impl fmt::Display for EnumerateError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotNakayama {
-                vertex,
-                incoming,
-                outgoing,
-            } => write!(
-                f,
-                "vertex {vertex} has {incoming} incoming and {outgoing} outgoing arrows; \
-                 a Nakayama quiver allows at most one of each"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for EnumerateError {}
+display_error! { error EnumerateError {
+    Self::NotNakayama { vertex, incoming, outgoing } => "vertex {vertex} has {incoming} incoming and {outgoing} outgoing arrows; a Nakayama quiver allows at most one of each";
+} }
 
 /// Every indecomposable right module of a Nakayama algebra: `P_i / rad^l P_i` for
 /// `1 ≤ l ≤ c_i`, ordered by vertex and then by increasing length `l`.

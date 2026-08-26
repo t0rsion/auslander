@@ -1,14 +1,11 @@
 //! Quivers and path words.
 //!
-//! Convention, fixed crate-wide: paths compose left to right. The word `a·b`
-//! means "first `a`, then `b`" and requires `target(a) == source(b)`. A
-//! representation assigns to each arrow a `d_source × d_target` matrix acting
-//! on row vectors, so `M(a·b) = M(a)·M(b)`.
+//! An arrow word is a path when consecutive arrows satisfy
+//! `target(a) == source(b)`.
 
-use std::fmt;
-
-/// Identifies an arrow by its position in the list passed to [`Quiver::new`];
-/// stable for the lifetime of the quiver.
+/// An arrow id: the position of the arrow in the list passed to [`Quiver::new`].
+///
+/// Stable for the lifetime of the quiver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ArrowId(pub u32);
 
@@ -45,45 +42,18 @@ pub enum QuiverError {
     },
 }
 
-impl fmt::Display for QuiverError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EndpointOutOfRange {
-                arrow,
-                vertex,
-                num_vertices,
-            } => write!(
-                f,
-                "arrow {arrow} has endpoint {vertex} outside 0..{num_vertices}"
-            ),
-            Self::VertexOutOfRange {
-                vertex,
-                num_vertices,
-            } => write!(f, "vertex {vertex} outside 0..{num_vertices}"),
-            Self::ArrowOutOfRange { arrow, num_arrows } => {
-                write!(f, "arrow id {} outside 0..{num_arrows}", arrow.0)
-            }
-            Self::EmptyWord => f.write_str("path word needs at least one arrow"),
-            Self::NotComposable { position } => write!(
-                f,
-                "arrows at positions {position} and {} do not compose left to right",
-                position + 1
-            ),
-            Self::EndpointsDisagree { stored, computed } => write!(
-                f,
-                "word stores endpoints {} -> {} but its arrows run {} -> {} in this quiver",
-                stored.0, stored.1, computed.0, computed.1
-            ),
-        }
-    }
-}
-
-impl std::error::Error for QuiverError {}
+display_error! { error QuiverError {
+    Self::EndpointOutOfRange { arrow, vertex, num_vertices } => "arrow {arrow} has endpoint {vertex} outside 0..{num_vertices}";
+    Self::VertexOutOfRange { vertex, num_vertices } => "vertex {vertex} outside 0..{num_vertices}";
+    Self::ArrowOutOfRange { arrow, num_arrows } => "arrow id {} outside 0..{num_arrows}", arrow.0;
+    Self::EmptyWord => "path word needs at least one arrow";
+    Self::NotComposable { position } => "arrows at positions {position} and {} do not compose left to right", position + 1;
+    Self::EndpointsDisagree { stored, computed } => "word stores endpoints {} -> {} but its arrows run {} -> {} in this quiver", stored.0, stored.1, computed.0, computed.1;
+} }
 
 /// A finite quiver: vertices `0..num_vertices` and a list of arrows between them.
 ///
-/// Paths compose left to right: `a·b` means "first `a`, then `b`" and requires
-/// `target(a) == source(b)`.
+/// Consecutive arrows of a path must satisfy `target(a) == source(b)`.
 ///
 /// ```
 /// use auslander::quiver::{ArrowId, Quiver};
@@ -128,51 +98,26 @@ impl Quiver {
         })
     }
 
-    /// Number of vertices; the vertices are `0..num_vertices`.
-    #[inline]
-    pub fn num_vertices(&self) -> u32 {
-        self.num_vertices
-    }
-
-    /// Number of arrows; the arrow ids are `0..num_arrows`.
-    #[inline]
-    pub fn num_arrows(&self) -> usize {
-        self.arrows.len()
-    }
-
-    /// All arrows as `(source, target)` pairs, indexed by [`ArrowId::index`].
-    #[inline]
-    pub fn arrows(&self) -> &[(u32, u32)] {
-        &self.arrows
-    }
-
-    /// Source vertex of `a`. Panics if `a` is not an arrow of this quiver.
-    #[inline]
-    pub fn source(&self, a: ArrowId) -> u32 {
-        self.arrows[a.index()].0
-    }
-
-    /// Target vertex of `a`. Panics if `a` is not an arrow of this quiver.
-    #[inline]
-    pub fn target(&self, a: ArrowId) -> u32 {
-        self.arrows[a.index()].1
-    }
-
-    /// Arrows with source `v`, in increasing id order. Panics if `v >= num_vertices`.
-    #[inline]
-    pub fn arrows_from(&self, v: u32) -> &[ArrowId] {
-        &self.arrows_from[v as usize]
-    }
-
-    /// Arrows with target `v`, in increasing id order. Panics if `v >= num_vertices`.
-    #[inline]
-    pub fn arrows_to(&self, v: u32) -> &[ArrowId] {
-        &self.arrows_to[v as usize]
+    accessor_methods! {
+        /// Number of vertices; the vertices are `0..num_vertices`.
+        pub num_vertices() -> u32 = |this| this.num_vertices;
+        /// Number of arrows; the arrow ids are `0..num_arrows`.
+        pub num_arrows() -> usize = |this| this.arrows.len();
+        /// All arrows as `(source, target)` pairs, indexed by [`ArrowId::index`].
+        pub arrows() -> &[(u32, u32)] = |this| &this.arrows;
+        /// Source vertex of `a`. Panics if `a` is not an arrow of this quiver.
+        pub source(a: ArrowId) -> u32 = |this| this.arrows[a.index()].0;
+        /// Target vertex of `a`. Panics if `a` is not an arrow of this quiver.
+        pub target(a: ArrowId) -> u32 = |this| this.arrows[a.index()].1;
+        /// Arrows with source `v`, in increasing id order. Panics if `v >= num_vertices`.
+        pub arrows_from(v: u32) -> &[ArrowId] = |this| &this.arrows_from[v as usize];
+        /// Arrows with target `v`, in increasing id order. Panics if `v >= num_vertices`.
+        pub arrows_to(v: u32) -> &[ArrowId] = |this| &this.arrows_to[v as usize];
     }
 }
 
-/// A path in a quiver: either the trivial path `e_v` at a vertex or a nonempty
-/// composable arrow word, read left to right (see [`Quiver`]).
+/// A path in a quiver: the trivial path `e_v` at a vertex, or a nonempty
+/// composable arrow word.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PathWord {
     source: u32,
@@ -198,19 +143,7 @@ impl PathWord {
         if arrows.is_empty() {
             return Err(QuiverError::EmptyWord);
         }
-        for &a in arrows {
-            if a.index() >= quiver.num_arrows() {
-                return Err(QuiverError::ArrowOutOfRange {
-                    arrow: a,
-                    num_arrows: quiver.num_arrows(),
-                });
-            }
-        }
-        for (position, pair) in arrows.windows(2).enumerate() {
-            if quiver.target(pair[0]) != quiver.source(pair[1]) {
-                return Err(QuiverError::NotComposable { position });
-            }
-        }
+        path_endpoints(quiver, arrows)?;
         Ok(Self::from_arrows_unchecked(quiver, arrows.to_vec()))
     }
 
@@ -233,13 +166,12 @@ impl PathWord {
         }
     }
 
-    /// Checks that this word is a path of `quiver`: every arrow id is in
-    /// range, consecutive arrows compose left to right, and the stored
-    /// endpoints match the arrows' endpoints there. A trivial path must name
-    /// a vertex of `quiver`.
+    /// Checks that this word is a path of `quiver`.
     ///
-    /// A word built over `quiver` always passes. Call this on a word that may
-    /// come from a different quiver.
+    /// Every arrow id must be in range, consecutive arrows must compose, and
+    /// the stored endpoints must match the arrows' endpoints. A trivial path
+    /// must name a vertex of `quiver`. A word built over `quiver` always
+    /// passes. Call this on a word that may come from a different quiver.
     pub fn validate_in(&self, quiver: &Quiver) -> Result<(), QuiverError> {
         if self.arrows.is_empty() {
             if self.source >= quiver.num_vertices() {
@@ -250,23 +182,7 @@ impl PathWord {
             }
             return Ok(());
         }
-        for &a in &self.arrows {
-            if a.index() >= quiver.num_arrows() {
-                return Err(QuiverError::ArrowOutOfRange {
-                    arrow: a,
-                    num_arrows: quiver.num_arrows(),
-                });
-            }
-        }
-        for (position, pair) in self.arrows.windows(2).enumerate() {
-            if quiver.target(pair[0]) != quiver.source(pair[1]) {
-                return Err(QuiverError::NotComposable { position });
-            }
-        }
-        let computed = (
-            quiver.source(self.arrows[0]),
-            quiver.target(self.arrows[self.arrows.len() - 1]),
-        );
+        let computed = path_endpoints(quiver, &self.arrows)?;
         if (self.source, self.target) != computed {
             return Err(QuiverError::EndpointsDisagree {
                 stored: (self.source, self.target),
@@ -276,33 +192,35 @@ impl PathWord {
         Ok(())
     }
 
-    #[inline]
-    pub fn source(&self) -> u32 {
-        self.source
+    accessor_methods! {
+        pub source() -> u32 = |this| this.source;
+        pub target() -> u32 = |this| this.target;
+        /// Arrow word; empty exactly for trivial paths.
+        pub arrows() -> &[ArrowId] = |this| &this.arrows;
+        /// Number of arrows; 0 for trivial paths.
+        #[allow(clippy::len_without_is_empty)]
+        pub len() -> usize = |this| this.arrows.len();
+        pub is_trivial() -> bool = |this| this.arrows.is_empty();
     }
+}
 
-    #[inline]
-    pub fn target(&self) -> u32 {
-        self.target
+fn path_endpoints(quiver: &Quiver, arrows: &[ArrowId]) -> Result<(u32, u32), QuiverError> {
+    if let Some(&arrow) = arrows.iter().find(|a| a.index() >= quiver.num_arrows()) {
+        return Err(QuiverError::ArrowOutOfRange {
+            arrow,
+            num_arrows: quiver.num_arrows(),
+        });
     }
-
-    /// Arrow word; empty exactly for trivial paths.
-    #[inline]
-    pub fn arrows(&self) -> &[ArrowId] {
-        &self.arrows
+    if let Some(position) = arrows
+        .windows(2)
+        .position(|pair| quiver.target(pair[0]) != quiver.source(pair[1]))
+    {
+        return Err(QuiverError::NotComposable { position });
     }
-
-    /// Number of arrows; 0 for trivial paths.
-    #[inline]
-    #[allow(clippy::len_without_is_empty)]
-    pub fn len(&self) -> usize {
-        self.arrows.len()
-    }
-
-    #[inline]
-    pub fn is_trivial(&self) -> bool {
-        self.arrows.is_empty()
-    }
+    Ok((
+        quiver.source(arrows[0]),
+        quiver.target(arrows[arrows.len() - 1]),
+    ))
 }
 
 #[cfg(test)]

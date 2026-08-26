@@ -1,13 +1,12 @@
 //! Wall clock and exact call counts for the workloads the crate is built on.
 //!
 //! The harness is hand written on [`std::time::Instant`]. The crate has one
-//! dependency and no dev-dependency, and a bench framework would be the
-//! largest thing in the tree.
+//! dependency and no dev-dependency; a bench framework would be the largest
+//! thing in the tree.
 //!
 //! Each case is calibrated to about 20 ms of work, then run `trials` times.
-//! The reported figure is the best trial, not the mean: on this box the CPU
-//! throws intermittent machine-check errors, and a slow trial says more about
-//! the machine than about the code.
+//! The reported figure is the best trial, not the mean: a slow trial on this
+//! box is usually a machine-check error, not the code.
 //!
 //! Usage:
 //!
@@ -21,6 +20,11 @@
 //! Flags: `--counts` prints call counts instead of times (needs the
 //! `profiling` feature), `--group <name>` and `--case <substring>` filter,
 //! `--trials <n>` sets the trial count.
+//!
+//! The `distinct` column of a `--counts` run is the number of different
+//! modules the site ran on, by nominal identity. It is recorded at the four
+//! sites that take a module and pay far more than a lock, and is zero
+//! everywhere else, which means no record rather than a measured zero.
 //!
 //! Output is tab separated so a run can be pasted into a table without
 //! retyping a number.
@@ -137,7 +141,7 @@ impl Runner {
         println!("# trials\t{}", self.trials);
         println!("# mode\t{}", if self.counts { "counts" } else { "time" });
         if self.counts {
-            println!("group\tcase\tsite\tcalls");
+            println!("group\tcase\tsite\tcalls\tdistinct");
         } else {
             println!("group\tcase\tns_per_op\treps\ttrials");
         }
@@ -163,15 +167,18 @@ impl Runner {
             profile::reset();
             f();
             let counts = profile::snapshot();
-            let mut ranked: Vec<(&str, u64)> = profile::NAMES
+            let distinct = profile::distinct_snapshot();
+            let mut ranked: Vec<(&str, u64, usize)> = profile::NAMES
                 .iter()
                 .copied()
                 .zip(counts)
-                .filter(|&(_, n)| n > 0)
+                .zip(distinct)
+                .map(|((site, calls), distinct)| (site, calls, distinct))
+                .filter(|&(_, n, _)| n > 0)
                 .collect();
             ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-            for (site, calls) in ranked {
-                println!("{group}\t{name}\t{site}\t{calls}");
+            for (site, calls, distinct) in ranked {
+                println!("{group}\t{name}\t{site}\t{calls}\t{distinct}");
             }
             return;
         }

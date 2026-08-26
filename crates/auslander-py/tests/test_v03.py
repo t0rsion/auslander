@@ -35,8 +35,8 @@ def test_commutative_square_over_f5():
 
 
 def test_monomial_algebra_alias_and_field_free_behavior():
-    # The v0.2 name is an alias of the class, and a monomial algebra keeps its
-    # field-free multi-field behavior: one object serves every prime.
+    # The v0.2 name is an alias of the class. A monomial algebra is field-free:
+    # one object is usable over every prime.
     assert auslander.MonomialAlgebra is auslander.Algebra
     M = auslander.MonomialAlgebra.linear_an(2)
     assert M.field is None
@@ -77,8 +77,8 @@ def test_decompose_p0_s1_s1_with_multiplicities():
 
 def test_tau_over_the_square_matches_the_oracle():
     # QPA oracle, commutative-square f5: tau S_0 = [1,1,1,0],
-    # tau S_1 = [0,0,1,1], tau S_2 = [0,1,0,1]; S_3 is projective, so
-    # tau S_3 = 0, reported as None.
+    # tau S_1 = [0,0,1,1], tau S_2 = [0,1,0,1]. S_3 is projective, so
+    # tau S_3 is the zero module.
     F = auslander.PrimeField(5)
     A = square(F)
     assert A.simple(F, 0).tau().dims == [1, 1, 1, 0]
@@ -98,9 +98,8 @@ def test_projective_resolution_of_s0_over_the_square():
 
 
 def test_homological_surface_over_the_square():
-    # Ext, injectives, and the series work over a general algebra: the oracle
-    # pins Ext^1(S_0, S_1) = 1, Ext^2(S_0, S_3) = 1, id S_3 = 2, and I_3 has
-    # dimension vector [1, 1, 1, 1].
+    # QPA oracle: Ext^1(S_0, S_1) = 1, Ext^2(S_0, S_3) = 1, id S_3 = 2,
+    # and I_3 has dimension vector [1, 1, 1, 1].
     F = auslander.PrimeField(5)
     A = square(F)
     S0 = A.simple(F, 0)
@@ -126,7 +125,6 @@ def test_certificate_round_trip():
     F = auslander.PrimeField(5)
     A = square(F)
     js = A.certificate_json()
-    # A general algebra allows its own field as an explicit argument.
     assert js == A.certificate_json(F)
     B = auslander.Algebra.from_certificate(js)
     assert B.dim == A.dim == 9
@@ -134,7 +132,6 @@ def test_certificate_round_trip():
     assert B.field.p == 5
     # The bytes are canonical, so dumping the reloaded algebra reproduces them.
     assert B.certificate_json() == js
-    # The reloaded algebra is a full runtime algebra.
     assert B.simple(F, 1).tau().dims == [0, 0, 1, 1]
 
 
@@ -148,7 +145,6 @@ def test_tampered_certificate_raises_value_error():
     assert tampered != js
     with pytest.raises(ValueError):
         auslander.Algebra.from_certificate(tampered)
-    # A wrong schema string is rejected too.
     with pytest.raises(ValueError):
         auslander.Algebra.from_certificate(
             js.replace("completion-certificate-v1", "completion-certificate-v2")
@@ -204,7 +200,7 @@ def test_completion_limits_property_on_both_kinds():
         "max_origin_terms": 4096,
         "max_ambiguities": 65_536,
     }
-    # A general-relation algebra reports its stored limits, the defaults here.
+    # A general-relation algebra reports its stored limits.
     A = square(auslander.PrimeField(5))
     assert A.completion_limits == {
         "max_basis": 4096,

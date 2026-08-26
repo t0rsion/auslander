@@ -6,14 +6,15 @@
 //! their reason: the zero module, a verified split with its summand count, or
 //! [`IndecError::Undetermined`] once every splitting route has failed.
 
-use std::fmt;
 use std::sync::Arc;
 
 use crate::algebra::AlgebraBuildError;
+use crate::context::VerificationContext;
 use crate::decompose::{Certificate, decompose};
 use crate::endo::EndoAlgebra;
 use crate::injective::injective_dimension;
 use crate::module::Module;
+use crate::profile::{Site, hit};
 use crate::resolution::{Bounded, projective_dimension};
 
 /// Why a module failed the indecomposability gate.
@@ -31,48 +32,32 @@ pub enum IndecError {
     Undetermined { attempts: u32 },
 }
 
-impl fmt::Display for IndecError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Zero => f.write_str("the zero module is not indecomposable"),
-            Self::Decomposable { summands } => {
-                write!(f, "the module splits into {summands} summands")
-            }
-            Self::Undetermined { attempts } => write!(
-                f,
-                "the endomorphism algebra is not local and {attempts} Fitting split attempts failed"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for IndecError {}
+display_error! { error IndecError {
+    Self::Zero => "the zero module is not indecomposable";
+    Self::Decomposable { summands } => "the module splits into {summands} summands";
+    Self::Undetermined { attempts } => "the endomorphism algebra is not local and {attempts} Fitting split attempts failed";
+} }
 
 /// A module together with the locality proof of its endomorphism algebra.
 ///
-/// Fields are private and construction goes through
-/// [`IndecomposableModule::new`], so a value of this type exists only when
-/// [`EndoAlgebra::is_local`] holds for the stored algebra. That proves the
-/// module indecomposable.
+/// Construction goes through [`IndecomposableModule::new`]. A value exists
+/// only when [`EndoAlgebra::is_local`] holds for the stored algebra, which
+/// proves the module indecomposable.
 ///
-/// Cloning is two reference count bumps: the module is already shared and the
-/// endomorphism algebra sits behind an [`Arc`]. A decomposition can therefore
-/// hand out its certified summands without rebuilding `End`.
+/// Clone is two reference-count bumps: the module is already shared and the
+/// endomorphism algebra sits behind an [`Arc`]. A decomposition can hand out
+/// certified summands without rebuilding `End`.
 #[derive(Clone)]
 pub struct IndecomposableModule {
     module: Module,
     endo: Arc<EndoAlgebra>,
 }
 
-impl fmt::Debug for IndecomposableModule {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("IndecomposableModule")
-            .field("dim_vector", &self.module.dim_vector())
-            .field("endo_dim", &self.endo.dim())
-            .field("radical_dim", &self.endo.radical_dim())
-            .finish()
-    }
-}
+debug_fields!(IndecomposableModule |this| {
+    "dim_vector" => this.module.dim_vector();
+    "endo_dim" => this.endo.dim();
+    "radical_dim" => this.endo.radical_dim();
+});
 
 impl IndecomposableModule {
     /// Certifies `m` indecomposable: builds [`EndoAlgebra`] and requires
@@ -84,7 +69,16 @@ impl IndecomposableModule {
     /// exhausted split search is [`IndecError::Undetermined`] with the
     /// Fitting retry budget from [`Certificate::Undetermined`].
     pub fn new(m: &Module) -> Result<IndecomposableModule, IndecError> {
+        hit(Site::IndecNew);
         IndecomposableModule::from_endo(EndoAlgebra::new(m))
+    }
+
+    pub(crate) fn new_with_context(
+        m: &Module,
+        context: &VerificationContext,
+    ) -> Result<IndecomposableModule, IndecError> {
+        hit(Site::IndecNew);
+        IndecomposableModule::from_endo_with(context.endo_for(m).as_ref().clone(), Some(context))
     }
 
     /// The same gate on an algebra the caller already has:
@@ -94,6 +88,14 @@ impl IndecomposableModule {
     /// one `endo` was built from, so the outcomes match
     /// [`IndecomposableModule::new`] exactly.
     pub fn from_endo(endo: EndoAlgebra) -> Result<IndecomposableModule, IndecError> {
+        Self::from_endo_with(endo, None)
+    }
+
+    fn from_endo_with(
+        endo: EndoAlgebra,
+        context: Option<&VerificationContext>,
+    ) -> Result<IndecomposableModule, IndecError> {
+        hit(Site::IndecFromEndo);
         if endo.module().is_zero() {
             return Err(IndecError::Zero);
         }
@@ -103,7 +105,10 @@ impl IndecomposableModule {
                 endo: Arc::new(endo),
             });
         }
-        let decomposition = decompose(endo.module());
+        let decomposition = match context {
+            Some(context) => context.decompose_for(endo.module()),
+            None => Arc::new(decompose(endo.module())),
+        };
         let summands = decomposition.summands().len();
         if summands >= 2 {
             return Err(IndecError::Decomposable { summands });
@@ -119,38 +124,26 @@ impl IndecomposableModule {
         Err(IndecError::Undetermined { attempts })
     }
 
-    /// The certified module.
-    #[inline]
-    pub fn module(&self) -> &Module {
-        &self.module
-    }
-
-    /// The endomorphism algebra whose locality certifies the module.
-    #[inline]
-    pub fn endo(&self) -> &EndoAlgebra {
-        &self.endo
-    }
-
-    /// The degree `d` of the residue field of the local endomorphism
-    /// algebra: [`EndoAlgebra::quotient_dim`]. The quotient by the radical is
-    /// a finite division ring, so Wedderburn's theorem makes it the field
-    /// `F_{p^d}`. The name is exact only because this type's invariant is
-    /// locality.
-    pub fn residue_degree(&self) -> usize {
-        self.endo.quotient_dim()
-    }
-
-    /// Whether the module is projective: its minimal resolution ends at the
-    /// cover, `projective_dimension(m, 0) == Exact(0)`.
-    pub fn is_projective(&self) -> bool {
-        projective_dimension(&self.module, 0) == Bounded::Exact(0)
-    }
-
-    /// Whether the module is injective: its minimal coresolution ends at the
-    /// envelope, `injective_dimension(m, 0) == Exact(0)`. Errors when
-    /// building the opposite algebra fails, as [`injective_dimension`].
-    pub fn is_injective(&self) -> Result<bool, AlgebraBuildError> {
-        Ok(injective_dimension(&self.module, 0)? == Bounded::Exact(0))
+    accessor_methods! {
+        /// The certified module.
+        pub module() -> &Module = |this| &this.module;
+        /// The endomorphism algebra whose locality certifies the module.
+        pub endo() -> &EndoAlgebra = |this| &this.endo;
+        /// The degree `d` of the residue field of the local endomorphism
+        /// algebra: [`EndoAlgebra::quotient_dim`]. The quotient by the radical is
+        /// a finite division ring, so Wedderburn's theorem makes it the field
+        /// `F_{p^d}`. The name is exact only because this type's invariant is
+        /// locality.
+        pub residue_degree() -> usize = |this| this.endo.quotient_dim();
+        /// Whether the module is projective: its minimal resolution ends at the
+        /// cover, `projective_dimension(m, 0) == Exact(0)`.
+        pub is_projective() -> bool = |this|
+            projective_dimension(&this.module, 0) == Bounded::Exact(0);
+        /// Whether the module is injective: its minimal coresolution ends at the
+        /// envelope, `injective_dimension(m, 0) == Exact(0)`. Errors when
+        /// building the opposite algebra fails, as [`injective_dimension`].
+        pub is_injective() -> Result<bool, AlgebraBuildError> = |this|
+            Ok(injective_dimension(&this.module, 0)? == Bounded::Exact(0));
     }
 }
 

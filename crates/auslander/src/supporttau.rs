@@ -5,17 +5,16 @@
 //! support tau-tilting pair when `Hom(P, M) = 0`, `M` is tau-rigid, and
 //! `|M| + |P| = n`, where `n` is the number of vertices and `|X|` counts
 //! indecomposable summands. [`AlmostCompletePair`] takes the same conditions
-//! with `|M| + |P| = n - 1`; mutation is defined through it.
+//! with `|M| + |P| = n - 1`. Mutation is defined through it.
 //!
-//! The projective part carries no information the module part does not
-//! already fix. Take `M` tau-rigid and write `r = |M|`, `s` for the number of
-//! vertices where `M` is nonzero, and `C` for the remaining vertices. Then a
-//! support tau-tilting pair with module part `M` exists exactly when `r = s`,
-//! and its projective part is forced to be the sum of `P_v` over `C`. An
-//! almost complete pair with module part `M` has `P` equal to `C` when
-//! `s = r + 1`, and to `C` minus one vertex when `s = r`; no other case is
-//! possible. So [`SupportTauTiltingPair`] stores the module part and the
-//! tau-rigidity witness alone, [`AlmostCompletePair`] adds the omitted
+//! The projective part is forced, not searched. Take `M` tau-rigid and write
+//! `r = |M|`, `s` for the number of vertices where `M` is nonzero, and `C` for
+//! the remaining vertices. Then a support tau-tilting pair with module part
+//! `M` exists exactly when `r = s`, and its projective part is the sum of
+//! `P_v` over `C`. An almost complete pair with module part `M` has `P` equal
+//! to `C` when `s = r + 1`, and to `C` minus one vertex when `s = r`. No other
+//! case is possible. So [`SupportTauTiltingPair`] stores the module part and
+//! the tau-rigidity witness alone, [`AlmostCompletePair`] adds the omitted
 //! vertex, and both derive the support on request. The proofs sit on
 //! `support_complement` and on the two `classify_with_cache` constructors.
 //!
@@ -26,18 +25,15 @@
 //!
 //! Tau-rigidity is decided summandwise, through
 //! [`is_tau_rigid_summandwise`] over a [`TauCache`]. `tau` never runs on an
-//! assembled module. That rule is binding and follows from additivity of
-//! `tau` and `Hom`: the summandwise calculation is EXACT, not an
-//! approximation. Additivity says nothing about which part of `tau` dominates
-//! its cost, so no claim about that is made here. Working per summand also
-//! avoids the double-route cross-check decomposing both of its results.
+//! assembled module. Additivity of `tau` and `Hom` makes the summandwise
+//! calculation exact. It says nothing about which part of `tau` dominates
+//! cost, so no claim about that is made here.
 //!
 //! [`enumerate_over_catalog`] lists the pairs of one algebra from the
 //! definition alone, with no mutation theory. Its completeness is the
 //! classification theorem behind an [`IndecomposableCatalog`], so it runs only
 //! over the algebras such a catalog covers.
 
-use std::fmt;
 use std::sync::Arc;
 
 use crate::algebra::Algebra;
@@ -45,20 +41,22 @@ use crate::ar::TauError;
 use crate::arquiver::{CatalogProvenance, IndecomposableCatalog};
 use crate::basic::{
     BasicDecomposition, BasicError, PairFingerprint, ProjectiveSupport, SupportPairIsoOutcome,
-    pair_iso,
+    pair_iso, pairwise_distinct_by,
 };
+use crate::context::VerificationContext;
 use crate::hom::{HomError, hom_dim};
 use crate::module::Module;
+use crate::profile::{Site, hit};
 use crate::taurigid::{
     NonTauRigidWitness, TauCache, TauRigidError, TauRigidModule, TauRigidityOutcome,
-    is_tau_rigid_summandwise,
+    is_tau_rigid_summandwise, is_tau_rigid_summandwise_with_context,
 };
 
 /// Rejected input, a blocked certification, or a failed internal cross-check
 /// of the support tau-tilting layer.
 ///
-/// None of these is a mathematical answer about a pair. A pair that fails a
-/// condition is a [`PairRejection`], never an error.
+/// None of these is an answer about a pair. A pair that fails a condition is
+/// a [`PairRejection`], never an error.
 #[derive(Clone, Debug)]
 pub enum SupportTauError {
     /// The basic layer rejected an input or could not certify a summand.
@@ -84,34 +82,18 @@ pub enum SupportTauError {
     },
 }
 
-impl fmt::Display for SupportTauError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Basic(error) => write!(f, "the basic layer rejected an input: {error}"),
-            Self::TauRigid(error) => write!(f, "tau-rigidity stayed undecided: {error}"),
-            Self::Hom(error) => write!(f, "a Hom space failed: {error}"),
-            Self::SummandIndexCount { indices, summands } => write!(
-                f,
-                "{indices} summand indices for {summands} summands; one index per summand"
-            ),
-            Self::Defect { reason } => write!(f, "internal cross-check failed: {reason}"),
-        }
-    }
-}
+display_error! { error SupportTauError {
+    Self::Basic(error) => "the basic layer rejected an input: {error}";
+    Self::TauRigid(error) => "tau-rigidity stayed undecided: {error}";
+    Self::Hom(error) => "a Hom space failed: {error}";
+    Self::SummandIndexCount { indices, summands } => "{indices} summand indices for {summands} summands; one index per summand";
+    Self::Defect { reason } => "internal cross-check failed: {reason}";
+} }
 
-impl std::error::Error for SupportTauError {}
-
-impl From<BasicError> for SupportTauError {
-    fn from(error: BasicError) -> SupportTauError {
-        SupportTauError::Basic(error)
-    }
-}
-
-impl From<TauRigidError> for SupportTauError {
-    fn from(error: TauRigidError) -> SupportTauError {
-        SupportTauError::TauRigid(error)
-    }
-}
+from_variants!(SupportTauError {
+    BasicError => Basic,
+    TauRigidError => TauRigid,
+});
 
 impl From<TauError> for SupportTauError {
     fn from(error: TauError) -> SupportTauError {
@@ -119,11 +101,7 @@ impl From<TauError> for SupportTauError {
     }
 }
 
-impl From<HomError> for SupportTauError {
-    fn from(error: HomError) -> SupportTauError {
-        SupportTauError::Hom(error)
-    }
-}
+from_variants!(SupportTauError { HomError => Hom });
 
 /// The condition a candidate pair failed, with the witness for that failure.
 ///
@@ -166,38 +144,24 @@ pub enum PairRejection {
 }
 
 impl PairRejection {
-    /// The number of the failed condition in `docs/v0.5-design.md` section 6,
-    /// from 1 to 4.
-    pub fn condition(&self) -> u32 {
-        match self {
+    accessor_methods! {
+        /// The number of the failed condition in `docs/v0.5-design.md` section 6,
+        /// from 1 to 4.
+        pub condition() -> u32 = |this| match this {
             Self::DifferentAlgebras => 1,
             Self::HomFromProjectiveNonzero { .. } => 2,
             Self::NotTauRigid(_) => 3,
             Self::SummandCount { .. } => 4,
-        }
+        };
     }
 }
 
-impl fmt::Display for PairRejection {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::DifferentAlgebras => f.write_str("the two parts do not share one algebra"),
-            Self::HomFromProjectiveNonzero { vertex, dim } => write!(
-                f,
-                "Hom(P, M) is not zero: dim Hom(P_{vertex}, M) = dim M_{vertex} = {dim}"
-            ),
-            Self::NotTauRigid(_) => f.write_str("M is not tau-rigid"),
-            Self::SummandCount {
-                module,
-                projective,
-                expected,
-            } => write!(
-                f,
-                "|M| + |P| = {module} + {projective}, and the pair needs {expected}"
-            ),
-        }
-    }
-}
+display_error! { PairRejection {
+    Self::DifferentAlgebras => "the two parts do not share one algebra";
+    Self::HomFromProjectiveNonzero { vertex, dim } => "Hom(P, M) is not zero: dim Hom(P_{vertex}, M) = dim M_{vertex} = {dim}";
+    Self::NotTauRigid(_) => "M is not tau-rigid";
+    Self::SummandCount { module, projective, expected } => "|M| + |P| = {module} + {projective}, and the pair needs {expected}";
+} }
 
 /// The result of [`check_conditions`]: the tau-rigidity witness both pair
 /// types keep, or the first condition that failed.
@@ -209,8 +173,8 @@ enum Checked {
 /// Runs conditions 1 to 4 in the order of `docs/v0.5-design.md` section 6.
 ///
 /// `expected` is the required value of `|M| + |P|`. `summand_indices[i]` is
-/// the caller's stable index for summand `i` of `module`. It is a LABEL only,
-/// carried into witnesses and the bindings. It does NOT key `cache`, which
+/// the caller's stable index for summand `i` of `module`. It is a label only,
+/// carried into witnesses and the bindings. It does not key `cache`, which
 /// keys on nominal module identity.
 fn check_conditions(
     module: &BasicDecomposition,
@@ -218,6 +182,32 @@ fn check_conditions(
     expected: usize,
     summand_indices: &[usize],
     cache: Option<&mut TauCache>,
+) -> Result<Checked, SupportTauError> {
+    let mut owned = TauCache::new();
+    let cache = cache.unwrap_or(&mut owned);
+    check_conditions_with(module, projective, expected, summand_indices, |summands| {
+        is_tau_rigid_summandwise(summands, cache)
+    })
+}
+
+fn check_conditions_with_context(
+    module: &BasicDecomposition,
+    projective: &ProjectiveSupport,
+    expected: usize,
+    summand_indices: &[usize],
+    context: &VerificationContext,
+) -> Result<Checked, SupportTauError> {
+    check_conditions_with(module, projective, expected, summand_indices, |summands| {
+        is_tau_rigid_summandwise_with_context(summands, context)
+    })
+}
+
+fn check_conditions_with(
+    module: &BasicDecomposition,
+    projective: &ProjectiveSupport,
+    expected: usize,
+    summand_indices: &[usize],
+    mut rigidity: impl FnMut(&[(usize, Module)]) -> Result<TauRigidityOutcome, TauRigidError>,
 ) -> Result<Checked, SupportTauError> {
     if summand_indices.len() != module.len() {
         return Err(SupportTauError::SummandIndexCount {
@@ -248,8 +238,7 @@ fn check_conditions(
         .zip(module.summands())
         .map(|(&index, x)| (index, x.module().clone()))
         .collect();
-    let mut owned = TauCache::new();
-    let rigid = match is_tau_rigid_summandwise(&summands, cache.unwrap_or(&mut owned))? {
+    let rigid = match rigidity(&summands)? {
         TauRigidityOutcome::TauRigid(rigid) => rigid,
         TauRigidityOutcome::NotTauRigid(witness) => {
             return Ok(Checked::Rejected(PairRejection::NotTauRigid(witness)));
@@ -316,26 +305,41 @@ fn omitted_vertices(module: &BasicDecomposition, projective: &ProjectiveSupport)
         .collect()
 }
 
+fn checked_omissions(
+    module: &BasicDecomposition,
+    projective: &ProjectiveSupport,
+    limit: usize,
+    subject: &str,
+) -> Result<Vec<u32>, SupportTauError> {
+    let omitted = omitted_vertices(module, projective);
+    if omitted.len() > limit {
+        return Err(SupportTauError::Defect {
+            reason: format!(
+                "{subject} with module dimension vectors {:?} and support {:?} left the vertices \
+                 {omitted:?} out of the support complement",
+                module.dim_vectors(),
+                projective.vertices()
+            ),
+        });
+    }
+    Ok(omitted)
+}
+
 /// Rechecks conditions 3 and 4 against the live parts, and that the stored
 /// tau-rigidity witness covers the live summands.
 ///
 /// Conditions 1 and 2 have nothing left to recheck. One algebra value carries
 /// both parts, and the support is derived from the support complement of the
-/// module part, so it cannot meet the support of `M`. The expensive half of
-/// condition 3, [`TauRigidModule::verify`], stays with the caller, because
-/// both pair types run it last.
+/// module part, so it cannot meet the support of `M`. The caller runs
+/// [`TauRigidModule::verify`] last.
 fn recheck_shared(
     module: &BasicDecomposition,
     projective_len: usize,
     rigid: &TauRigidModule,
     expected: usize,
 ) -> bool {
-    if module.len() + projective_len != expected {
-        return false;
-    }
-    if rigid.summands().len() != module.len() {
-        return false;
-    }
+    verify_guard!(module.len() + projective_len == expected);
+    verify_guard!(rigid.summands().len() == module.len());
     rigid
         .summands()
         .iter()
@@ -346,9 +350,9 @@ fn recheck_shared(
 /// A pair `(M, P)` certified to satisfy every condition of
 /// `docs/v0.5-design.md` section 6.
 ///
-/// Fields are private and every constructor runs all four checks, so a value
-/// of this type is a proof: `M` is basic and certified, `Hom(P, M) = 0`, `M`
-/// is tau-rigid with a [`TauRigidModule`], and `|M| + |P| = n`.
+/// Every constructor runs all four checks, so a value of this type is a
+/// proof: `M` is basic and certified, `Hom(P, M) = 0`, `M` is tau-rigid with
+/// a [`TauRigidModule`], and `|M| + |P| = n`.
 ///
 /// `P` is not stored. It is forced to be the sum of `P_v` over the vertices
 /// where `M` vanishes, so [`SupportTauTiltingPair::projective`] derives it.
@@ -361,14 +365,10 @@ pub struct SupportTauTiltingPair {
     rigid: TauRigidModule,
 }
 
-impl fmt::Debug for SupportTauTiltingPair {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SupportTauTiltingPair")
-            .field("module_dim_vectors", &self.module.dim_vectors())
-            .field("projective_support", &support_complement(&self.module))
-            .finish()
-    }
-}
+debug_fields!(SupportTauTiltingPair |this| {
+    "module_dim_vectors" => this.module.dim_vectors();
+    "projective_support" => support_complement(&this.module);
+});
 
 /// Whether a candidate `(M, P)` is a support tau-tilting pair, and if not,
 /// which condition failed.
@@ -381,38 +381,18 @@ pub enum SupportTauTiltingClassification {
 }
 
 impl SupportTauTiltingClassification {
-    /// Whether the candidate is a pair.
-    #[inline]
-    pub fn is_pair(&self) -> bool {
-        matches!(self, Self::Pair(_))
-    }
-
-    /// The pair, or `None` for a rejection.
-    #[inline]
-    pub fn pair(&self) -> Option<&SupportTauTiltingPair> {
-        match self {
-            Self::Pair(pair) => Some(pair),
-            Self::Rejected(_) => None,
-        }
-    }
-
-    /// The rejection, or `None` for a pair.
-    #[inline]
-    pub fn rejection(&self) -> Option<&PairRejection> {
-        match self {
-            Self::Pair(_) => None,
-            Self::Rejected(rejection) => Some(rejection),
-        }
-    }
-
-    /// Takes the pair out, or `None` for a rejection.
-    #[inline]
-    pub fn into_pair(self) -> Option<SupportTauTiltingPair> {
-        match self {
-            Self::Pair(pair) => Some(pair),
-            Self::Rejected(_) => None,
-        }
-    }
+    binary_outcome_accessors!(
+        Pair,
+        Rejected,
+        pair -> SupportTauTiltingPair = |value| value,
+        rejection -> PairRejection = |value| value,
+        is_pair,
+        into_pair -> SupportTauTiltingPair = |value| value;
+        flag = "Whether the candidate is a pair.";
+        positive = "The pair, or `None` for a rejection.";
+        negative = "The rejection, or `None` for a pair.";
+        into = "Takes the pair out, or `None` for a rejection.";
+    );
 }
 
 impl SupportTauTiltingPair {
@@ -437,43 +417,37 @@ impl SupportTauTiltingPair {
         summand_indices: &[usize],
         cache: Option<&mut TauCache>,
     ) -> Result<SupportTauTiltingClassification, SupportTauError> {
+        hit(Site::SupportPairClassify);
         let expected = vertex_count(&module);
-        match check_conditions(&module, &projective, expected, summand_indices, cache)? {
+        let checked = check_conditions(&module, &projective, expected, summand_indices, cache)?;
+        Self::from_checked(module, projective, checked)
+    }
+
+    pub(crate) fn classify_with_context(
+        module: BasicDecomposition,
+        projective: ProjectiveSupport,
+        context: &VerificationContext,
+    ) -> Result<SupportTauTiltingClassification, SupportTauError> {
+        hit(Site::SupportPairClassify);
+        let expected = vertex_count(&module);
+        let checked = check_conditions_with_context(
+            &module,
+            &projective,
+            expected,
+            &positional(&module),
+            context,
+        )?;
+        Self::from_checked(module, projective, checked)
+    }
+
+    fn from_checked(
+        module: BasicDecomposition,
+        projective: ProjectiveSupport,
+        checked: Checked,
+    ) -> Result<SupportTauTiltingClassification, SupportTauError> {
+        match checked {
             Checked::Accepted(rigid) => {
-                // P is forced, which is why the pair does not store it.
-                // Write r = |M|, s for the number of vertices where M is
-                // nonzero, C for the other n - s vertices, and S for the
-                // vertex set of P. Condition 2 puts S inside C, and
-                // condition 4 gives |S| = n - r.
-                //
-                // Claim: r <= s. Let e be the sum of e_v over C, so M e = 0
-                // and M is a module over B = A/AeA, an algebra whose simples
-                // are indexed by the s vertices of the support. Condition 3
-                // gives Hom_A(M, tau_A M) = 0, and that carries to B: Adachi,
-                // Iyama, and Reiten, "tau-tilting theory", Compositio Math.
-                // 150 (2014), Lemma 2.1(a), for an ideal inside the
-                // annihilator. So M is tau-rigid over B, and Proposition 1.3
-                // of the same paper bounds a tau-rigid module by the number
-                // of simples: r <= s.
-                //
-                // Then |S| = n - r <= n - s = |C|, and S inside C forces
-                // S = C and r = s.
-                //
-                // The check below is that bound, not decoration. A candidate
-                // that passed every condition with S strictly inside C would
-                // be a genuine pair with an underdetermined projective part,
-                // so it is reported rather than stored.
-                let omitted = omitted_vertices(&module, &projective);
-                if !omitted.is_empty() {
-                    return Err(SupportTauError::Defect {
-                        reason: format!(
-                            "a pair with module dimension vectors {:?} and support {:?} left the \
-                             vertices {omitted:?} out of the support complement",
-                            module.dim_vectors(),
-                            projective.vertices()
-                        ),
-                    });
-                }
+                checked_omissions(&module, &projective, 0, "a pair")?;
                 Ok(SupportTauTiltingClassification::Pair(
                     SupportTauTiltingPair { module, rigid },
                 ))
@@ -508,73 +482,62 @@ impl SupportTauTiltingPair {
         Ok(Self::classify(module, projective)?.into_pair())
     }
 
-    /// The module part `M`.
-    #[inline]
-    pub fn module(&self) -> &BasicDecomposition {
-        &self.module
+    accessor_methods! {
+        /// The module part `M`.
+        pub module() -> &BasicDecomposition = |this| &this.module;
+        /// The tau-rigidity witness of `M`, one certified translate per summand.
+        pub rigid() -> &TauRigidModule = |this| &this.rigid;
+        /// The projective part `P`, derived as the sum of `P_v` over the vertices
+        /// where `M` vanishes.
+        ///
+        /// The value is rebuilt on each call. It is not stored: the four
+        /// conditions force it.
+        pub projective() -> ProjectiveSupport = |this|
+            as_support(&this.module, &support_complement(&this.module));
+        /// Whether the projective part is empty, which makes `M` a tau-tilting
+        /// module.
+        ///
+        /// The projective part is the support complement of `M`, so this is
+        /// exactly sincerity of `M`.
+        pub is_tau_tilting() -> bool = |this|
+            this.module.module().dim_vector().iter().all(|&d| d > 0);
+        /// `|M| + |P|`, which equals the number of vertices.
+        pub summand_count() -> usize = |this|
+            this.module.len() + support_complement(&this.module).len();
     }
 
-    /// The projective part `P`, derived as the sum of `P_v` over the vertices
-    /// where `M` vanishes.
-    ///
-    /// The value is rebuilt on each call. It is not stored, because the four
-    /// conditions force it.
-    pub fn projective(&self) -> ProjectiveSupport {
-        as_support(&self.module, &support_complement(&self.module))
-    }
-
-    /// The tau-rigidity witness of `M`, one certified translate per summand.
-    #[inline]
-    pub fn rigid(&self) -> &TauRigidModule {
-        &self.rigid
-    }
-
-    /// Whether the projective part is empty, which makes `M` a tau-tilting
-    /// module.
-    ///
-    /// The projective part is the support complement of `M`, so this is
-    /// exactly sincerity of `M`.
-    pub fn is_tau_tilting(&self) -> bool {
-        self.module.module().dim_vector().iter().all(|&d| d > 0)
-    }
-
-    /// `|M| + |P|`, which equals the number of vertices.
-    pub fn summand_count(&self) -> usize {
-        self.module.len() + support_complement(&self.module).len()
-    }
-
-    /// Recomputes every condition against the live parts.
-    ///
-    /// Nothing stored is taken on trust. `P` is derived again from the module
-    /// part, the counts are recomputed, and every summand's `tau` is
-    /// recomputed through the certified double route inside
-    /// [`TauRigidModule::verify`]. A tau-rigidity witness borrowed from
-    /// another pair fails here.
-    pub fn verify(&self) -> bool {
+    verify_methods!(pub(crate), { hit(Site::SupportPairVerify); },
+        /// Recomputes every condition against the live parts.
+        ///
+        /// `P` is derived again from the module part. The counts are
+        /// recomputed. Every summand's `tau` is recomputed through the
+        /// certified double route inside [`TauRigidModule::verify`]. A
+        /// tau-rigidity witness borrowed from another pair fails here.
+        |self, context| {
         recheck_shared(
             &self.module,
             support_complement(&self.module).len(),
             &self.rigid,
             vertex_count(&self.module),
-        ) && self.rigid.verify()
-    }
+        ) && self.rigid.verify_with_context(context)
+    });
 }
 
 /// A pair `(M, P)` with every condition of a support tau-tilting pair except
 /// that `|M| + |P| = n - 1`.
 ///
-/// Mutation is defined through this type: an almost complete pair has exactly
+/// Mutation is defined through this type. An almost complete pair has exactly
 /// two completions to a support tau-tilting pair (Adachi, Iyama, and Reiten,
 /// "tau-tilting theory", Compositio Math. 150 (2014), Theorem 2.18), and the
 /// two completions are the two ends of a mutation.
 ///
-/// Fields are private and the constructors run the same checks as
-/// [`SupportTauTiltingPair`] with the smaller total.
+/// The constructors run the same checks as [`SupportTauTiltingPair`] with the
+/// smaller total.
 ///
-/// `P` is not stored either. With `r = |M|`, `s` the number of vertices where
-/// `M` is nonzero, and `C` the other vertices, `P` is the sum of `P_v` over
-/// `C` when `s = r + 1`, and over `C` minus one vertex when `s = r`. So the
-/// only free datum is that one omitted vertex, and
+/// `P` is not stored. With `r = |M|`, `s` the number of vertices where `M` is
+/// nonzero, and `C` the other vertices, `P` is the sum of `P_v` over `C` when
+/// `s = r + 1`, and over `C` minus one vertex when `s = r`. So the only free
+/// datum is that one omitted vertex, and
 /// [`AlmostCompletePair::projective`] rebuilds the rest. The proof is on
 /// [`AlmostCompletePair::classify_with_cache`].
 pub struct AlmostCompletePair {
@@ -585,15 +548,11 @@ pub struct AlmostCompletePair {
     omitted: Option<u32>,
 }
 
-impl fmt::Debug for AlmostCompletePair {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AlmostCompletePair")
-            .field("module_dim_vectors", &self.module.dim_vectors())
-            .field("projective_support", &self.support())
-            .field("omitted_vertex", &self.omitted)
-            .finish()
-    }
-}
+debug_fields!(AlmostCompletePair |this| {
+    "module_dim_vectors" => this.module.dim_vectors();
+    "projective_support" => this.support();
+    "omitted_vertex" => this.omitted;
+});
 
 /// Whether a candidate `(M, P)` is an almost complete pair, and if not, which
 /// condition failed.
@@ -606,38 +565,18 @@ pub enum AlmostCompleteClassification {
 }
 
 impl AlmostCompleteClassification {
-    /// Whether the candidate is an almost complete pair.
-    #[inline]
-    pub fn is_pair(&self) -> bool {
-        matches!(self, Self::Pair(_))
-    }
-
-    /// The pair, or `None` for a rejection.
-    #[inline]
-    pub fn pair(&self) -> Option<&AlmostCompletePair> {
-        match self {
-            Self::Pair(pair) => Some(pair),
-            Self::Rejected(_) => None,
-        }
-    }
-
-    /// The rejection, or `None` for a pair.
-    #[inline]
-    pub fn rejection(&self) -> Option<&PairRejection> {
-        match self {
-            Self::Pair(_) => None,
-            Self::Rejected(rejection) => Some(rejection),
-        }
-    }
-
-    /// Takes the pair out, or `None` for a rejection.
-    #[inline]
-    pub fn into_pair(self) -> Option<AlmostCompletePair> {
-        match self {
-            Self::Pair(pair) => Some(pair),
-            Self::Rejected(_) => None,
-        }
-    }
+    binary_outcome_accessors!(
+        Pair,
+        Rejected,
+        pair -> AlmostCompletePair = |value| value,
+        rejection -> PairRejection = |value| value,
+        is_pair,
+        into_pair -> AlmostCompletePair = |value| value;
+        flag = "Whether the candidate is an almost complete pair.";
+        positive = "The pair, or `None` for a rejection.";
+        negative = "The rejection, or `None` for a pair.";
+        into = "Takes the pair out, or `None` for a rejection.";
+    );
 }
 
 impl AlmostCompletePair {
@@ -657,6 +596,7 @@ impl AlmostCompletePair {
         summand_indices: &[usize],
         cache: Option<&mut TauCache>,
     ) -> Result<AlmostCompleteClassification, SupportTauError> {
+        hit(Site::AlmostCompleteClassify);
         // Every algebra this crate builds has at least one vertex, so the
         // saturating step never fires; it keeps the arithmetic total anyway.
         let expected = vertex_count(&module).saturating_sub(1);
@@ -669,18 +609,8 @@ impl AlmostCompletePair {
                 // SupportTauTiltingPair::classify_with_cache makes that at
                 // most 1, and S inside C makes it at least 0. So s is r or
                 // r + 1, and P is C or C minus one vertex.
-                let omitted = omitted_vertices(&module, &projective);
-                if omitted.len() > 1 {
-                    return Err(SupportTauError::Defect {
-                        reason: format!(
-                            "an almost complete pair with module dimension vectors {:?} and \
-                             support {:?} left the vertices {omitted:?} out of the support \
-                             complement",
-                            module.dim_vectors(),
-                            projective.vertices()
-                        ),
-                    });
-                }
+                let omitted =
+                    checked_omissions(&module, &projective, 1, "an almost complete pair")?;
                 Ok(AlmostCompleteClassification::Pair(AlmostCompletePair {
                     module,
                     rigid,
@@ -709,67 +639,51 @@ impl AlmostCompletePair {
         Ok(Self::classify(module, projective)?.into_pair())
     }
 
-    /// The module part `M`.
-    #[inline]
-    pub fn module(&self) -> &BasicDecomposition {
-        &self.module
+    accessor_methods! {
+        /// The module part `M`.
+        pub module() -> &BasicDecomposition = |this| &this.module;
+        /// The vertex of the support complement that `P` leaves out, and `None`
+        /// when `P` is the whole complement.
+        pub omitted_vertex() -> Option<u32> = |this| this.omitted;
+        /// The tau-rigidity witness of `M`.
+        pub rigid() -> &TauRigidModule = |this| &this.rigid;
     }
 
     /// The vertex support of `P`: the support complement of `M`, minus the
     /// omitted vertex when there is one.
     fn support(&self) -> Vec<u32> {
-        let mut vertices = support_complement(&self.module);
-        if let Some(omitted) = self.omitted {
-            vertices.retain(|&v| v != omitted);
-        }
-        vertices
+        support_complement(&self.module)
+            .into_iter()
+            .filter(|vertex| Some(*vertex) != self.omitted)
+            .collect()
     }
 
-    /// The projective part `P`, as its vertex support.
-    ///
-    /// The value is rebuilt on each call from the module part and the omitted
-    /// vertex.
-    pub fn projective(&self) -> ProjectiveSupport {
-        as_support(&self.module, &self.support())
+    accessor_methods! {
+        /// The projective part `P`, as its vertex support.
+        ///
+        /// Rebuilt on each call from the module part and the omitted vertex.
+        pub projective() -> ProjectiveSupport = |this|
+            as_support(&this.module, &this.support());
+        /// `|M| + |P|`, which equals the number of vertices minus one.
+        pub summand_count() -> usize = |this| this.module.len() + this.support().len();
     }
 
-    /// The vertex of the support complement that `P` leaves out, and `None`
-    /// when `P` is the whole complement.
-    #[inline]
-    pub fn omitted_vertex(&self) -> Option<u32> {
-        self.omitted
-    }
-
-    /// The tau-rigidity witness of `M`.
-    #[inline]
-    pub fn rigid(&self) -> &TauRigidModule {
-        &self.rigid
-    }
-
-    /// `|M| + |P|`, which equals the number of vertices minus one.
-    pub fn summand_count(&self) -> usize {
-        self.module.len() + self.support().len()
-    }
-
-    /// Recomputes every condition against the live parts, as
-    /// [`SupportTauTiltingPair::verify`].
-    ///
-    /// The omitted vertex is rechecked against the live support complement, so
-    /// an omitted vertex that is not in the complement fails here.
-    pub fn verify(&self) -> bool {
+    verify_methods!(pub(crate), { hit(Site::AlmostCompleteVerify); },
+        /// Recomputes every condition against the live parts, as
+        /// [`SupportTauTiltingPair::verify`].
+        ///
+        /// The omitted vertex is rechecked against the live support complement.
+        /// An omitted vertex that is not in the complement fails here.
+        |self, context| {
         let complement = support_complement(&self.module);
-        if let Some(omitted) = self.omitted
-            && !complement.contains(&omitted)
-        {
-            return false;
-        }
+        verify_guard!(self.omitted.is_none_or(|omitted| complement.contains(&omitted)));
         recheck_shared(
             &self.module,
             self.support().len(),
             &self.rigid,
             vertex_count(&self.module).saturating_sub(1),
-        ) && self.rigid.verify()
-    }
+        ) && self.rigid.verify_with_context(context)
+    });
 }
 
 /// The state of one [`enumerate_over_catalog`] run.
@@ -875,9 +789,9 @@ impl CatalogWalk<'_> {
 ///
 /// The limit is the same theorem. Only algebras with a catalog can be
 /// enumerated this way, so [`enumerate_over_catalog`] takes a catalog rather
-/// than an algebra and there is no route from an arbitrary algebra to a value
-/// of this type. The Kronecker algebra is tau-tilting infinite and has no
-/// exhaustive catalog, so both catalog constructors reject it and no
+/// than an algebra, and there is no route from an arbitrary algebra to a
+/// value of this type. The Kronecker algebra is tau-tilting infinite and has
+/// no exhaustive catalog, so both catalog constructors reject it and no
 /// enumeration is attempted.
 ///
 /// This route is independent of the mutation-graph certificate. It uses no
@@ -893,66 +807,37 @@ pub struct CatalogEnumeration {
     nodes_visited: usize,
 }
 
-impl fmt::Debug for CatalogEnumeration {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CatalogEnumeration")
-            .field("provenance", &self.provenance)
-            .field("catalog_len", &self.catalog_len)
-            .field("pairs", &self.pairs.len())
-            .field("nodes_visited", &self.nodes_visited)
-            .finish()
-    }
-}
+debug_fields!(CatalogEnumeration |this| {
+    "provenance" => this.provenance;
+    "catalog_len" => this.catalog_len;
+    "pairs" => this.pairs.len();
+    "nodes_visited" => this.nodes_visited;
+});
 
 impl CatalogEnumeration {
-    /// The algebra the pairs live over.
-    #[inline]
-    pub fn algebra(&self) -> &Arc<Algebra> {
-        &self.algebra
-    }
-
-    /// The classification theorem the completeness of the list rests on.
-    #[inline]
-    pub fn provenance(&self) -> CatalogProvenance {
-        self.provenance
-    }
-
-    /// The number of catalog entries the walk ran over.
-    #[inline]
-    pub fn catalog_len(&self) -> usize {
-        self.catalog_len
-    }
-
-    /// The pairs, in walk order: module subsets in lexicographic order over
-    /// catalog positions, one pair per subset that admits one.
-    #[inline]
-    pub fn pairs(&self) -> &[SupportTauTiltingPair] {
-        &self.pairs
-    }
-
-    /// The number of pairs.
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.pairs.len()
-    }
-
-    /// Whether the list is empty. It never is: `(A, 0)` is a pair over every
-    /// algebra.
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.pairs.is_empty()
-    }
-
-    /// The number of subsets the depth-first search visited, counting the
-    /// empty subset.
-    ///
-    /// Tau-rigidity is inherited by subsets, so the walk visits exactly the
-    /// tau-rigid subsets of at most `n` entries and tests each remaining entry
-    /// once per visit. The count is deterministic and profile-independent, so
-    /// a test can assert it.
-    #[inline]
-    pub fn nodes_visited(&self) -> usize {
-        self.nodes_visited
+    accessor_methods! {
+        /// The algebra the pairs live over.
+        pub algebra() -> &Arc<Algebra> = |this| &this.algebra;
+        /// The classification theorem the completeness of the list rests on.
+        pub provenance() -> CatalogProvenance = |this| this.provenance;
+        /// The number of catalog entries the walk ran over.
+        pub catalog_len() -> usize = |this| this.catalog_len;
+        /// The pairs, in walk order: module subsets in lexicographic order over
+        /// catalog positions, one pair per subset that admits one.
+        pub pairs() -> &[SupportTauTiltingPair] = |this| &this.pairs;
+        /// The number of pairs.
+        pub len() -> usize = |this| this.pairs.len();
+        /// Whether the list is empty. It never is: `(A, 0)` is a pair over every
+        /// algebra.
+        pub is_empty() -> bool = |this| this.pairs.is_empty();
+        /// The number of subsets the depth-first search visited, counting the
+        /// empty subset.
+        ///
+        /// Tau-rigidity is inherited by subsets, so the walk visits exactly the
+        /// tau-rigid subsets of at most `n` entries and tests each remaining entry
+        /// once per visit. The count is deterministic and profile-independent, so
+        /// a test can assert it.
+        pub nodes_visited() -> usize = |this| this.nodes_visited;
     }
 
     /// Pair counts by `|M|`, indexed from zero to the number of vertices.
@@ -967,50 +852,40 @@ impl CatalogEnumeration {
 
     /// Rechecks every pair, and that the pairs are pairwise non-isomorphic.
     ///
-    /// Each pair goes through [`SupportTauTiltingPair::verify`], which
-    /// recomputes all four conditions. Distinctness runs
-    /// [`PairFingerprint`] as a prefilter and [`pair_iso`] inside a bucket, so
-    /// a duplicated entry fails even when the two copies were built
-    /// separately.
+    /// Each pair goes through [`SupportTauTiltingPair::verify`]. Distinctness
+    /// runs [`PairFingerprint`] as a prefilter and [`pair_iso`] inside a
+    /// bucket, so a duplicated entry fails even when the two copies were
+    /// built separately.
     ///
     /// This rechecks the list. It does not recheck completeness, which is the
     /// catalog's classification theorem and is not a computation.
     pub fn verify(&self) -> bool {
-        let mut fingerprints = Vec::with_capacity(self.pairs.len());
-        for pair in &self.pairs {
-            if !Arc::ptr_eq(pair.module().module().algebra(), &self.algebra) || !pair.verify() {
-                return false;
-            }
-            match PairFingerprint::new(pair.module(), &pair.projective()) {
-                Ok(fingerprint) => fingerprints.push(fingerprint),
-                Err(_) => return false,
-            }
-        }
-        for (i, left) in self.pairs.iter().enumerate() {
-            for (j, right) in self.pairs.iter().enumerate().skip(i + 1) {
-                if fingerprints[i] != fingerprints[j] {
-                    continue;
-                }
-                match pair_iso(
-                    left.module(),
-                    &left.projective(),
-                    right.module(),
-                    &right.projective(),
-                ) {
-                    Ok(SupportPairIsoOutcome::NotIsomorphic(_)) => {}
-                    _ => return false,
-                }
-            }
-        }
-        true
+        pairwise_distinct_by(
+            &self.pairs,
+            |pair| {
+                (Arc::ptr_eq(pair.module().module().algebra(), &self.algebra) && pair.verify())
+                    .then(|| PairFingerprint::new(pair.module(), &pair.projective()).ok())
+                    .flatten()
+            },
+            |left, right| {
+                matches!(
+                    pair_iso(
+                        left.module(),
+                        &left.projective(),
+                        right.module(),
+                        &right.projective(),
+                    ),
+                    Ok(SupportPairIsoOutcome::NotIsomorphic(_))
+                )
+            },
+        )
     }
 }
 
 /// Lists every support tau-tilting pair of the catalog's algebra, from the
 /// definition alone.
 ///
-/// The algorithm is the one `docs/v0.5-design.md` section 10 fixes, and the
-/// cost spike measured the naive alternative at 36 times slower:
+/// The algorithm is the one `docs/v0.5-design.md` section 10 fixes:
 ///
 /// 1. Compute `tau X_i` once per catalog entry, through one [`TauCache`].
 /// 2. Build the table `hom_dim(X_i, tau X_j)`.
@@ -1019,9 +894,9 @@ impl CatalogEnumeration {
 ///    vertices, which is the whole projective condition.
 ///
 /// The subset walk reads the table and the dimension vectors, so no linear
-/// algebra runs inside it. `Hom(P_v, X) = X_v`, so the second table the design
-/// calls for is the dimension vectors themselves. The count bound `|M| <= n`
-/// cuts a branch before any module is assembled.
+/// algebra runs inside it. `Hom(P_v, X) = X_v`, so the second table the
+/// design calls for is the dimension vectors themselves. The count bound
+/// `|M| <= n` cuts a branch before any module is assembled.
 ///
 /// Every kept candidate still goes through
 /// [`SupportTauTiltingPair::classify_with_cache`], so each listed pair carries
@@ -1419,8 +1294,7 @@ mod tests {
         }
     }
 
-    // The sharpest regression test for the right-module convention in this
-    // release. Over A_2 with the arrow 0 -> 1 the candidate (P_0, {1}) has
+    // Over A_2 with the arrow 0 -> 1 the candidate (P_0, {1}) has
     // |M| + |P| = 2 = n and a tau-rigid module part, so only condition 2
     // separates it from a pair. Under the right-module convention
     // Hom(P_v, X) = X_v, so Hom(P_1, P_0) has dimension (P_0)_1 = 1 and the
@@ -1649,8 +1523,6 @@ mod tests {
             assert_eq!(enumeration.nodes_visited(), 120);
             assert_eq!(enumeration.nodes_visited(), nodes);
             assert_eq!(enumeration.provenance(), CatalogProvenance::DynkinZeroIdeal);
-            // Every pair recomputes all four conditions, and no two of the 50
-            // are isomorphic.
             assert!(enumeration.verify(), "over F_{}", field.modulus());
         }
     }
@@ -1865,7 +1737,6 @@ mod tests {
         assert_eq!(cache.misses(), catalog.len() as u64);
     }
 
-    // One index per summand, or the call is rejected before any work.
     #[test]
     fn a_wrong_index_count_is_rejected() {
         let algebra = linear_an(3, f5());
