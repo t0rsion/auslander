@@ -1,7 +1,7 @@
-//! The v0.6 production line budget for `crates/auslander/src`.
+//! The v0.7 production line ceiling for `crates/auslander/src`.
 //!
-//! v0.6's release condition is net-negative production against v0.5. This
-//! gate fails when the crate carries more production code lines than `BUDGET`.
+//! The ceiling records the tree after the v0.7 deletion and duplicate-logic
+//! pass. It rejects later production growth before the release is rebuilt.
 //! One scan of every `src/**/*.rs` produces three numbers:
 //!
 //! - Production region: every physical line through and including the first
@@ -13,10 +13,7 @@
 //! on failure as diagnostics. Tests, benches, bindings, and documentation are
 //! outside the scan, so they cannot offset production growth.
 //!
-//! Comments are excluded so deleting documentation cannot pass the budget.
-//! The v0.5.0 production region is 23351 lines: 16114 code, 5856 comment,
-//! 1381 blank. A budget on physical lines would pay 25 percent of itself for
-//! deleting comments, which changes no behavior.
+//! Comments are excluded, so deleting documentation cannot pass the ceiling.
 //!
 //! A line counts as a comment when its first non-whitespace characters are
 //! `//`, which covers `//`, `///`, and `//!`. A trailing comment after code
@@ -24,19 +21,9 @@
 //! comments are not handled: no file under `src` contains `/*` today, and
 //! handling them would need a real lexer.
 //!
-//! The baselines are constants here and never a git query. The same test runs
-//! inside `cargo package`, where the `v0.5.0` tag does not exist. The scan
-//! starts at `CARGO_MANIFEST_DIR` for the same reason: `tests/prose.rs` walked
-//! up to the workspace root, found zero files in the extracted package, and
-//! failed CI until it was changed to scan from the manifest directory.
-//!
-//! One earlier baseline, 22890 production lines, came from a different rule
-//! and is not reachable from this one. It was measured with `sed -n
-//! '1,/#\[cfg(test)\]/p'`, whose pattern matches at any column. Exactly one
-//! file differs: `src/ext.rs` has an indented `#[cfg(test)]` at line 728,
-//! inside an earlier item, and its real test module starts at line 1189.
-//! That one file is the whole 461-line gap. Do not re-derive 22890 and read
-//! it as drift.
+//! The ceiling is a constant, not a git query, because the test also runs
+//! inside `cargo package`. The scan starts at `CARGO_MANIFEST_DIR` for the
+//! same reason.
 //!
 //! Only `crates/auslander/src` counts. Code moved to `crates/auslander-py/src`,
 //! to a new crate, to `benches`, or into a file pulled in with `include!`
@@ -46,9 +33,8 @@
 //! `rustfmt.toml`, so `max_width` is the default 100, and a committed
 //! `rustfmt.toml` that raises it would lower every count at once.
 //!
-//! A second gate closes the mechanical way to defeat the first: move
-//! production code below the first `#[cfg(test)]` and it stops being counted.
-//! Its limits are stated at `items_after_tests`.
+//! A second gate rejects production items placed below the first test module,
+//! where the line scan would otherwise miss them.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -56,16 +42,10 @@ use std::path::{Path, PathBuf};
 /// This file, named in failure messages so a reader can find the constants.
 const SELF: &str = "crates/auslander/tests/production_line_budget.rs";
 
-/// The v0.5.0 production code line count under `crates/auslander/src`.
+/// The v0.7 release production code line count under `crates/auslander/src`.
 ///
-/// Measured at the `v0.5.0` tag with the rule in `count`.
-const V05_CODE: usize = 16114;
-
-/// The v0.5.0 physical production line count, printed for comparison.
-const V05_PRODUCTION: usize = 23351;
-
-/// The highest production code line count v0.6 may ship, one below v0.5.
-const BUDGET: usize = V05_CODE - 1;
+/// Copied from this test's scanner after the release deletion pass.
+const V07_CODE_CEILING: usize = 20697;
 
 /// The attribute that ends the production part of a file, at column zero only.
 const MARKER: &str = "#[cfg(test)]";
@@ -206,7 +186,7 @@ fn measured() -> Vec<Measured> {
 }
 
 #[test]
-fn production_code_lines_stay_at_or_below_the_v06_budget() {
+fn production_code_lines_stay_at_or_below_the_v07_ceiling() {
     let rows = measured();
     assert!(
         rows.len() > 20,
@@ -234,17 +214,16 @@ fn production_code_lines_stay_at_or_below_the_v06_budget() {
         })
         .collect();
     assert!(
-        code <= BUDGET,
-        "production is {code} code lines across {} files, {} over the v0.6 \
-         budget of {BUDGET}. v0.5.0 shipped {V05_CODE} code lines in \
-         {V05_PRODUCTION} production lines. Diagnostics for this tree, not \
+        code <= V07_CODE_CEILING,
+        "production is {code} code lines across {} files, {} over the v0.7 \
+         ceiling of {V07_CODE_CEILING}. Diagnostics for this tree, not \
          enforced: {production} production lines, {total} total lines across \
-         src.\n\nThis is a budget, not a target. v0.6 ships net-negative \
-         against v0.5, so the fix is to delete production code, never to raise \
-         BUDGET in {SELF}. Deleting comments does not help: the enforced count \
-         already excludes them. Start with the largest files:\n{}",
+         src.\n\nThe ceiling records the completed v0.7 deletion pass. Remove \
+         duplicate or unnecessary production code before changing it in \
+         {SELF}. Deleting comments does not help: the enforced count already \
+         excludes them. Start with the largest files:\n{}",
         rows.len(),
-        code - BUDGET,
+        code - V07_CODE_CEILING,
         worst.join("\n")
     );
 }

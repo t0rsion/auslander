@@ -119,6 +119,30 @@ reservation. Classical tilting classification uses the same exact complex for
 the generation condition. It distinguishes a positive self-extension from a
 projective-dimension or generation bound that leaves the question open.
 
+A verified classical tilting module can recover its split target algebra.
+`present_target` constructs `End_A(T)^op` for the crate's right-module
+convention. It stores a deterministic quiver, relations, the map into
+`End_A(T)`, its inverse, and exact work counts. A non-split residue field and a
+resource cut are separate typed outcomes. No partial target algebra escapes a
+cut.
+
+The non-split outcome states a domain boundary. It is unreachable for a
+certified tilting module over the supported prime fields: every summand is
+tau-rigid, and the finite-field obstruction forces residue degree one.
+
+The derived layer checks more than the target ring. `BoundedComplex` uses
+integer homological degrees and provides chain maps, shifts, direct sums,
+cones, homotopies, and Hom modulo null-homotopy. `StrictTransport` applies
+`Hom_A(T, -)` to bounded complexes whose terms carry `add(T)` witnesses. Its
+inverse accepts bounded complexes of projective target modules. A
+`DerivedEquivalenceCertificate` checks the tilting resolution, graded
+homotopy self-Hom, the degree-zero endomorphism algebra, and generation.
+
+`ExtAlgebraOutcome` records deterministic self-Ext spaces and every Yoneda
+product tensor through one bound. A finite resolution returns `Complete`.
+Otherwise `Cut` names the first omitted degree and keeps the exact bounded
+layer. The bound alone never makes a claim about higher Ext groups.
+
 ## Contents
 
 Algebras and modules:
@@ -169,6 +193,14 @@ Homological algebra:
   `A -> T^0 -> ... -> T^n` generation complex, and one `AddClosureWitness` per
   generated term. A positive self-extension is `NotTilting`. A bound or
   blocked bounded generation route is `Undetermined`.
+- `ExtAlgebraOutcome`: deterministic self-Ext grades, basis classes, the
+  degree-zero unit, and witnessed Yoneda tensors through a caller bound.
+- `BoundedComplex`, `ChainMap`, `ChainHomotopy`, and `HomotopyHom`: bounded
+  homological complexes and their deterministic Hom spaces modulo
+  null-homotopy.
+- `present_target`, `StrictTransport`, and `DerivedEquivalenceCertificate`:
+  the split target `End_A(T)^op`, strict transport on witnessed finite models,
+  and the checked tilting-derived equivalence.
 
 Duality and the Auslander-Reiten translate:
 
@@ -304,6 +336,10 @@ so.
 | `CheckedComplex::exactness` | `ExactComplex`, or the first `NonExactWitness` with exact homology dimensions | no | no |
 | `bar_hochschild` | `Complete` through the requested degree | `Cut` with the exact completed prefix and first rejected reservation | no |
 | `ClassicalTiltingModule::classify` | `Tilting` with all three conditions, or `NotTilting` with a positive self-extension | projective dimension and generation have independent caller bounds | yes: `Undetermined` carries the bound or generation blocker |
+| `present_target` | `Presented` with `End_A(T)^op`, or `Unsupported` with the first non-split residue degree | `Cut` with the first rejected reservation | no |
+| `ExtAlgebraOutcome::compute` | every stored grade and product tensor | `Cut` names the first omitted degree | no |
+| `HomotopyHom::quotient` | the deterministic chain Hom quotient | no | no |
+| `DerivedEquivalenceCertificate::new` | the tilting-derived equivalence and strict finite transport | no | no; failed checks are typed errors |
 | `injective_envelope`, `injective` | yes | no | no |
 | `opposite`, `dual`, `nu_of_presentation_map` | yes | no | no |
 | `tau` | the translate, zero exactly on projectives, both routes cross-checked | no | yes: `TauError::AgreementUnknown` |
@@ -467,6 +503,25 @@ the complete Rust code. The Python acceptance path is
 `test_v06_acceptance_path` in
 [`crates/auslander-py/tests/test_v06.py`](crates/auslander-py/tests/test_v06.py).
 
+The `v07` example continues from the same projective-dimension-two tilting
+module. It recovers `End_A(T)^op`, checks the derived-equivalence certificate,
+transports a two-term `add(T)` complex in both directions, and compares its
+graded homotopy Hom dimensions:
+
+```sh
+cargo run -p auslander --example v07
+```
+
+The example prints:
+
+```text
+target dimension: 5; resolution width: 2; graded Hom dimensions: [(-2, 0), (-1, 3), (0, 6), (1, 3), (2, 0)]
+```
+
+Both strict round-trip chain isomorphisms pass verification. See
+[`crates/auslander/examples/v07.rs`](crates/auslander/examples/v07.rs) for
+the complete Rust code.
+
 Decomposing a module and reading the certificates:
 
 ```rust
@@ -541,7 +596,9 @@ The Python surface covers general relations
 (`algebra.certificate_json()` and `Algebra.from_certificate(json)`), the
 witnessed AR layer (`ext_space`, `extension`, `almost_split`,
 `category_radical`, `ar_quiver`), checked finite complexes, budgeted Hochschild
-cohomology, classical tilting, and the same decision surface as the Rust crate.
+cohomology, classical tilting, target recovery, bounded Ext algebras, homotopy,
+and strict derived transport. Python uses the same typed outcomes and checked
+round trips as Rust.
 See `crates/auslander-py/README.md`.
 
 ## Building and testing
@@ -561,11 +618,10 @@ cargo test
   D_4, `k[x]/(x^2)`, `k[x]/(x^3)`, kA_3/(ab), Kronecker-2, a radical-square-zero
   cycle, three Nakayama algebras, a gentle tree algebra) with hand-derived
   dimensions, Cartan matrices, radical series, Ext tables, and projective and
-  global dimensions. Each fixture runs over both F_2 and F_5. Two entries are
-  regressions from an earlier in-house prototype. Hereditary Kronecker has
-  global dimension exactly 1; the prototype's examples database claimed it
-  infinite. Kupisch series [2, 2, 1] runs to completion; the prototype hung on
-  it.
+  global dimensions. Each fixture runs over both F_2 and F_5. Two fixtures
+  preserve regression coverage for incorrect or non-terminating behavior.
+  Hereditary Kronecker has global dimension exactly 1. Kupisch series
+  [2, 2, 1] runs to completion.
 - `crates/auslander/tests/acceptance_nonmonomial.rs` runs the high-level
   operations over three non-monomial quotients: the commutative square
   `kQ/(ab - cd)` over F_5, the preprojective algebra of A_3 over F_2, and the

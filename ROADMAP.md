@@ -180,10 +180,35 @@ complex. The binding specification is `docs/v0.6-design.md`.
   bases and cut diagnostics; F2 and F5 tilting fixtures; a live QPA run; and a
   production code count below v0.5.0.
 
+## v0.7: certified tilting-derived equivalences
+
+One theme: a classical tilting certificate now reaches its split target and a
+checked derived-equivalence certificate. The binding specification is
+`docs/v0.7-design.md`.
+
+- Recover `End_A(T)^op` as a deterministic bound quiver presentation when
+  every tilting summand has residue degree one. A non-split target is a typed
+  unsupported outcome.
+- Verify the target through a separate algebra-isomorphism checker. The
+  checker recomputes the split, arrow corners, relation images, normal-word
+  images, and every basis product.
+- Build bounded graded self-Ext algebras from the existing Ext classes and
+  product witnesses. A cut keeps exact degrees and never treats an absent
+  degree as zero.
+- Add bounded homological complexes, chain maps, shifts, direct sums, cones,
+  homotopies, and Hom modulo null-homotopy.
+- Certify the Rickard tilting-complex conditions. Strict transport realizes
+  the equivalence between bounded `add(T)` complexes and bounded projective
+  target complexes, with checked round trips.
+- Gates: target and derived-certificate mutation corpora, fresh-process
+  determinism, F2 and F5 fixtures, a live QPA comparison where QPA exposes the
+  needed invariants, Python parity, and a fixed target-work ceiling.
+
 ## Later
 
-Derived equivalence certificates, Ext algebras, and A-infinity minimal models.
-Each needs the same witness discipline before it enters a release.
+Non-split species, automatic `add(T)` replacement for arbitrary complexes,
+and A-infinity minimal models. Each needs the same witness discipline before
+it enters a release.
 
 ## sylvester
 

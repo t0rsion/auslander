@@ -20,7 +20,6 @@
 use std::sync::Arc;
 
 use crate::algebra::Algebra;
-use crate::context::VerificationContext;
 use crate::endo::{EndoAlgebra, SplitMix64};
 use crate::field::{Fp, PrimeField};
 use crate::hom::{Morphism, identity, submodule_with_inclusion, zero_morphism};
@@ -177,6 +176,17 @@ impl Split {
         })
     }
 
+    /// Rechecks every direct-sum identity stored by this split.
+    pub fn verify(&self) -> bool {
+        Split::new(
+            &self.total,
+            self.summands.clone(),
+            self.inclusions.clone(),
+            self.projections.clone(),
+        )
+        .is_ok()
+    }
+
     accessor_methods! {
         /// The decomposed module.
         pub total() -> &Module = |this| &this.total;
@@ -269,16 +279,7 @@ pub fn krull_schmidt(m: &Module) -> KrullSchmidtOutcome {
     krull_schmidt_from_decomposition(&d)
 }
 
-pub(crate) fn krull_schmidt_with_context(
-    m: &Module,
-    context: &VerificationContext,
-) -> KrullSchmidtOutcome {
-    hit(Site::KrullSchmidt);
-    let d = context.decompose_for(m);
-    krull_schmidt_from_decomposition(&d)
-}
-
-fn krull_schmidt_from_decomposition(d: &Decomposition) -> KrullSchmidtOutcome {
+pub(crate) fn krull_schmidt_from_decomposition(d: &Decomposition) -> KrullSchmidtOutcome {
     let mut classes: Vec<(usize, Fingerprint, usize)> = Vec::new();
     for (k, certificate) in d.certificates().iter().enumerate() {
         if let Certificate::Undetermined { attempts } = certificate {

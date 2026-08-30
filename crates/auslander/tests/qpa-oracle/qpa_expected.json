@@ -1,5 +1,5 @@
 {
-  "schema": "auslander-qpa-oracle-v8",
+  "schema": "auslander-qpa-oracle-v9",
   "convention": "right",
   "max_ext_degree": 4,
   "projdim_bound": 6,
@@ -162,7 +162,7 @@
       "rigid": [true, true, true, true, true, true, true, true, true],
       "tau_period": [{"none_up_to": 6}, {"none_up_to": 6}, {"none_up_to": 6}, {"none_up_to": 6}, {"none_up_to": 6}, {"none_up_to": 6}, {"none_up_to": 6}, {"none_up_to": 6}, {"none_up_to": 6}],
       "classical_tilting": [
-        {"id": "linear-a3-pd1", "construction": "S0+P0+P2", "bound": 1, "module_dimvec": [2, 1, 2], "qpa_tilting": true, "projective_dimension": 1, "coresolutions": [[[1, 1, 1], [1, 1, 1]], [[1, 0, 0], [1, 1, 1], [0, 1, 1]], [[0, 0, 1], [0, 0, 1]]], "coresolutions_exact": [true, true, true]}
+        {"id": "linear-a3-pd1", "construction": "S0+P0+P2", "bound": 1, "module_dimvec": [2, 1, 2], "qpa_tilting": true, "projective_dimension": 1, "coresolutions": [[[1, 1, 1], [1, 1, 1]], [[1, 0, 0], [1, 1, 1], [0, 1, 1]], [[0, 0, 1], [0, 0, 1]]], "coresolutions_exact": [true, true, true], "target": {"status": "computed", "algebra": "endomorphism-opposite", "dimension": 5, "cartan": [[1, 0, 0], [1, 1, 0], [0, 1, 1]], "radical_layers": [3, 2], "simple_ext1": [[0, 0, 0], [1, 0, 0], [0, 1, 0]]}}
       ],
       "support_tau_tilting": {
         "indecomposables": {"closed": true, "count": 6},
@@ -567,7 +567,7 @@
       "rigid": [true, true, true, true, true, true, true, true, true],
       "tau_period": [{"none_up_to": 6}, {"none_up_to": 6}, {"none_up_to": 6}, {"none_up_to": 6}, {"none_up_to": 6}, {"none_up_to": 6}, {"none_up_to": 6}, {"none_up_to": 6}, {"none_up_to": 6}],
       "classical_tilting": [
-        {"id": "a3-mod-ab-da-pd2", "construction": "I0+I1+I2", "bound": 2, "module_dimvec": [2, 2, 1], "qpa_tilting": true, "projective_dimension": 2, "coresolutions": [[[1, 1, 0], [1, 1, 0]], [[0, 1, 1], [0, 1, 1]], [[1, 0, 0], [1, 1, 0], [0, 1, 1], [0, 0, 1]]], "coresolutions_exact": [true, true, true]}
+        {"id": "a3-mod-ab-da-pd2", "construction": "I0+I1+I2", "bound": 2, "module_dimvec": [2, 2, 1], "qpa_tilting": true, "projective_dimension": 2, "coresolutions": [[[1, 1, 0], [1, 1, 0]], [[0, 1, 1], [0, 1, 1]], [[1, 0, 0], [1, 1, 0], [0, 1, 1], [0, 0, 1]]], "coresolutions_exact": [true, true, true], "target": {"status": "computed", "algebra": "endomorphism-opposite", "dimension": 5, "cartan": [[1, 0, 0], [1, 1, 0], [0, 1, 1]], "radical_layers": [3, 2], "simple_ext1": [[0, 0, 0], [1, 0, 0], [0, 1, 0]]}}
       ],
       "support_tau_tilting": {
         "indecomposables": {"closed": true, "count": 5},
@@ -679,7 +679,7 @@
       "rigid": [true, true, true, true, true, true, true, true, true],
       "tau_period": [{"none_up_to": 6}, {"none_up_to": 6}, {"none_up_to": 6}, {"none_up_to": 6}, {"none_up_to": 6}, {"none_up_to": 6}, {"none_up_to": 6}, {"none_up_to": 6}, {"none_up_to": 6}],
       "classical_tilting": [
-        {"id": "a3-mod-ab-da-pd2", "construction": "I0+I1+I2", "bound": 2, "module_dimvec": [2, 2, 1], "qpa_tilting": true, "projective_dimension": 2, "coresolutions": [[[1, 1, 0], [1, 1, 0]], [[0, 1, 1], [0, 1, 1]], [[1, 0, 0], [1, 1, 0], [0, 1, 1], [0, 0, 1]]], "coresolutions_exact": [true, true, true]}
+        {"id": "a3-mod-ab-da-pd2", "construction": "I0+I1+I2", "bound": 2, "module_dimvec": [2, 2, 1], "qpa_tilting": true, "projective_dimension": 2, "coresolutions": [[[1, 1, 0], [1, 1, 0]], [[0, 1, 1], [0, 1, 1]], [[1, 0, 0], [1, 1, 0], [0, 1, 1], [0, 0, 1]]], "coresolutions_exact": [true, true, true], "target": {"status": "computed", "algebra": "endomorphism-opposite", "dimension": 5, "cartan": [[1, 0, 0], [1, 1, 0], [0, 1, 1]], "radical_layers": [3, 2], "simple_ext1": [[0, 0, 0], [1, 0, 0], [0, 1, 0]]}}
       ],
       "support_tau_tilting": {
         "indecomposables": {"closed": true, "count": 5},

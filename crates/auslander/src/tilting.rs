@@ -298,6 +298,7 @@ enum GenerationBuild {
 }
 
 /// A basic module certified against all three classical tilting conditions.
+#[derive(Clone)]
 pub struct ClassicalTiltingModule {
     module: Module,
     limits: TiltingLimits,

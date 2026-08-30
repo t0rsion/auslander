@@ -49,6 +49,7 @@ pub enum Bounded<T> {
 /// so `maps.len() == terms.len() − 1`; `augmentation` is the cover `P_0 → M`.
 /// Minimality: each `d_{k+1}` factors as `P_{k+1} ↠ Ω^{k+1} M ↪ P_k` with the syzygy
 /// contained in `rad P_k`, so the induced map `top P_{k+1} → top P_k` is zero.
+#[derive(Clone)]
 pub struct ProjectiveResolution {
     pub terms: Vec<Module>,
     pub maps: Vec<Morphism>,
@@ -193,6 +194,8 @@ pub fn resolve(m: &Module, steps: usize) -> ProjectiveResolution {
 /// `AtLeast(bound + 1)` says nothing more than that; it is not a claim that `pd m`
 /// is infinite. Convention: the zero module is projective (the empty sum), so
 /// `pd 0 = Exact(0)`.
+/// At `usize::MAX`, the stored lower bound stays `usize::MAX`, the strongest
+/// value this return type can represent.
 pub fn projective_dimension(m: &Module, bound: usize) -> Bounded<usize> {
     let resolution = resolve(m, bound);
     bounded_dimension(resolution.end, resolution.terms.len())
@@ -201,7 +204,7 @@ pub fn projective_dimension(m: &Module, bound: usize) -> Bounded<usize> {
 pub(crate) fn bounded_dimension(end: ResolutionEnd, terms: usize) -> Bounded<usize> {
     match end {
         ResolutionEnd::Finite => Bounded::Exact(terms - 1),
-        ResolutionEnd::Cut { at } => Bounded::AtLeast(at + 1),
+        ResolutionEnd::Cut { at } => Bounded::AtLeast(at.saturating_add(1)),
     }
 }
 
@@ -355,6 +358,14 @@ mod tests {
         assert_eq!(res.terms.len(), 1);
         let p = Module::projective(&algebra, 0);
         assert_eq!(resolve(&p, 0).end, ResolutionEnd::Finite);
+    }
+
+    #[test]
+    fn a_cut_at_the_largest_index_keeps_the_strongest_representable_bound() {
+        assert_eq!(
+            bounded_dimension(ResolutionEnd::Cut { at: usize::MAX }, 1),
+            Bounded::AtLeast(usize::MAX)
+        );
     }
 
     #[test]

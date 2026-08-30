@@ -42,10 +42,13 @@ use crate::resolution::{Bounded, ProjectiveResolution, projective_dimension, res
 pub enum ExtError {
     /// The modules live over different algebras (distinct [`Arc`]s).
     DifferentAlgebras,
+    /// The requested degree has no representable successor.
+    DegreeOverflow { degree: usize },
 }
 
 display_error! { error ExtError {
     Self::DifferentAlgebras => "modules live over different algebras";
+    Self::DegreeOverflow { degree } => "degree {degree} has no representable successor";
 } }
 
 /// Summand layout of a projective term `(+)_v P_v^{t_v}` built by
@@ -175,10 +178,13 @@ fn check_pair(m: &Module, n: &Module) -> Result<(), ExtError> {
 
 /// `[dim Ext^0(m, n), ..., dim Ext^max_k(m, n)]`, every entry exact because the
 /// resolution prefix is always long enough (see the module docs). Errors when
-/// the modules do not share one algebra.
+/// the modules do not share one algebra or `max_k + 1` is not representable.
 pub fn ext_table(m: &Module, n: &Module, max_k: usize) -> Result<Vec<usize>, ExtError> {
     check_pair(m, n)?;
-    let res = resolve(m, max_k + 1);
+    let steps = max_k
+        .checked_add(1)
+        .ok_or(ExtError::DegreeOverflow { degree: max_k })?;
+    let res = resolve(m, steps);
     let layouts: Vec<Layout> = res.terms.iter().map(layout).collect();
     // A finite resolution continues with zero terms: past its end, Hom is zero
     // and delta is zero.
@@ -209,7 +215,8 @@ pub fn ext_table(m: &Module, n: &Module, max_k: usize) -> Result<Vec<usize>, Ext
 }
 
 /// `dim Ext^k_A(m, n)`, exact for every `k`. `Ext^0` is `dim Hom_A(m, n)`.
-/// Errors when the modules do not share one algebra.
+/// Errors when the modules do not share one algebra or `k + 1` is not
+/// representable.
 pub fn ext_dim(m: &Module, n: &Module, k: usize) -> Result<usize, ExtError> {
     Ok(ext_table(m, n, k)?[k])
 }
@@ -222,6 +229,8 @@ pub fn ext_dim(m: &Module, n: &Module, k: usize) -> Result<usize, ExtError> {
 /// `Exact` when every simple resolves within `bound`, otherwise
 /// `AtLeast(bound + 1)`, which says the minimal resolution of some simple still
 /// has a nonzero syzygy past the bound.
+/// At `usize::MAX`, the stored lower bound stays `usize::MAX`, the strongest
+/// value this return type can represent.
 ///
 /// The function does not fail: it builds the simples it resolves over the given
 /// algebra itself, so no endpoint mismatch can arise.
@@ -235,7 +244,7 @@ pub fn global_dimension(algebra: &Arc<Algebra>, bound: usize) -> Bounded<usize> 
         }
     }
     if cut {
-        Bounded::AtLeast(bound + 1)
+        Bounded::AtLeast(bound.saturating_add(1))
     } else {
         Bounded::Exact(max)
     }
@@ -389,6 +398,8 @@ pub enum ExtClassError {
     /// The left class's target module is not the right class's source module
     /// (by [`Module::ptr_eq`]), so the Yoneda product is undefined.
     MiddleMismatch,
+    /// The sum of the two class degrees is not representable.
+    DegreeOverflow { left: usize, right: usize },
     /// The cochain's source is not the space's cochain term (by
     /// [`Module::ptr_eq`]).
     SourceMismatch,
@@ -416,6 +427,7 @@ pub enum ExtClassError {
 display_error! { error ExtClassError {
     Self::IncompatibleSpaces => "the classes live in incompatible Ext spaces";
     Self::MiddleMismatch => "the left class's target module is not the right class's source module";
+    Self::DegreeOverflow { left, right } => "Ext degree sum {left} + {right} is not representable";
     Self::SourceMismatch => "the cochain's source is not the space's cochain term";
     Self::TargetMismatch => "the cochain's target is not the space's target module";
     Self::NotCocycle { .. } => "the cochain is not a cocycle";
@@ -424,6 +436,12 @@ display_error! { error ExtClassError {
     Self::NotDegreeZeroEndo => "the identity class lives only in Ext^0(M, M)";
     Self::ResolutionDisagreement { degree } => "two resolutions of one module disagree at degree {degree}; crate defect";
 } }
+
+fn product_degree(left: usize, right: usize) -> Result<usize, ExtClassError> {
+    left.checked_add(right)
+        .filter(|&degree| degree != usize::MAX)
+        .ok_or(ExtClassError::DegreeOverflow { left, right })
+}
 
 struct ExtSpaceInner {
     source: Module,
@@ -469,11 +487,15 @@ impl ExtSpace {
     /// Builds `Ext^k(m, n)` from the minimal resolution prefix
     /// `resolve(m, k + 1)`. Zero modules give zero spaces. A finite resolution
     /// that ends before degree `k` gives the zero space with the zero module
-    /// as cochain term. Errors when the modules do not share one algebra.
+    /// as cochain term. Errors when the modules do not share one algebra or
+    /// `k + 1` is not representable.
     pub fn new(m: &Module, n: &Module, k: usize) -> Result<ExtSpace, ExtError> {
         check_pair(m, n)?;
         let field = m.field();
-        let resolution = resolve(m, k + 1);
+        let steps = k
+            .checked_add(1)
+            .ok_or(ExtError::DegreeOverflow { degree: k })?;
+        let resolution = resolve(m, steps);
         let (term, cocycles, coboundaries) = if k < resolution.terms.len() {
             let term = resolution.terms[k].clone();
             let lay = layout(&term);
@@ -857,9 +879,10 @@ impl ExtClass {
             return Err(ExtClassError::MiddleMismatch);
         }
         let n = other.space.0.degree;
+        let product_degree = product_degree(self.space.0.degree, n)?;
         if !product_space.0.source.ptr_eq(&self.space.0.source)
             || !product_space.0.target.ptr_eq(&other.space.0.target)
-            || product_space.0.degree != self.space.0.degree + n
+            || product_space.0.degree != product_degree
         {
             return Err(ExtClassError::IncompatibleSpaces);
         }
@@ -875,17 +898,16 @@ impl ExtClass {
     }
 
     /// `Ext^{m+n}(M, L)` for the two factors. Errors when the middle modules
-    /// disagree (by [`Module::ptr_eq`]).
+    /// disagree (by [`Module::ptr_eq`]) or the degree sum is not representable.
     pub fn product_space(&self, other: &ExtClass) -> Result<ExtSpace, ExtClassError> {
         if !self.space.0.target.ptr_eq(&other.space.0.source) {
             return Err(ExtClassError::MiddleMismatch);
         }
-        Ok(ExtSpace::new(
-            &self.space.0.source,
-            &other.space.0.target,
-            self.space.0.degree + other.space.0.degree,
+        let degree = product_degree(self.space.0.degree, other.space.0.degree)?;
+        Ok(
+            ExtSpace::new(&self.space.0.source, &other.space.0.target, degree)
+                .expect("the middle module fixes one algebra and the degree has a successor"),
         )
-        .expect("the product endpoints share one algebra through the middle module"))
     }
 }
 
@@ -1727,6 +1749,22 @@ mod ext_class_tests {
         assert_eq!(
             ExtSpace::new(&m, &n, 1).unwrap_err(),
             ExtError::DifferentAlgebras
+        );
+    }
+
+    #[test]
+    fn an_unrepresentable_successor_degree_is_typed() {
+        let algebra = linear_an(1, f5());
+        let simple = Module::simple(&algebra, 0);
+        let expected = ExtError::DegreeOverflow { degree: usize::MAX };
+        assert_eq!(
+            ext_table(&simple, &simple, usize::MAX),
+            Err(expected.clone())
+        );
+        assert_eq!(ext_dim(&simple, &simple, usize::MAX), Err(expected.clone()));
+        assert_eq!(
+            ExtSpace::new(&simple, &simple, usize::MAX).unwrap_err(),
+            expected
         );
     }
 }

@@ -35,20 +35,24 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use auslander::algebra::{
-    Algebra, commutative_square, cyclic_nakayama, kronecker, linear_an, monomial_presentation,
-    path_algebra as kq, radical_square_zero_cycle, truncated_poly,
+    Algebra, an_with_relations, commutative_square, cyclic_nakayama, dual_numbers, kronecker,
+    linear_an, monomial_presentation, path_algebra as kq, radical_square_zero_cycle,
+    truncated_poly,
 };
 use auslander::almost_split::almost_split;
 use auslander::approx::left_approximation;
 use auslander::ar::{tau, tau_via_nakayama_kernel, tau_via_transpose_dual};
 use auslander::arquiver::{IndecomposableCatalog, ar_quiver};
+use auslander::basic::{AddClosureWitness, BasicDecomposition};
 use auslander::completion::CompletionLimits;
 use auslander::decompose::{decompose, krull_schmidt};
+use auslander::derived::{AddTComplex, DerivedEquivalenceCertificate};
 use auslander::dynkin::{DynkinType, dynkin_quiver};
 use auslander::endo::EndoAlgebra;
 use auslander::ext::ExtSpace;
 use auslander::field::{Fp, PrimeField};
 use auslander::hom::{hom, hom_dim};
+use auslander::homotopy::BoundedComplex;
 use auslander::indec::IndecomposableModule;
 use auslander::iso::is_isomorphic;
 use auslander::linalg::{DenseMat, SparseMat, SparseRow};
@@ -62,8 +66,10 @@ use auslander::radical::{radical, radical_series, socle, socle_series, top};
 use auslander::relation::{Presentation, Relation};
 use auslander::resolution::resolve;
 use auslander::supporttau::enumerate_over_catalog;
+use auslander::target::{TargetLimits, present_target};
 use auslander::taugraph::{MutationGraphLimits, support_tau_tilting_graph};
 use auslander::taurigid::{TauCache, is_tau_rigid_summandwise};
+use auslander::tilting::{ClassicalTiltingModule, ClassicalTiltingResult, TiltingLimits};
 use auslander::verify::verify;
 
 /// Work per case before the timer is read, so a fast case is not measured
@@ -80,6 +86,8 @@ fn main() {
     module_layer(&mut runner);
     machinery(&mut runner);
     homological(&mut runner);
+    target_layer(&mut runner);
+    derived_layer(&mut runner);
     tau_tilting(&mut runner);
     completion(&mut runner);
     leads(&mut runner);
@@ -629,6 +637,142 @@ fn homological(r: &mut Runner) {
                 black_box(ar_quiver(&algebra).expect("the catalog is known"));
             });
         }
+    }
+}
+
+fn target_tilting(module: &Module) -> ClassicalTiltingModule {
+    let limits = TiltingLimits {
+        max_projective_dimension: 4,
+        max_generation_steps: 8,
+    };
+    let ClassicalTiltingResult::Tilting(tilting) =
+        ClassicalTiltingModule::classify(module, limits).expect("the fixture classifies")
+    else {
+        panic!("the target benchmark fixture is classical tilting")
+    };
+    tilting
+}
+
+fn target_case(r: &mut Runner, name: &str, module: &Module) {
+    let tilting = target_tilting(module);
+    let limits = TargetLimits::default();
+    let preview = present_target(&tilting, &limits)
+        .expect("target recovery succeeds")
+        .presented()
+        .expect("the target is split")
+        .clone();
+    let work = preview.work();
+    let label = format!(
+        "present_target {name} endo={} radical={} paths={} terms={}",
+        work.endo_dimension, work.radical_products, work.paths, work.relation_terms
+    );
+    r.case("target", &label, 1, || {
+        black_box(present_target(&tilting, &limits).expect("target recovery succeeds"));
+    });
+    r.case("target", &format!("verify {name}"), 1, || {
+        assert!(black_box(preview.verify()), "target verification failed");
+    });
+}
+
+fn target_layer(r: &mut Runner) {
+    for (field_name, field) in [("f2", f2()), ("f5", f5())] {
+        let generator_algebra = linear_an(3, field);
+        target_case(
+            r,
+            &format!("generator-a3-{field_name}"),
+            &regular(&generator_algebra),
+        );
+
+        let relation_algebra = dual_numbers(field);
+        target_case(
+            r,
+            &format!("dual-numbers-{field_name}"),
+            &regular(&relation_algebra),
+        );
+
+        let pd2_algebra =
+            an_with_relations(3, &[(0, 2)], field).expect("the zero path is admissible");
+        let injectives: Vec<Module> = (0..3)
+            .map(|vertex| Module::injective(&pd2_algebra, vertex))
+            .collect();
+        let pd2 = direct_sum(&injectives.iter().collect::<Vec<_>>()).0;
+        target_case(r, &format!("pd2-dual-{field_name}"), &pd2);
+    }
+}
+
+fn derived_case(r: &mut Runner, name: &str, module: &Module) {
+    r.case(
+        "derived",
+        &format!("end-to-end certificate {name}"),
+        1,
+        || {
+            let tilting = target_tilting(module);
+            let target = present_target(&tilting, &TargetLimits::default())
+                .expect("target recovery succeeds")
+                .presented()
+                .expect("the target is split")
+                .clone();
+            black_box(
+                DerivedEquivalenceCertificate::new(tilting, target)
+                    .expect("the tilting certificate completes"),
+            );
+        },
+    );
+
+    let tilting = target_tilting(module);
+    let target = present_target(&tilting, &TargetLimits::default())
+        .expect("target recovery succeeds")
+        .presented()
+        .expect("the target is split")
+        .clone();
+    let certificate = DerivedEquivalenceCertificate::new(tilting, target)
+        .expect("the tilting certificate completes");
+    r.case("derived", &format!("verify certificate {name}"), 1, || {
+        assert!(
+            black_box(certificate.verify()),
+            "derived certificate verification failed"
+        );
+    });
+
+    let basic = BasicDecomposition::new(module).expect("the tilting module is basic");
+    let witness = AddClosureWitness::from_module(module, &basic)
+        .expect("membership decomposes")
+        .expect("T belongs to add(T)");
+    let source = AddTComplex::new(
+        BoundedComplex::new(0, vec![module.clone()], Vec::new()).expect("one term is a complex"),
+        vec![witness],
+    )
+    .expect("the source term has an add(T) witness");
+    let transported = certificate
+        .transport()
+        .forward(&source)
+        .expect("forward transport succeeds");
+    r.case("derived", &format!("forward one-term {name}"), 1, || {
+        black_box(
+            certificate
+                .transport()
+                .forward(&source)
+                .expect("forward transport succeeds"),
+        );
+    });
+    r.case("derived", &format!("reverse one-term {name}"), 1, || {
+        black_box(
+            certificate
+                .transport()
+                .reverse(&transported)
+                .expect("reverse transport succeeds"),
+        );
+    });
+}
+
+fn derived_layer(r: &mut Runner) {
+    for (field_name, field) in [("f2", f2()), ("f5", f5())] {
+        let algebra = an_with_relations(3, &[(0, 2)], field).expect("the zero path is admissible");
+        let injectives: Vec<Module> = (0..3)
+            .map(|vertex| Module::injective(&algebra, vertex))
+            .collect();
+        let module = direct_sum(&injectives.iter().collect::<Vec<_>>()).0;
+        derived_case(r, &format!("pd2-dual-{field_name}"), &module);
     }
 }
 

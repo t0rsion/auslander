@@ -41,9 +41,20 @@ use auslander::complex::{
     CheckedComplex, ExactComplex, ExactnessOutcome, HomologyDimensions, NonExactWitness,
 };
 use auslander::decompose::{self, Certificate, KrullSchmidtOutcome};
+use auslander::derived::{
+    AddTComplex as RustAddTComplex, ChainIsomorphism as RustChainIsomorphism,
+    DegreeZeroEndIdentification, DerivedCertificateError as RustDerivedCertificateError,
+    DerivedEquivalenceCertificate as RustDerivedEquivalenceCertificate,
+    GradedHomotopyEndomorphisms, ProjectiveTargetComplex as RustProjectiveTargetComplex,
+    StrictTransport as RustStrictTransport, TransportError,
+};
 use auslander::dynkin::{self, DynkinType, EuclideanType};
 use auslander::enumerate;
-use auslander::ext::{self, ExtClassError};
+use auslander::ext::{self, ExtClassError, ExtError, ProductWitness};
+use auslander::extalgebra::{
+    ExtAlgebra as RustExtAlgebra, ExtAlgebraCut, ExtAlgebraError, ExtAlgebraOutcome,
+    ExtAlgebraProductError, MultiplicationTensor,
+};
 use auslander::field::{Fp, PrimeField};
 use auslander::hochschild::{
     BarBudgetDiagnostics, BarCutReason, BarInput, BarLimit, BarLimits, BarRunDiagnostics, BarStage,
@@ -51,6 +62,10 @@ use auslander::hochschild::{
     IncompleteHochschildCohomology, bar_hochschild,
 };
 use auslander::hom;
+use auslander::homotopy::{
+    BoundedComplex, BoundedComplexError, ChainHomQuotient, ChainHomotopy, ChainMap, ChainMapError,
+    HomotopyHom, HomotopyHomQuotient,
+};
 use auslander::homspace::HomSubspace;
 use auslander::indec::{IndecError, IndecomposableModule};
 use auslander::injective::{self, InjectiveCoresolution};
@@ -72,6 +87,10 @@ use auslander::supporttau::{
     self, AlmostCompleteClassification, AlmostCompletePair, CatalogEnumeration, PairRejection,
     SupportTauError, SupportTauTiltingClassification, SupportTauTiltingPair,
 };
+use auslander::target::{
+    NonSplitTarget, TargetCutReason, TargetCutStage, TargetLimits, TargetPresentationCut,
+    TargetPresentationOutcome, TargetWork, VerifiedTargetPresentation, present_target,
+};
 use auslander::taugraph::{
     self, CertificationBlocker, ClosedSupportTauTiltingGraph, GraphBudgetDiagnostics, GraphError,
     IncompleteReason, IncompleteSupportTauTiltingGraph, MutationGraphLimits,
@@ -90,10 +109,37 @@ fn value_error(e: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(e.to_string())
 }
 
+fn bounded_complex_error(e: BoundedComplexError) -> PyErr {
+    match e {
+        BoundedComplexError::DegreeOverflow { .. } => PyOverflowError::new_err(e.to_string()),
+        other => value_error(other),
+    }
+}
+
+fn homotopy_error(e: ChainMapError) -> PyErr {
+    match e {
+        ChainMapError::DegreeOverflow { .. }
+        | ChainMapError::Padding(BoundedComplexError::DegreeOverflow { .. }) => {
+            PyOverflowError::new_err(e.to_string())
+        }
+        other => value_error(other),
+    }
+}
+
 /// An engine limit or defect (a failed pipeline run inside the library), not
 /// bad input. It becomes a RuntimeError, like the tau cross-check failures.
 fn engine_error(e: impl std::fmt::Display) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
+}
+
+fn completion_reason_name(reason: TruncationReason) -> &'static str {
+    match reason {
+        TruncationReason::BasisBudget => "basis_budget",
+        TruncationReason::WordLenBudget => "word_len_budget",
+        TruncationReason::StepBudget => "step_budget",
+        TruncationReason::OriginBudget => "origin_budget",
+        TruncationReason::AmbiguityBudget => "ambiguity_budget",
+    }
 }
 
 /// The error with its payload attached to the exception value, or the failure
@@ -109,13 +155,7 @@ fn attach(err: PyErr, f: impl FnOnce(&Bound<'_, PyBaseException>) -> PyResult<()
 /// An exhausted completion budget as a TruncationError with the diagnostics
 /// counts attached as attributes, so the consumed budget survives the boundary.
 fn truncation_error(d: &TruncationDiagnostics) -> PyErr {
-    let reason = match d.reason {
-        TruncationReason::BasisBudget => "basis_budget",
-        TruncationReason::WordLenBudget => "word_len_budget",
-        TruncationReason::StepBudget => "step_budget",
-        TruncationReason::OriginBudget => "origin_budget",
-        TruncationReason::AmbiguityBudget => "ambiguity_budget",
-    };
+    let reason = completion_reason_name(d.reason);
     let err = TruncationError::new_err(format!(
         "completion ran out of budget ({reason}): basis {}, pending ambiguities {}, steps {}",
         d.basis_len, d.pending_ambiguities, d.steps_used
@@ -207,7 +247,45 @@ fn ext_class_error(e: ExtClassError) -> PyErr {
         ExtClassError::IncompatibleSpaces | ExtClassError::MiddleMismatch => {
             IncompatibleSpacesError::new_err(e.to_string())
         }
+        ExtClassError::DegreeOverflow { .. } => PyOverflowError::new_err(e.to_string()),
         other => value_error(other),
+    }
+}
+
+fn ext_error(e: ExtError) -> PyErr {
+    match e {
+        ExtError::DegreeOverflow { .. } => PyOverflowError::new_err(e.to_string()),
+        other => value_error(other),
+    }
+}
+
+fn ext_algebra_error(e: ExtAlgebraError) -> PyErr {
+    match e {
+        ExtAlgebraError::DegreeOverflow => PyOverflowError::new_err(e.to_string()),
+        other => DefectError::new_err(other.to_string()),
+    }
+}
+
+fn ext_algebra_product_error(e: ExtAlgebraProductError) -> PyErr {
+    match e {
+        ExtAlgebraProductError::OutsideAlgebra
+        | ExtAlgebraProductError::IncompatibleBasis { .. } => {
+            IncompatibleSpacesError::new_err(e.to_string())
+        }
+        ExtAlgebraProductError::DegreeOutsideBound { .. }
+        | ExtAlgebraProductError::DegreeSumOutsideBound { .. } => value_error(e),
+    }
+}
+
+fn target_error(e: auslander::target::TargetError) -> PyErr {
+    match e {
+        auslander::target::TargetError::Basic(error) => basic_error(error),
+        auslander::target::TargetError::SizeOverflow { .. } => {
+            PyOverflowError::new_err(e.to_string())
+        }
+        auslander::target::TargetError::Relation(_)
+        | auslander::target::TargetError::Algebra(_)
+        | auslander::target::TargetError::Defect { .. } => DefectError::new_err(e.to_string()),
     }
 }
 
@@ -338,6 +416,82 @@ fn tilting_error(e: TiltingError) -> PyErr {
         | TiltingError::Ext(_)
         | TiltingError::Complex(_)
         | TiltingError::Defect { .. }) => DefectError::new_err(e.to_string()),
+    }
+}
+
+/// A rejected strict transport call. Endpoint and witness mismatches are
+/// caller input, while a failed checked construction is a DefectError.
+fn transport_error(e: TransportError) -> PyErr {
+    match e {
+        TransportError::SourceWitnessCount { expected, got } => {
+            attach(TransportInputError::new_err(e.to_string()), |value| {
+                value.setattr("expected", expected)?;
+                value.setattr("got", got)
+            })
+        }
+        TransportError::InvalidSourceWitness { term }
+        | TransportError::SourceWitnessTarget { term }
+        | TransportError::SourceWitnessTerm { term }
+        | TransportError::TargetTermNotProjective { term } => {
+            attach(TransportInputError::new_err(e.to_string()), |value| {
+                value.setattr("term", term)
+            })
+        }
+        TransportError::TargetSummandMatch { term, summand }
+        | TransportError::SourceSummandMatch { term, summand } => {
+            attach(TransportInputError::new_err(e.to_string()), |value| {
+                value.setattr("term", term)?;
+                value.setattr("summand", summand)
+            })
+        }
+        TransportError::ChainDomain | TransportError::HomotopyDomain => {
+            TransportInputError::new_err(e.to_string())
+        }
+        e @ (TransportError::InvalidTarget
+        | TransportError::Isomorphism { .. }
+        | TransportError::Split(_)
+        | TransportError::Module(_)
+        | TransportError::Hom(_)
+        | TransportError::HomSpace(_)
+        | TransportError::Complex(_)
+        | TransportError::Chain(_)
+        | TransportError::Defect { .. }) => DefectError::new_err(e.to_string()),
+    }
+}
+
+/// A failed consistency check while building a derived-equivalence certificate.
+fn derived_certificate_error(e: RustDerivedCertificateError) -> PyErr {
+    match e {
+        RustDerivedCertificateError::ResolutionCut { at } => {
+            attach(DerivedCertificateError::new_err(e.to_string()), |value| {
+                value.setattr("at", at)
+            })
+        }
+        RustDerivedCertificateError::ResolutionTermNotProjective { term } => {
+            attach(DerivedCertificateError::new_err(e.to_string()), |value| {
+                value.setattr("term", term)
+            })
+        }
+        RustDerivedCertificateError::NonzeroSelfHom { degree, dimension } => {
+            attach(DerivedCertificateError::new_err(e.to_string()), |value| {
+                value.setattr("degree", degree)?;
+                value.setattr("dimension", dimension)
+            })
+        }
+        RustDerivedCertificateError::DegreeZeroDimension {
+            homotopy,
+            endomorphism,
+        } => attach(DerivedCertificateError::new_err(e.to_string()), |value| {
+            value.setattr("homotopy_dimension", homotopy)?;
+            value.setattr("endomorphism_dimension", endomorphism)
+        }),
+        RustDerivedCertificateError::DegreeOverflow { width } => {
+            attach(DerivedCertificateError::new_err(e.to_string()), |value| {
+                value.setattr("width", width)
+            })
+        }
+        RustDerivedCertificateError::Transport(inner) => transport_error(inner),
+        other => DerivedCertificateError::new_err(other.to_string()),
     }
 }
 
@@ -1373,15 +1527,17 @@ impl PyRightModule {
 
     /// dim_k Ext^k_A(self, other), exact for every k; Ext^0 is Hom. Raises
     /// ValueError when the modules do not share one algebra object and field.
+    /// Raises OverflowError when k has no representable successor.
     #[pyo3(text_signature = "($self, other, k)")]
     fn ext_dim(&self, py: Python<'_>, other: &PyRightModule, k: usize) -> PyResult<usize> {
         check_same_context(&self.inner, &other.inner)?;
         py.allow_threads(|| ext::ext_dim(&self.inner, &other.inner, k))
-            .map_err(value_error)
+            .map_err(ext_error)
     }
 
     /// [dim Ext^0(self, other), ..., dim Ext^max_k(self, other)], each entry exact.
     /// Raises ValueError when the modules do not share one algebra object and field.
+    /// Raises OverflowError when max_k has no representable successor.
     #[pyo3(text_signature = "($self, other, max_k)")]
     fn ext_table(
         &self,
@@ -1391,7 +1547,7 @@ impl PyRightModule {
     ) -> PyResult<Vec<usize>> {
         check_same_context(&self.inner, &other.inner)?;
         py.allow_threads(|| ext::ext_table(&self.inner, &other.inner, max_k))
-            .map_err(value_error)
+            .map_err(ext_error)
     }
 
     /// Dimension vectors along the radical series M ⊇ rad M ⊇ rad^2 M ⊇ ...,
@@ -1529,7 +1685,8 @@ impl PyRightModule {
     /// The Ext space Ext^degree_A(self, other), with the cochain data
     /// `ext_dim` discards: a basis of classes, each with a representative
     /// cocycle. Raises ValueError when the modules do not share one algebra
-    /// object and field.
+    /// object and field. Raises OverflowError when degree has no representable
+    /// successor.
     #[pyo3(text_signature = "($self, other, degree)")]
     fn ext_space(
         &self,
@@ -1541,8 +1698,30 @@ impl PyRightModule {
         Ok(PyExtSpace {
             inner: py
                 .allow_threads(|| ext::ExtSpace::new(&self.inner, &other.inner, degree))
-                .map_err(value_error)?,
+                .map_err(ext_error)?,
         })
+    }
+
+    /// The bounded graded self-Ext algebra through `bound`, including every
+    /// Yoneda product whose output degree is at most `bound`.
+    ///
+    /// A finite minimal resolution returns `ExtAlgebra`. Otherwise the method
+    /// returns `IncompleteExtAlgebra`, whose exact layer includes every degree
+    /// through `bound` and names the first omitted degree. Neither outcome
+    /// claims that an omitted Ext group vanishes.
+    #[pyo3(text_signature = "($self, bound)")]
+    fn ext_algebra<'py>(&self, py: Python<'py>, bound: usize) -> PyResult<Bound<'py, PyAny>> {
+        match py
+            .allow_threads(|| ExtAlgebraOutcome::compute(&self.inner, bound))
+            .map_err(ext_algebra_error)?
+        {
+            ExtAlgebraOutcome::Complete(inner) => {
+                Ok(Bound::new(py, PyExtAlgebra { inner })?.into_any())
+            }
+            ExtAlgebraOutcome::Cut(inner) => {
+                Ok(Bound::new(py, PyIncompleteExtAlgebra { inner })?.into_any())
+            }
+        }
     }
 
     /// The almost-split sequence ending at this module, or
@@ -2058,6 +2237,14 @@ impl PyCheckedComplex {
         py.allow_threads(|| self.inner.verify())
     }
 
+    /// Converts display order to increasing homological degrees.
+    #[pyo3(text_signature = "($self, lower)")]
+    fn bounded(&self, lower: i32) -> PyResult<PyBoundedComplex> {
+        Ok(PyBoundedComplex {
+            inner: self.inner.bounded(lower).map_err(value_error)?,
+        })
+    }
+
     /// The exact homology dimension vector at one term.
     #[pyo3(text_signature = "($self, index)")]
     fn homology_dimensions(&self, index: usize) -> PyResult<PyHomologyDimensions> {
@@ -2202,6 +2389,1268 @@ impl PyExactComplex {
 
     fn __repr__(&self) -> String {
         format!("ExactComplex(terms={})", self.inner.complex().len())
+    }
+}
+
+/// A nonempty bounded complex in increasing homological degree order.
+///
+/// `differentials[i]` maps `terms[i + 1]` to `terms[i]`. Construction checks
+/// the endpoints and every consecutive composite.
+#[pyclass(name = "BoundedComplex", module = "auslander", frozen)]
+struct PyBoundedComplex {
+    inner: BoundedComplex,
+}
+
+#[pymethods]
+impl PyBoundedComplex {
+    /// BoundedComplex(lower, terms, differentials).
+    #[new]
+    #[pyo3(text_signature = "(lower, terms, differentials)")]
+    fn new(
+        lower: i32,
+        terms: Vec<PyRef<'_, PyRightModule>>,
+        differentials: Vec<PyRef<'_, PyMorphism>>,
+    ) -> PyResult<PyBoundedComplex> {
+        Ok(PyBoundedComplex {
+            inner: BoundedComplex::new(
+                lower,
+                terms.iter().map(|term| term.inner.clone()).collect(),
+                differentials
+                    .iter()
+                    .map(|differential| differential.inner.clone())
+                    .collect(),
+            )
+            .map_err(bounded_complex_error)?,
+        })
+    }
+
+    /// The inclusive stored degree interval.
+    #[getter]
+    fn degree_range(&self) -> (i32, i32) {
+        (self.inner.lower(), self.inner.upper())
+    }
+
+    /// Terms in increasing homological degree order.
+    #[getter]
+    fn terms(&self) -> Vec<PyRightModule> {
+        wrap_all(self.inner.terms())
+    }
+
+    /// Differentials in increasing source-degree order.
+    #[getter]
+    fn differentials(&self) -> Vec<PyMorphism> {
+        wrap_all(self.inner.differentials())
+    }
+
+    /// The term at one stored degree.
+    #[pyo3(text_signature = "($self, degree)")]
+    fn term(&self, degree: i32) -> PyResult<PyRightModule> {
+        Ok(self.inner.term(degree).map_err(value_error)?.into())
+    }
+
+    /// The differential with the named source degree, or None at the lower end.
+    #[pyo3(text_signature = "($self, degree)")]
+    fn differential(&self, degree: i32) -> Option<PyMorphism> {
+        self.inner
+            .differential(degree)
+            .cloned()
+            .map(PyMorphism::from)
+    }
+
+    /// The shifted complex `(C[s])_n = C_(n-s)`.
+    #[pyo3(text_signature = "($self, amount)")]
+    fn shift(&self, amount: i32) -> PyResult<PyBoundedComplex> {
+        Ok(PyBoundedComplex {
+            inner: self.inner.shift(amount).map_err(bounded_complex_error)?,
+        })
+    }
+
+    /// The direct sum, with explicit zero padding to the common degree range.
+    #[staticmethod]
+    #[pyo3(text_signature = "(complexes)")]
+    fn direct_sum(complexes: Vec<PyRef<'_, PyBoundedComplex>>) -> PyResult<PyBoundedComplex> {
+        let refs: Vec<&BoundedComplex> = complexes.iter().map(|complex| &complex.inner).collect();
+        Ok(PyBoundedComplex {
+            inner: BoundedComplex::direct_sum(&refs).map_err(bounded_complex_error)?,
+        })
+    }
+
+    /// The identity chain map.
+    #[pyo3(text_signature = "($self)")]
+    fn identity(&self) -> PyChainMap {
+        PyChainMap {
+            inner: ChainMap::identity(&self.inner),
+        }
+    }
+
+    /// The zero chain map to `target`, with zero padding when ranges differ.
+    #[pyo3(text_signature = "($self, target)")]
+    fn zero_map(&self, target: &PyBoundedComplex) -> PyResult<PyChainMap> {
+        Ok(PyChainMap {
+            inner: ChainMap::zero(&self.inner, &target.inner).map_err(homotopy_error)?,
+        })
+    }
+
+    /// Degree-`q` chain maps to `target` before quotienting by homotopy.
+    #[pyo3(text_signature = "($self, target, degree=0)", signature = (target, degree = 0))]
+    fn hom(
+        &self,
+        py: Python<'_>,
+        target: &PyBoundedComplex,
+        degree: i32,
+    ) -> PyResult<PyHomotopyHom> {
+        Ok(PyHomotopyHom {
+            inner: py
+                .allow_threads(|| HomotopyHom::new(&self.inner, &target.inner, degree))
+                .map_err(homotopy_error)?,
+        })
+    }
+
+    /// Rechecks endpoints and zero composites.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    #[getter]
+    fn is_zero(&self) -> bool {
+        self.inner.is_zero()
+    }
+
+    #[pyo3(text_signature = "($self, other)")]
+    fn agrees_with(&self, other: &PyBoundedComplex) -> bool {
+        self.inner.agrees_with(&other.inner)
+    }
+
+    fn __len__(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "BoundedComplex(degree_range={:?}, term_dims={:?})",
+            self.degree_range(),
+            self.inner
+                .terms()
+                .iter()
+                .map(|term| term.dim_vector())
+                .collect::<Vec<_>>()
+        )
+    }
+}
+
+/// A degree-zero chain map between bounded complexes.
+#[pyclass(name = "ChainMap", module = "auslander", frozen)]
+struct PyChainMap {
+    inner: ChainMap,
+}
+
+#[pymethods]
+impl PyChainMap {
+    /// ChainMap(source, target, components), with one component per common degree.
+    #[new]
+    #[pyo3(text_signature = "(source, target, components)")]
+    fn new(
+        source: &PyBoundedComplex,
+        target: &PyBoundedComplex,
+        components: Vec<PyRef<'_, PyMorphism>>,
+    ) -> PyResult<PyChainMap> {
+        Ok(PyChainMap {
+            inner: ChainMap::new(
+                &source.inner,
+                &target.inner,
+                components
+                    .iter()
+                    .map(|component| component.inner.clone())
+                    .collect(),
+            )
+            .map_err(homotopy_error)?,
+        })
+    }
+
+    #[getter]
+    fn source(&self) -> PyBoundedComplex {
+        PyBoundedComplex {
+            inner: self.inner.source().clone(),
+        }
+    }
+
+    #[getter]
+    fn target(&self) -> PyBoundedComplex {
+        PyBoundedComplex {
+            inner: self.inner.target().clone(),
+        }
+    }
+
+    #[getter]
+    fn components(&self) -> Vec<PyMorphism> {
+        wrap_all(self.inner.components())
+    }
+
+    #[getter]
+    fn degree_range(&self) -> (i32, i32) {
+        (self.inner.range().lower(), self.inner.range().upper())
+    }
+
+    #[pyo3(text_signature = "($self, degree)")]
+    fn component(&self, degree: i32) -> PyResult<PyMorphism> {
+        Ok(self.inner.component(degree).map_err(homotopy_error)?.into())
+    }
+
+    /// Composes this map first, then `other`.
+    #[pyo3(text_signature = "($self, other)")]
+    fn then(&self, other: &PyChainMap) -> PyResult<PyChainMap> {
+        Ok(PyChainMap {
+            inner: self.inner.then(&other.inner).map_err(homotopy_error)?,
+        })
+    }
+
+    #[pyo3(text_signature = "($self, other)")]
+    fn add(&self, other: &PyChainMap) -> PyResult<PyChainMap> {
+        Ok(PyChainMap {
+            inner: self.inner.add(&other.inner).map_err(homotopy_error)?,
+        })
+    }
+
+    #[pyo3(text_signature = "($self, scalar)")]
+    fn scale(&self, scalar: i64) -> PyChainMap {
+        let field = self.inner.source().terms()[0].field();
+        PyChainMap {
+            inner: self.inner.scale(field.elem(scalar)),
+        }
+    }
+
+    #[pyo3(text_signature = "($self, amount)")]
+    fn shift(&self, amount: i32) -> PyResult<PyChainMap> {
+        Ok(PyChainMap {
+            inner: self.inner.shift(amount).map_err(homotopy_error)?,
+        })
+    }
+
+    #[pyo3(text_signature = "($self)")]
+    fn mapping_cone(&self) -> PyResult<PyBoundedComplex> {
+        Ok(PyBoundedComplex {
+            inner: self.inner.mapping_cone().map_err(bounded_complex_error)?,
+        })
+    }
+
+    #[pyo3(text_signature = "($self)")]
+    fn is_null_homotopic(&self, py: Python<'_>) -> PyResult<bool> {
+        py.allow_threads(|| self.inner.is_null_homotopic())
+            .map_err(engine_error)
+    }
+
+    #[pyo3(text_signature = "($self, other, homotopy)")]
+    fn homotopic_to(
+        &self,
+        py: Python<'_>,
+        other: &PyChainMap,
+        homotopy: &PyChainHomotopy,
+    ) -> PyResult<bool> {
+        py.allow_threads(|| self.inner.homotopic_to(&other.inner, &homotopy.inner))
+            .map_err(homotopy_error)
+    }
+
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    #[pyo3(text_signature = "($self, other)")]
+    fn agrees_with(&self, other: &PyChainMap) -> bool {
+        self.inner.agrees_with(&other.inner)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ChainMap(degree_range={:?}, components={})",
+            self.degree_range(),
+            self.inner.components().len()
+        )
+    }
+}
+
+/// A degree-one component family `h_n: X_n -> Y_(n+1)`.
+#[pyclass(name = "ChainHomotopy", module = "auslander", frozen)]
+struct PyChainHomotopy {
+    inner: ChainHomotopy,
+}
+
+#[pymethods]
+impl PyChainHomotopy {
+    #[new]
+    #[pyo3(text_signature = "(source, target, components)")]
+    fn new(
+        source: &PyBoundedComplex,
+        target: &PyBoundedComplex,
+        components: Vec<PyRef<'_, PyMorphism>>,
+    ) -> PyResult<PyChainHomotopy> {
+        Ok(PyChainHomotopy {
+            inner: ChainHomotopy::new(
+                &source.inner,
+                &target.inner,
+                components
+                    .iter()
+                    .map(|component| component.inner.clone())
+                    .collect(),
+            )
+            .map_err(homotopy_error)?,
+        })
+    }
+
+    /// Builds and checks a homotopy from `left` to `right`.
+    #[staticmethod]
+    #[pyo3(text_signature = "(left, right, components)")]
+    fn between(
+        left: &PyChainMap,
+        right: &PyChainMap,
+        components: Vec<PyRef<'_, PyMorphism>>,
+    ) -> PyResult<PyChainHomotopy> {
+        Ok(PyChainHomotopy {
+            inner: ChainHomotopy::between(
+                &left.inner,
+                &right.inner,
+                components
+                    .iter()
+                    .map(|component| component.inner.clone())
+                    .collect(),
+            )
+            .map_err(homotopy_error)?,
+        })
+    }
+
+    #[getter]
+    fn source(&self) -> PyBoundedComplex {
+        PyBoundedComplex {
+            inner: self.inner.source().clone(),
+        }
+    }
+
+    #[getter]
+    fn target(&self) -> PyBoundedComplex {
+        PyBoundedComplex {
+            inner: self.inner.target().clone(),
+        }
+    }
+
+    #[getter]
+    fn components(&self) -> Vec<PyMorphism> {
+        wrap_all(self.inner.components())
+    }
+
+    #[pyo3(text_signature = "($self)")]
+    fn boundary(&self) -> PyResult<PyChainMap> {
+        Ok(PyChainMap {
+            inner: self.inner.boundary().map_err(homotopy_error)?,
+        })
+    }
+
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ChainHomotopy(components={})",
+            self.inner.components().len()
+        )
+    }
+}
+
+/// Degree-`q` chain maps between two bounded complexes.
+#[pyclass(name = "HomotopyHom", module = "auslander", frozen)]
+struct PyHomotopyHom {
+    inner: HomotopyHom,
+}
+
+#[pymethods]
+impl PyHomotopyHom {
+    #[new]
+    #[pyo3(signature = (source, target, degree = 0), text_signature = "(source, target, degree=0)")]
+    fn new(
+        py: Python<'_>,
+        source: &PyBoundedComplex,
+        target: &PyBoundedComplex,
+        degree: i32,
+    ) -> PyResult<PyHomotopyHom> {
+        Ok(PyHomotopyHom {
+            inner: py
+                .allow_threads(|| HomotopyHom::new(&source.inner, &target.inner, degree))
+                .map_err(homotopy_error)?,
+        })
+    }
+
+    #[getter]
+    fn degree(&self) -> i32 {
+        self.inner.degree()
+    }
+
+    #[getter]
+    fn dim(&self) -> usize {
+        self.inner.dim()
+    }
+
+    #[getter]
+    fn source(&self) -> PyBoundedComplex {
+        PyBoundedComplex {
+            inner: self.inner.source().clone(),
+        }
+    }
+
+    #[getter]
+    fn target(&self) -> PyBoundedComplex {
+        PyBoundedComplex {
+            inner: self.inner.target().clone(),
+        }
+    }
+
+    #[getter]
+    fn shifted_target(&self) -> PyBoundedComplex {
+        PyBoundedComplex {
+            inner: self.inner.shifted_target().clone(),
+        }
+    }
+
+    #[getter]
+    fn basis_rows(&self) -> Vec<Vec<u64>> {
+        self.inner.basis_rows().entries_u64()
+    }
+
+    #[pyo3(text_signature = "($self, index)")]
+    fn basis_morphism(&self, index: usize) -> PyResult<PyChainMap> {
+        if index >= self.inner.dim() {
+            return Err(PyValueError::new_err(format!(
+                "chain Hom basis index {index} is outside 0..{}",
+                self.inner.dim()
+            )));
+        }
+        Ok(PyChainMap {
+            inner: self.inner.basis_morphism(index),
+        })
+    }
+
+    #[pyo3(text_signature = "($self, coordinates)")]
+    fn morphism(&self, coordinates: Vec<i64>) -> PyResult<PyChainMap> {
+        if coordinates.len() != self.inner.dim() {
+            return Err(PyValueError::new_err(format!(
+                "chain Hom coordinate count is {}, expected {}",
+                coordinates.len(),
+                self.inner.dim()
+            )));
+        }
+        let field = self.inner.source().terms()[0].field();
+        let coordinates: Vec<Fp> = coordinates
+            .into_iter()
+            .map(|value| field.elem(value))
+            .collect();
+        Ok(PyChainMap {
+            inner: self.inner.morphism(&coordinates),
+        })
+    }
+
+    #[pyo3(text_signature = "($self, map)")]
+    fn coordinates(&self, map: &PyChainMap) -> PyResult<Vec<u64>> {
+        Ok(row_u64(
+            &self.inner.coords(&map.inner).map_err(value_error)?,
+        ))
+    }
+
+    #[pyo3(text_signature = "($self)")]
+    fn quotient(&self, py: Python<'_>) -> PyResult<PyHomotopyHomQuotient> {
+        Ok(PyHomotopyHomQuotient {
+            inner: py
+                .allow_threads(|| self.inner.quotient())
+                .map_err(homotopy_error)?,
+        })
+    }
+
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "HomotopyHom(degree={}, chain_dim={})",
+            self.inner.degree(),
+            self.inner.dim()
+        )
+    }
+}
+
+/// Degree-`q` chain maps modulo null-homotopic maps.
+#[pyclass(name = "HomotopyHomQuotient", module = "auslander", frozen)]
+struct PyHomotopyHomQuotient {
+    inner: HomotopyHomQuotient,
+}
+
+#[pymethods]
+impl PyHomotopyHomQuotient {
+    #[getter]
+    fn degree(&self) -> i32 {
+        self.inner.degree()
+    }
+
+    #[getter]
+    fn dim(&self) -> usize {
+        self.inner.dim()
+    }
+
+    #[getter]
+    fn source(&self) -> PyBoundedComplex {
+        PyBoundedComplex {
+            inner: self.inner.source().clone(),
+        }
+    }
+
+    #[getter]
+    fn target(&self) -> PyBoundedComplex {
+        PyBoundedComplex {
+            inner: self.inner.target().clone(),
+        }
+    }
+
+    #[getter]
+    fn shifted_target(&self) -> PyBoundedComplex {
+        PyBoundedComplex {
+            inner: self.inner.shifted_target().clone(),
+        }
+    }
+
+    #[getter]
+    fn null_homotopic_basis(&self) -> Vec<Vec<u64>> {
+        self.inner.null_homotopic_basis().entries_u64()
+    }
+
+    #[getter]
+    fn complement_basis(&self) -> Vec<Vec<u64>> {
+        self.inner.complement_basis().entries_u64()
+    }
+
+    #[pyo3(text_signature = "($self, coordinates)")]
+    fn representative(&self, coordinates: Vec<i64>) -> PyResult<PyChainMap> {
+        if coordinates.len() != self.inner.dim() {
+            return Err(PyValueError::new_err(format!(
+                "homotopy class coordinate count is {}, expected {}",
+                coordinates.len(),
+                self.inner.dim()
+            )));
+        }
+        let field = self.inner.source().terms()[0].field();
+        let coordinates: Vec<Fp> = coordinates
+            .into_iter()
+            .map(|value| field.elem(value))
+            .collect();
+        Ok(PyChainMap {
+            inner: self.inner.representative(&coordinates),
+        })
+    }
+
+    /// Returns class coordinates and the null-homotopic remainder.
+    #[pyo3(text_signature = "($self, map)")]
+    fn reduce(&self, py: Python<'_>, map: &PyChainMap) -> PyResult<(Vec<u64>, PyChainMap)> {
+        let quotient = self.inner.clone();
+        let map = map.inner.clone();
+        let (coordinates, remainder) = py
+            .allow_threads(|| quotient.reduce(&map))
+            .map_err(homotopy_error)?;
+        Ok((row_u64(&coordinates), PyChainMap { inner: remainder }))
+    }
+
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "HomotopyHomQuotient(degree={}, dim={})",
+            self.inner.degree(),
+            self.inner.dim()
+        )
+    }
+}
+
+/// Degree-zero chain maps modulo null-homotopic maps.
+#[pyclass(name = "ChainHomQuotient", module = "auslander", frozen)]
+struct PyChainHomQuotient {
+    inner: ChainHomQuotient,
+}
+
+#[pymethods]
+impl PyChainHomQuotient {
+    /// The dimension of the quotient.
+    #[getter]
+    fn dim(&self) -> usize {
+        self.inner.dim()
+    }
+
+    /// The source complex.
+    #[getter]
+    fn source(&self) -> PyBoundedComplex {
+        PyBoundedComplex {
+            inner: self.inner.source().clone(),
+        }
+    }
+
+    /// The target complex.
+    #[getter]
+    fn target(&self) -> PyBoundedComplex {
+        PyBoundedComplex {
+            inner: self.inner.target().clone(),
+        }
+    }
+
+    /// The deterministic null-homotopic basis in component coordinates.
+    #[getter]
+    fn null_homotopic_basis(&self) -> Vec<Vec<u64>> {
+        self.inner.null_homotopic_basis().entries_u64()
+    }
+
+    /// The deterministic quotient complement in component coordinates.
+    #[getter]
+    fn complement_basis(&self) -> Vec<Vec<u64>> {
+        self.inner.complement_basis().entries_u64()
+    }
+
+    /// Returns one representative from quotient-basis coordinates.
+    #[pyo3(text_signature = "($self, coordinates)")]
+    fn representative(&self, coordinates: Vec<i64>) -> PyResult<PyChainMap> {
+        if coordinates.len() != self.inner.dim() {
+            return Err(PyValueError::new_err(format!(
+                "chain homotopy quotient coordinate count is {}, expected {}",
+                coordinates.len(),
+                self.inner.dim()
+            )));
+        }
+        let field = self.inner.source().terms()[0].field();
+        let coordinates: Vec<Fp> = coordinates
+            .into_iter()
+            .map(|value| field.elem(value))
+            .collect();
+        Ok(PyChainMap {
+            inner: self.inner.representative(&coordinates),
+        })
+    }
+
+    /// Returns quotient coordinates and the null-homotopic remainder.
+    #[pyo3(text_signature = "($self, map)")]
+    fn reduce(&self, py: Python<'_>, map: &PyChainMap) -> PyResult<(Vec<u64>, PyChainMap)> {
+        let quotient = self.inner.clone();
+        let map = map.inner.clone();
+        let (coordinates, remainder) = py
+            .allow_threads(|| quotient.reduce(&map))
+            .map_err(homotopy_error)?;
+        Ok((row_u64(&coordinates), PyChainMap { inner: remainder }))
+    }
+
+    /// Recomputes the chain Hom, null-homotopic subspace, and complement.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    fn __repr__(&self) -> String {
+        format!("ChainHomQuotient(dim={})", self.inner.dim())
+    }
+}
+
+/// A bounded complex whose terms carry verified membership in `add(T)`.
+#[pyclass(name = "AddTComplex", module = "auslander", frozen)]
+struct PyAddTComplex {
+    inner: RustAddTComplex,
+}
+
+#[pymethods]
+impl PyAddTComplex {
+    /// Builds a bounded `add(T)` complex from one witness per term.
+    #[new]
+    #[pyo3(text_signature = "(complex, witnesses)")]
+    fn new(
+        py: Python<'_>,
+        complex: &PyBoundedComplex,
+        witnesses: Vec<PyRef<'_, PyAddClosureWitness>>,
+    ) -> PyResult<PyAddTComplex> {
+        let complex = complex.inner.clone();
+        let witnesses = witnesses
+            .iter()
+            .map(|witness| witness.inner.clone())
+            .collect();
+        Ok(PyAddTComplex {
+            inner: py
+                .allow_threads(|| RustAddTComplex::new(complex, witnesses))
+                .map_err(transport_error)?,
+        })
+    }
+
+    /// The bounded source complex.
+    #[getter]
+    fn complex(&self) -> PyBoundedComplex {
+        PyBoundedComplex {
+            inner: self.inner.complex().clone(),
+        }
+    }
+
+    /// One add(T) witness per source term.
+    #[getter]
+    fn witnesses(&self) -> Vec<PyAddClosureWitness> {
+        self.inner
+            .witnesses()
+            .iter()
+            .cloned()
+            .map(|inner| PyAddClosureWitness { inner })
+            .collect()
+    }
+
+    /// Rechecks the bounded complex and every term witness.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "AddTComplex(degree_range={:?})",
+            self.complex().degree_range()
+        )
+    }
+}
+
+/// A bounded target complex with checked canonical-projective term models.
+#[pyclass(name = "ProjectiveTargetComplex", module = "auslander", frozen)]
+struct PyProjectiveTargetComplex {
+    inner: RustProjectiveTargetComplex,
+}
+
+#[pymethods]
+impl PyProjectiveTargetComplex {
+    /// The bounded complex over the recovered target algebra.
+    #[getter]
+    fn complex(&self) -> PyBoundedComplex {
+        PyBoundedComplex {
+            inner: self.inner.complex().clone(),
+        }
+    }
+
+    /// Rechecks every projective term model and differential.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ProjectiveTargetComplex(degree_range={:?})",
+            self.complex().degree_range()
+        )
+    }
+}
+
+/// Two mutually inverse checked chain maps.
+#[pyclass(name = "ChainIsomorphism", module = "auslander", frozen)]
+struct PyChainIsomorphism {
+    inner: RustChainIsomorphism,
+}
+
+#[pymethods]
+impl PyChainIsomorphism {
+    /// Builds a chain isomorphism after checking both inverse identities.
+    #[new]
+    #[pyo3(text_signature = "(forward, backward)")]
+    fn new(forward: &PyChainMap, backward: &PyChainMap) -> PyResult<PyChainIsomorphism> {
+        Ok(PyChainIsomorphism {
+            inner: RustChainIsomorphism::new(forward.inner.clone(), backward.inner.clone())
+                .map_err(transport_error)?,
+        })
+    }
+
+    /// The forward chain map.
+    #[getter]
+    fn forward(&self) -> PyChainMap {
+        PyChainMap {
+            inner: self.inner.forward().clone(),
+        }
+    }
+
+    /// The inverse chain map.
+    #[getter]
+    fn backward(&self) -> PyChainMap {
+        PyChainMap {
+            inner: self.inner.backward().clone(),
+        }
+    }
+
+    /// Rechecks both maps and both inverse identities.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ChainIsomorphism(degree_range={:?})",
+            (
+                self.inner.forward().range().lower(),
+                self.inner.forward().range().upper()
+            )
+        )
+    }
+}
+
+/// Strict bounded transport fixed by one verified target presentation.
+#[pyclass(name = "StrictTransport", module = "auslander", frozen)]
+struct PyStrictTransport {
+    inner: RustStrictTransport,
+}
+
+#[pymethods]
+impl PyStrictTransport {
+    /// Builds strict transport from one verified target presentation.
+    #[new]
+    #[pyo3(text_signature = "(target)")]
+    fn new(py: Python<'_>, target: &PyTargetPresentation) -> PyResult<PyStrictTransport> {
+        let target = target.inner.clone();
+        Ok(PyStrictTransport {
+            inner: py
+                .allow_threads(|| RustStrictTransport::new(target))
+                .map_err(transport_error)?,
+        })
+    }
+
+    /// The target presentation that fixes this transport.
+    #[getter]
+    fn target(&self) -> PyTargetPresentation {
+        PyTargetPresentation {
+            inner: self.inner.target().clone(),
+        }
+    }
+
+    /// Stores verified canonical-projective models for every target term.
+    #[pyo3(text_signature = "($self, complex)")]
+    fn target_complex(
+        &self,
+        py: Python<'_>,
+        complex: &PyBoundedComplex,
+    ) -> PyResult<PyProjectiveTargetComplex> {
+        let complex = complex.inner.clone();
+        Ok(PyProjectiveTargetComplex {
+            inner: py
+                .allow_threads(|| self.inner.target_complex(complex))
+                .map_err(transport_error)?,
+        })
+    }
+
+    /// Transports a bounded `add(T)` complex to target projectives.
+    #[pyo3(text_signature = "($self, source)")]
+    fn forward(
+        &self,
+        py: Python<'_>,
+        source: &PyAddTComplex,
+    ) -> PyResult<PyProjectiveTargetComplex> {
+        Ok(PyProjectiveTargetComplex {
+            inner: py
+                .allow_threads(|| self.inner.forward(&source.inner))
+                .map_err(transport_error)?,
+        })
+    }
+
+    /// Transports a bounded projective target complex back to `add(T)`.
+    #[pyo3(text_signature = "($self, target)")]
+    fn reverse(
+        &self,
+        py: Python<'_>,
+        target: &PyProjectiveTargetComplex,
+    ) -> PyResult<PyAddTComplex> {
+        Ok(PyAddTComplex {
+            inner: py
+                .allow_threads(|| self.inner.reverse(&target.inner))
+                .map_err(transport_error)?,
+        })
+    }
+
+    /// Transports a checked chain map between bounded `add(T)` complexes.
+    #[pyo3(text_signature = "($self, source, target, map)")]
+    fn forward_chain_map(
+        &self,
+        py: Python<'_>,
+        source: &PyAddTComplex,
+        target: &PyAddTComplex,
+        map: &PyChainMap,
+    ) -> PyResult<PyChainMap> {
+        Ok(PyChainMap {
+            inner: py
+                .allow_threads(|| {
+                    self.inner
+                        .forward_chain_map(&source.inner, &target.inner, &map.inner)
+                })
+                .map_err(transport_error)?,
+        })
+    }
+
+    /// Transports a checked chain map between target projective complexes.
+    #[pyo3(text_signature = "($self, source, target, map)")]
+    fn reverse_chain_map(
+        &self,
+        py: Python<'_>,
+        source: &PyProjectiveTargetComplex,
+        target: &PyProjectiveTargetComplex,
+        map: &PyChainMap,
+    ) -> PyResult<PyChainMap> {
+        Ok(PyChainMap {
+            inner: py
+                .allow_threads(|| {
+                    self.inner
+                        .reverse_chain_map(&source.inner, &target.inner, &map.inner)
+                })
+                .map_err(transport_error)?,
+        })
+    }
+
+    /// Transports a chain homotopy between bounded `add(T)` complexes.
+    #[pyo3(text_signature = "($self, source, target, homotopy)")]
+    fn forward_homotopy(
+        &self,
+        py: Python<'_>,
+        source: &PyAddTComplex,
+        target: &PyAddTComplex,
+        homotopy: &PyChainHomotopy,
+    ) -> PyResult<PyChainHomotopy> {
+        Ok(PyChainHomotopy {
+            inner: py
+                .allow_threads(|| {
+                    self.inner
+                        .forward_homotopy(&source.inner, &target.inner, &homotopy.inner)
+                })
+                .map_err(transport_error)?,
+        })
+    }
+
+    /// Transports a chain homotopy between target projective complexes.
+    #[pyo3(text_signature = "($self, source, target, homotopy)")]
+    fn reverse_homotopy(
+        &self,
+        py: Python<'_>,
+        source: &PyProjectiveTargetComplex,
+        target: &PyProjectiveTargetComplex,
+        homotopy: &PyChainHomotopy,
+    ) -> PyResult<PyChainHomotopy> {
+        Ok(PyChainHomotopy {
+            inner: py
+                .allow_threads(|| {
+                    self.inner
+                        .reverse_homotopy(&source.inner, &target.inner, &homotopy.inner)
+                })
+                .map_err(transport_error)?,
+        })
+    }
+
+    /// Transports the mapping cone of a checked source chain map.
+    #[pyo3(text_signature = "($self, source, target, map)")]
+    fn forward_cone(
+        &self,
+        py: Python<'_>,
+        source: &PyAddTComplex,
+        target: &PyAddTComplex,
+        map: &PyChainMap,
+    ) -> PyResult<PyBoundedComplex> {
+        Ok(PyBoundedComplex {
+            inner: py
+                .allow_threads(|| {
+                    self.inner
+                        .forward_cone(&source.inner, &target.inner, &map.inner)
+                })
+                .map_err(transport_error)?,
+        })
+    }
+
+    /// Transports the mapping cone of a checked target chain map.
+    #[pyo3(text_signature = "($self, source, target, map)")]
+    fn reverse_cone(
+        &self,
+        py: Python<'_>,
+        source: &PyProjectiveTargetComplex,
+        target: &PyProjectiveTargetComplex,
+        map: &PyChainMap,
+    ) -> PyResult<PyBoundedComplex> {
+        Ok(PyBoundedComplex {
+            inner: py
+                .allow_threads(|| {
+                    self.inner
+                        .reverse_cone(&source.inner, &target.inner, &map.inner)
+                })
+                .map_err(transport_error)?,
+        })
+    }
+
+    /// Transports an explicit homological shift of a bounded `add(T)` complex.
+    #[pyo3(text_signature = "($self, source, amount)")]
+    fn forward_shift(
+        &self,
+        py: Python<'_>,
+        source: &PyAddTComplex,
+        amount: i32,
+    ) -> PyResult<PyProjectiveTargetComplex> {
+        Ok(PyProjectiveTargetComplex {
+            inner: py
+                .allow_threads(|| self.inner.forward_shift(&source.inner, amount))
+                .map_err(transport_error)?,
+        })
+    }
+
+    /// Transports an explicit homological shift of a target projective complex.
+    #[pyo3(text_signature = "($self, target, amount)")]
+    fn reverse_shift(
+        &self,
+        py: Python<'_>,
+        target: &PyProjectiveTargetComplex,
+        amount: i32,
+    ) -> PyResult<PyAddTComplex> {
+        Ok(PyAddTComplex {
+            inner: py
+                .allow_threads(|| self.inner.reverse_shift(&target.inner, amount))
+                .map_err(transport_error)?,
+        })
+    }
+
+    /// Transports the direct sum of bounded `add(T)` complexes.
+    #[pyo3(text_signature = "($self, sources)")]
+    fn forward_direct_sum(
+        &self,
+        py: Python<'_>,
+        sources: Vec<PyRef<'_, PyAddTComplex>>,
+    ) -> PyResult<PyProjectiveTargetComplex> {
+        let sources: Vec<RustAddTComplex> =
+            sources.iter().map(|source| source.inner.clone()).collect();
+        Ok(PyProjectiveTargetComplex {
+            inner: py
+                .allow_threads(|| {
+                    self.inner
+                        .forward_direct_sum(&sources.iter().collect::<Vec<_>>())
+                })
+                .map_err(transport_error)?,
+        })
+    }
+
+    /// Transports the direct sum of target projective complexes.
+    #[pyo3(text_signature = "($self, targets)")]
+    fn reverse_direct_sum(
+        &self,
+        py: Python<'_>,
+        targets: Vec<PyRef<'_, PyProjectiveTargetComplex>>,
+    ) -> PyResult<PyAddTComplex> {
+        let targets: Vec<RustProjectiveTargetComplex> =
+            targets.iter().map(|target| target.inner.clone()).collect();
+        Ok(PyAddTComplex {
+            inner: py
+                .allow_threads(|| {
+                    self.inner
+                        .reverse_direct_sum(&targets.iter().collect::<Vec<_>>())
+                })
+                .map_err(transport_error)?,
+        })
+    }
+
+    /// Returns the source unit after forward then reverse transport.
+    #[pyo3(text_signature = "($self, source)")]
+    fn source_round_trip(
+        &self,
+        py: Python<'_>,
+        source: &PyAddTComplex,
+    ) -> PyResult<PyChainIsomorphism> {
+        Ok(PyChainIsomorphism {
+            inner: py
+                .allow_threads(|| self.inner.source_round_trip(&source.inner))
+                .map_err(transport_error)?,
+        })
+    }
+
+    /// Returns the target counit after reverse then forward transport.
+    #[pyo3(text_signature = "($self, target)")]
+    fn target_round_trip(
+        &self,
+        py: Python<'_>,
+        target: &PyProjectiveTargetComplex,
+    ) -> PyResult<PyChainIsomorphism> {
+        Ok(PyChainIsomorphism {
+            inner: py
+                .allow_threads(|| self.inner.target_round_trip(&target.inner))
+                .map_err(transport_error)?,
+        })
+    }
+
+    /// Rechecks the target and canonical-projective models.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "StrictTransport(source_dims={:?}, target_dim={})",
+            self.inner.target().source().dim_vector(),
+            self.inner.target().target().dim()
+        )
+    }
+}
+
+/// One graded homotopy endomorphism quotient of the tilting resolution.
+#[pyclass(name = "GradedHomotopyEndomorphisms", module = "auslander", frozen)]
+struct PyGradedHomotopyEndomorphisms {
+    inner: GradedHomotopyEndomorphisms,
+}
+
+#[pymethods]
+impl PyGradedHomotopyEndomorphisms {
+    /// The target shift degree.
+    #[getter]
+    fn degree(&self) -> i32 {
+        self.inner.degree()
+    }
+
+    /// The deterministic quotient in this degree.
+    #[getter]
+    fn quotient(&self) -> PyChainHomQuotient {
+        PyChainHomQuotient {
+            inner: self.inner.quotient().clone(),
+        }
+    }
+
+    /// Rechecks the stored quotient basis and null-homotopic subspace.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "GradedHomotopyEndomorphisms(degree={}, dim={})",
+            self.inner.degree(),
+            self.inner.quotient().dim()
+        )
+    }
+}
+
+/// The checked degree-zero map from homotopy endomorphisms to `End_A(T)`.
+#[pyclass(name = "DegreeZeroEndIdentification", module = "auslander", frozen)]
+struct PyDegreeZeroEndIdentification {
+    inner: DegreeZeroEndIdentification,
+}
+
+#[pymethods]
+impl PyDegreeZeroEndIdentification {
+    /// The degree-zero homotopy endomorphism quotient.
+    #[getter]
+    fn quotient(&self) -> PyChainHomQuotient {
+        PyChainHomQuotient {
+            inner: self.inner.quotient().clone(),
+        }
+    }
+
+    /// Rows map quotient-basis coordinates to `End_A(T)` coordinates.
+    #[getter]
+    fn coordinates(&self) -> Vec<Vec<u64>> {
+        self.inner.coordinates().entries_u64()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "DegreeZeroEndIdentification(dim={})",
+            self.inner.quotient().dim()
+        )
+    }
+}
+
+/// A checked bounded derived equivalence from a classical tilting module.
+#[pyclass(name = "DerivedEquivalenceCertificate", module = "auslander", frozen)]
+struct PyDerivedEquivalenceCertificate {
+    inner: RustDerivedEquivalenceCertificate,
+}
+
+#[pymethods]
+impl PyDerivedEquivalenceCertificate {
+    /// Builds the complete certificate from checked tilting and target data.
+    #[new]
+    #[pyo3(text_signature = "(tilting, target)")]
+    fn new(
+        py: Python<'_>,
+        tilting: &PyClassicalTiltingModule,
+        target: &PyTargetPresentation,
+    ) -> PyResult<PyDerivedEquivalenceCertificate> {
+        let tilting = tilting.inner().clone();
+        let target = target.inner.clone();
+        Ok(PyDerivedEquivalenceCertificate {
+            inner: py
+                .allow_threads(|| RustDerivedEquivalenceCertificate::new(tilting, target))
+                .map_err(derived_certificate_error)?,
+        })
+    }
+
+    /// The tilting certificate used by this derived-equivalence certificate.
+    #[getter]
+    fn tilting(&self) -> PyClassicalTiltingModule {
+        PyClassicalTiltingModule {
+            home: Arc::new(RustClassicalTiltingResult::Tilting(
+                self.inner.tilting().clone(),
+            )),
+        }
+    }
+
+    /// The verified split target presentation.
+    #[getter]
+    fn target(&self) -> PyTargetPresentation {
+        PyTargetPresentation {
+            inner: self.inner.target().clone(),
+        }
+    }
+
+    /// The tilting resolution as a bounded homological complex.
+    #[getter]
+    fn resolution_complex(&self) -> PyBoundedComplex {
+        PyBoundedComplex {
+            inner: self.inner.resolution_complex().clone(),
+        }
+    }
+
+    /// The deterministic graded homotopy endomorphism quotients.
+    #[getter]
+    fn graded_homotopy(&self) -> Vec<PyGradedHomotopyEndomorphisms> {
+        self.inner
+            .graded_homotopy()
+            .iter()
+            .cloned()
+            .map(|inner| PyGradedHomotopyEndomorphisms { inner })
+            .collect()
+    }
+
+    /// The checked degree-zero `End_A(T)` coordinate map.
+    #[getter]
+    fn degree_zero_identification(&self) -> PyDegreeZeroEndIdentification {
+        PyDegreeZeroEndIdentification {
+            inner: self.inner.degree_zero_identification().clone(),
+        }
+    }
+
+    /// The strict transport fixed by the stored target presentation.
+    #[getter]
+    fn transport(&self) -> PyStrictTransport {
+        PyStrictTransport {
+            inner: self.inner.transport().clone(),
+        }
+    }
+
+    /// Rechecks tilting, generation, target recovery, Hom vanishing, and transport.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "DerivedEquivalenceCertificate(resolution_width={}, graded_spaces={})",
+            self.inner.tilting().projective_dimension(),
+            self.inner.graded_homotopy().len()
+        )
     }
 }
 
@@ -2902,6 +4351,26 @@ impl PyExtClass {
         })
     }
 
+    /// The Yoneda product and the deterministic chain lifts that compute it.
+    #[pyo3(text_signature = "($self, other)")]
+    fn then_with_witness(
+        &self,
+        py: Python<'_>,
+        other: &PyExtClass,
+    ) -> PyResult<(PyExtClass, PyExtProductWitness)> {
+        let (product, witness) = py
+            .allow_threads(|| self.inner.then_with_witness(&other.inner))
+            .map_err(ext_class_error)?;
+        Ok((
+            PyExtClass { inner: product },
+            PyExtProductWitness {
+                inner: witness,
+                left: self.inner.clone(),
+                right: other.inner.clone(),
+            },
+        ))
+    }
+
     /// The extension 0 -> target -> E -> source -> 0 realizing this class, as
     /// a ShortExactSequence; the zero class gives the split sequence. Raises
     /// ValueError unless the degree is 1, the only degree in which a class is
@@ -2951,6 +4420,499 @@ impl PyExtClass {
         format!(
             "ExtClass(degree={}, coordinates={:?})",
             self.inner.space().degree(),
+            self.coordinates()
+        )
+    }
+}
+
+/// The deterministic chain lifts behind one Yoneda product.
+#[pyclass(name = "ExtProductWitness", module = "auslander", frozen)]
+struct PyExtProductWitness {
+    inner: ProductWitness,
+    left: ext::ExtClass,
+    right: ext::ExtClass,
+}
+
+#[pymethods]
+impl PyExtProductWitness {
+    /// The lifts `phi_0, ..., phi_n` in degree order.
+    #[getter]
+    fn lifts(&self) -> Vec<PyMorphism> {
+        wrap_all(self.inner.lifts())
+    }
+
+    /// Rechecks the lifts against the two retained factors and `product`.
+    #[pyo3(text_signature = "($self, product)")]
+    fn verify(&self, py: Python<'_>, product: &PyExtClass) -> bool {
+        py.allow_threads(|| self.inner.verify(&self.left, &self.right, &product.inner))
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ExtProductWitness(left_degree={}, right_degree={}, lifts={})",
+            self.left.space().degree(),
+            self.right.space().degree(),
+            self.inner.lifts().len()
+        )
+    }
+}
+
+fn ext_algebra_dimensions(algebra: &RustExtAlgebra) -> Vec<usize> {
+    algebra.spaces().iter().map(ext::ExtSpace::dim).collect()
+}
+
+fn ext_algebra_space(algebra: &RustExtAlgebra, degree: usize) -> PyResult<PyExtSpace> {
+    let inner = algebra.space(degree).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "Ext degree {degree} is outside 0..={}",
+            algebra.bound()
+        ))
+    })?;
+    Ok(PyExtSpace {
+        inner: inner.clone(),
+    })
+}
+
+fn ext_algebra_basis(algebra: &RustExtAlgebra, degree: usize) -> PyResult<Vec<PyExtClass>> {
+    let basis = algebra.basis(degree).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "Ext degree {degree} is outside 0..={}",
+            algebra.bound()
+        ))
+    })?;
+    Ok(basis
+        .iter()
+        .cloned()
+        .map(|inner| PyExtClass { inner })
+        .collect())
+}
+
+fn ext_algebra_multiplication(
+    algebra: &RustExtAlgebra,
+    left_degree: usize,
+    right_degree: usize,
+) -> PyResult<PyExtMultiplication> {
+    let inner = algebra
+        .multiplication(left_degree, right_degree)
+        .ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "Ext degree sum {left_degree} + {right_degree} is outside 0..={}",
+                algebra.bound()
+            ))
+        })?;
+    Ok(PyExtMultiplication {
+        inner: inner.clone(),
+        left_basis: algebra
+            .basis(left_degree)
+            .expect("a stored tensor has its left grade")
+            .to_vec(),
+        right_basis: algebra
+            .basis(right_degree)
+            .expect("a stored tensor has its right grade")
+            .to_vec(),
+    })
+}
+
+fn ext_algebra_product_records(algebra: &RustExtAlgebra) -> Vec<PyExtProductRecord> {
+    algebra
+        .product_records()
+        .map(|record| PyExtProductRecord {
+            left_degree: record.left_degree(),
+            left_basis: record.left_basis(),
+            right_degree: record.right_degree(),
+            right_basis: record.right_basis(),
+            coordinates: record.coordinates().to_vec(),
+            product: record.class().clone(),
+            witness: record.witness().clone(),
+            left: algebra
+                .basis(record.left_degree())
+                .expect("a product record has its left grade")[record.left_basis()]
+            .clone(),
+            right: algebra
+                .basis(record.right_degree())
+                .expect("a product record has its right grade")[record.right_basis()]
+            .clone(),
+        })
+        .collect()
+}
+
+fn ext_algebra_multiply(
+    algebra: &RustExtAlgebra,
+    left: &PyExtClass,
+    right: &PyExtClass,
+) -> PyResult<PyExtClass> {
+    Ok(PyExtClass {
+        inner: algebra
+            .multiply(&left.inner, &right.inner)
+            .map_err(ext_algebra_product_error)?,
+    })
+}
+
+/// A complete bounded self-Ext algebra with deterministic Yoneda tensors.
+///
+/// Complete means that the minimal resolution ended within `bound`. Every
+/// stored degree and product is exact. Higher degrees vanish.
+#[pyclass(name = "ExtAlgebra", module = "auslander", frozen)]
+struct PyExtAlgebra {
+    inner: RustExtAlgebra,
+}
+
+#[pymethods]
+impl PyExtAlgebra {
+    /// The module whose self-Ext algebra is stored.
+    #[getter]
+    fn module(&self) -> PyRightModule {
+        self.inner.module().into()
+    }
+
+    /// The last stored cohomological degree.
+    #[getter]
+    fn bound(&self) -> usize {
+        self.inner.bound()
+    }
+
+    /// The dimensions from degree zero through `bound`.
+    #[getter]
+    fn dimensions(&self) -> Vec<usize> {
+        ext_algebra_dimensions(&self.inner)
+    }
+
+    /// The finite resolution status that makes this result complete.
+    #[getter]
+    fn resolution_status(&self) -> PyResolutionStatus {
+        PyResolutionStatus {
+            end: self.inner.resolution_end(),
+        }
+    }
+
+    /// The deterministic self-Ext space in `degree`.
+    #[pyo3(text_signature = "($self, degree)")]
+    fn degree(&self, degree: usize) -> PyResult<PyExtSpace> {
+        ext_algebra_space(&self.inner, degree)
+    }
+
+    /// The standard coordinate basis in `degree`.
+    #[pyo3(text_signature = "($self, degree)")]
+    fn basis(&self, degree: usize) -> PyResult<Vec<PyExtClass>> {
+        ext_algebra_basis(&self.inner, degree)
+    }
+
+    /// The checked degree-zero Yoneda unit.
+    #[getter]
+    fn unit(&self) -> PyExtClass {
+        PyExtClass {
+            inner: self.inner.unit().clone(),
+        }
+    }
+
+    /// The tensor for products in the ordered degree pair.
+    #[pyo3(text_signature = "($self, left_degree, right_degree)")]
+    fn multiplication(
+        &self,
+        left_degree: usize,
+        right_degree: usize,
+    ) -> PyResult<PyExtMultiplication> {
+        ext_algebra_multiplication(&self.inner, left_degree, right_degree)
+    }
+
+    /// Multiplies two classes through the stored tensor.
+    #[pyo3(text_signature = "($self, left, right)")]
+    fn multiply(&self, left: &PyExtClass, right: &PyExtClass) -> PyResult<PyExtClass> {
+        ext_algebra_multiply(&self.inner, left, right)
+    }
+
+    /// Every basis-pair product in canonical graded order.
+    #[pyo3(text_signature = "($self)")]
+    fn product_records(&self) -> Vec<PyExtProductRecord> {
+        ext_algebra_product_records(&self.inner)
+    }
+
+    /// Rebuilds every space, tensor, witness, unit, and algebra law.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ExtAlgebra(bound={}, dimensions={:?})",
+            self.inner.bound(),
+            self.dimensions()
+        )
+    }
+}
+
+/// An exact bounded self-Ext layer whose next syzygy is nonzero.
+///
+/// Every degree through `bound` and every stored product is exact. The value
+/// makes no claim about the first omitted degree or any degree after it.
+#[pyclass(name = "IncompleteExtAlgebra", module = "auslander", frozen)]
+struct PyIncompleteExtAlgebra {
+    inner: ExtAlgebraCut,
+}
+
+#[pymethods]
+impl PyIncompleteExtAlgebra {
+    /// The module whose self-Ext layer is stored.
+    #[getter]
+    fn module(&self) -> PyRightModule {
+        self.inner.algebra().module().into()
+    }
+
+    /// The last exact stored degree.
+    #[getter]
+    fn bound(&self) -> usize {
+        self.inner.algebra().bound()
+    }
+
+    /// The first degree outside the stored exact layer.
+    #[getter]
+    fn first_omitted_degree(&self) -> usize {
+        self.inner.first_omitted_degree()
+    }
+
+    /// The dimensions from degree zero through `bound`.
+    #[getter]
+    fn dimensions(&self) -> Vec<usize> {
+        ext_algebra_dimensions(self.inner.algebra())
+    }
+
+    /// The cut resolution status that proves the next syzygy is nonzero.
+    #[getter]
+    fn resolution_status(&self) -> PyResolutionStatus {
+        PyResolutionStatus {
+            end: self.inner.algebra().resolution_end(),
+        }
+    }
+
+    /// The deterministic self-Ext space in `degree`.
+    #[pyo3(text_signature = "($self, degree)")]
+    fn degree(&self, degree: usize) -> PyResult<PyExtSpace> {
+        ext_algebra_space(self.inner.algebra(), degree)
+    }
+
+    /// The standard coordinate basis in `degree`.
+    #[pyo3(text_signature = "($self, degree)")]
+    fn basis(&self, degree: usize) -> PyResult<Vec<PyExtClass>> {
+        ext_algebra_basis(self.inner.algebra(), degree)
+    }
+
+    /// The checked degree-zero Yoneda unit.
+    #[getter]
+    fn unit(&self) -> PyExtClass {
+        PyExtClass {
+            inner: self.inner.algebra().unit().clone(),
+        }
+    }
+
+    /// The tensor for products in the ordered degree pair.
+    #[pyo3(text_signature = "($self, left_degree, right_degree)")]
+    fn multiplication(
+        &self,
+        left_degree: usize,
+        right_degree: usize,
+    ) -> PyResult<PyExtMultiplication> {
+        ext_algebra_multiplication(self.inner.algebra(), left_degree, right_degree)
+    }
+
+    /// Multiplies two classes through the stored tensor.
+    #[pyo3(text_signature = "($self, left, right)")]
+    fn multiply(&self, left: &PyExtClass, right: &PyExtClass) -> PyResult<PyExtClass> {
+        ext_algebra_multiply(self.inner.algebra(), left, right)
+    }
+
+    /// Every basis-pair product in canonical graded order.
+    #[pyo3(text_signature = "($self)")]
+    fn product_records(&self) -> Vec<PyExtProductRecord> {
+        ext_algebra_product_records(self.inner.algebra())
+    }
+
+    /// Rebuilds the exact layer and rechecks the first omitted degree.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "IncompleteExtAlgebra(bound={}, first_omitted_degree={}, dimensions={:?})",
+            self.bound(),
+            self.inner.first_omitted_degree(),
+            self.dimensions()
+        )
+    }
+}
+
+/// One deterministic Yoneda product tensor between two stored Ext degrees.
+#[pyclass(name = "ExtMultiplication", module = "auslander", frozen)]
+struct PyExtMultiplication {
+    inner: MultiplicationTensor,
+    left_basis: Vec<ext::ExtClass>,
+    right_basis: Vec<ext::ExtClass>,
+}
+
+#[pymethods]
+impl PyExtMultiplication {
+    #[getter]
+    fn left_degree(&self) -> usize {
+        self.inner.left_degree()
+    }
+
+    #[getter]
+    fn right_degree(&self) -> usize {
+        self.inner.right_degree()
+    }
+
+    #[getter]
+    fn output_degree(&self) -> usize {
+        self.inner.output_degree()
+    }
+
+    #[getter]
+    fn shape(&self) -> (usize, usize, usize) {
+        (
+            self.inner.left_dim(),
+            self.inner.right_dim(),
+            self.inner.output_dim(),
+        )
+    }
+
+    /// The flat tensor in `(left basis, right basis, output coordinate)` order.
+    #[getter]
+    fn coefficients(&self) -> Vec<u64> {
+        row_u64(self.inner.coefficients())
+    }
+
+    /// Coordinates of one basis-pair product.
+    #[pyo3(text_signature = "($self, left, right)")]
+    fn basis_product(&self, left: usize, right: usize) -> PyResult<Vec<u64>> {
+        self.inner
+            .basis_product(left, right)
+            .map(row_u64)
+            .ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "basis pair ({left}, {right}) is outside tensor shape ({}, {})",
+                    self.inner.left_dim(),
+                    self.inner.right_dim()
+                ))
+            })
+    }
+
+    /// The stored checked class for one basis-pair product.
+    #[pyo3(text_signature = "($self, left, right)")]
+    fn product(&self, left: usize, right: usize) -> PyResult<PyExtClass> {
+        self.inner
+            .product(left, right)
+            .cloned()
+            .map(|inner| PyExtClass { inner })
+            .ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "basis pair ({left}, {right}) is outside tensor shape ({}, {})",
+                    self.inner.left_dim(),
+                    self.inner.right_dim()
+                ))
+            })
+    }
+
+    /// The chain-lift witness for one basis-pair product.
+    #[pyo3(text_signature = "($self, left, right)")]
+    fn witness(&self, left: usize, right: usize) -> PyResult<PyExtProductWitness> {
+        let inner = self.inner.witness(left, right).cloned().ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "basis pair ({left}, {right}) is outside tensor shape ({}, {})",
+                self.inner.left_dim(),
+                self.inner.right_dim()
+            ))
+        })?;
+        Ok(PyExtProductWitness {
+            inner,
+            left: self.left_basis[left].clone(),
+            right: self.right_basis[right].clone(),
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ExtMultiplication(degrees=({}, {}, {}), shape={:?})",
+            self.inner.left_degree(),
+            self.inner.right_degree(),
+            self.inner.output_degree(),
+            self.shape()
+        )
+    }
+}
+
+/// One canonical basis-pair Yoneda product with its checked chain lifts.
+#[pyclass(name = "ExtProductRecord", module = "auslander", frozen)]
+struct PyExtProductRecord {
+    left_degree: usize,
+    left_basis: usize,
+    right_degree: usize,
+    right_basis: usize,
+    coordinates: Vec<Fp>,
+    product: ext::ExtClass,
+    witness: ProductWitness,
+    left: ext::ExtClass,
+    right: ext::ExtClass,
+}
+
+#[pymethods]
+impl PyExtProductRecord {
+    #[getter]
+    fn left_degree(&self) -> usize {
+        self.left_degree
+    }
+
+    #[getter]
+    fn left_basis(&self) -> usize {
+        self.left_basis
+    }
+
+    #[getter]
+    fn right_degree(&self) -> usize {
+        self.right_degree
+    }
+
+    #[getter]
+    fn right_basis(&self) -> usize {
+        self.right_basis
+    }
+
+    #[getter]
+    fn coordinates(&self) -> Vec<u64> {
+        row_u64(&self.coordinates)
+    }
+
+    #[getter]
+    fn product(&self) -> PyExtClass {
+        PyExtClass {
+            inner: self.product.clone(),
+        }
+    }
+
+    #[getter]
+    fn witness(&self) -> PyExtProductWitness {
+        PyExtProductWitness {
+            inner: self.witness.clone(),
+            left: self.left.clone(),
+            right: self.right.clone(),
+        }
+    }
+
+    /// Rechecks the stored class and chain lifts against the two basis factors.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        self.product.coordinates() == self.coordinates
+            && py.allow_threads(|| self.witness.verify(&self.left, &self.right, &self.product))
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ExtProductRecord(left=({}, {}), right=({}, {}), coordinates={:?})",
+            self.left_degree,
+            self.left_basis,
+            self.right_degree,
+            self.right_basis,
             self.coordinates()
         )
     }
@@ -5365,6 +7327,556 @@ impl PyTiltingLimits {
     }
 }
 
+/// Independent ceilings for one split target-presentation run.
+#[pyclass(name = "TargetLimits", module = "auslander", frozen)]
+#[derive(Clone)]
+struct PyTargetLimits {
+    inner: TargetLimits,
+}
+
+#[pymethods]
+impl PyTargetLimits {
+    /// TargetLimits with explicit target and completion ceilings.
+    #[new]
+    #[pyo3(signature = (
+        max_endo_dimension = 4096,
+        max_radical_products = 1_000_000,
+        max_paths = 1_000_000,
+        max_relation_terms = 1_000_000,
+        max_basis = 4096,
+        max_word_len = 64,
+        max_steps = 1_000_000,
+        max_origin_terms = 4096,
+        max_ambiguities = 65_536,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        max_endo_dimension: usize,
+        max_radical_products: usize,
+        max_paths: usize,
+        max_relation_terms: usize,
+        max_basis: usize,
+        max_word_len: usize,
+        max_steps: usize,
+        max_origin_terms: usize,
+        max_ambiguities: usize,
+    ) -> PyTargetLimits {
+        PyTargetLimits {
+            inner: TargetLimits {
+                max_endo_dimension,
+                max_radical_products,
+                max_paths,
+                max_relation_terms,
+                completion: CompletionLimits {
+                    max_basis,
+                    max_word_len,
+                    max_steps,
+                    max_origin_terms,
+                    max_ambiguities,
+                },
+            },
+        }
+    }
+
+    #[getter]
+    fn max_endo_dimension(&self) -> usize {
+        self.inner.max_endo_dimension
+    }
+
+    #[getter]
+    fn max_radical_products(&self) -> usize {
+        self.inner.max_radical_products
+    }
+
+    #[getter]
+    fn max_paths(&self) -> usize {
+        self.inner.max_paths
+    }
+
+    #[getter]
+    fn max_relation_terms(&self) -> usize {
+        self.inner.max_relation_terms
+    }
+
+    #[getter]
+    fn max_basis(&self) -> usize {
+        self.inner.completion.max_basis
+    }
+
+    #[getter]
+    fn max_word_len(&self) -> usize {
+        self.inner.completion.max_word_len
+    }
+
+    #[getter]
+    fn max_steps(&self) -> usize {
+        self.inner.completion.max_steps
+    }
+
+    #[getter]
+    fn max_origin_terms(&self) -> usize {
+        self.inner.completion.max_origin_terms
+    }
+
+    #[getter]
+    fn max_ambiguities(&self) -> usize {
+        self.inner.completion.max_ambiguities
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "TargetLimits(max_endo_dimension={}, max_radical_products={}, max_paths={}, \
+             max_relation_terms={})",
+            self.inner.max_endo_dimension,
+            self.inner.max_radical_products,
+            self.inner.max_paths,
+            self.inner.max_relation_terms
+        )
+    }
+}
+
+/// Exact deterministic work counts from a completed target recovery.
+#[pyclass(name = "TargetWork", module = "auslander", frozen)]
+#[derive(Clone, Copy)]
+struct PyTargetWork {
+    inner: TargetWork,
+}
+
+#[pymethods]
+impl PyTargetWork {
+    #[getter]
+    fn endo_dimension(&self) -> usize {
+        self.inner.endo_dimension
+    }
+
+    #[getter]
+    fn radical_products(&self) -> usize {
+        self.inner.radical_products
+    }
+
+    #[getter]
+    fn paths(&self) -> usize {
+        self.inner.paths
+    }
+
+    #[getter]
+    fn relation_terms(&self) -> usize {
+        self.inner.relation_terms
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "TargetWork(endo_dimension={}, radical_products={}, paths={}, relation_terms={})",
+            self.inner.endo_dimension,
+            self.inner.radical_products,
+            self.inner.paths,
+            self.inner.relation_terms
+        )
+    }
+}
+
+/// A verified split presentation of `End_A(T)^op`.
+#[pyclass(name = "TargetPresentation", module = "auslander", frozen)]
+struct PyTargetPresentation {
+    inner: VerifiedTargetPresentation,
+}
+
+#[pymethods]
+impl PyTargetPresentation {
+    /// The source tilting module.
+    #[getter]
+    fn source(&self) -> PyRightModule {
+        self.inner.source().into()
+    }
+
+    /// The ordered indecomposable summands that define target vertices.
+    #[getter]
+    fn summands(&self) -> Vec<PyRightModule> {
+        wrap_all(self.inner.split().summands())
+    }
+
+    /// The summand inclusions into the source tilting module.
+    #[getter]
+    fn inclusions(&self) -> Vec<PyMorphism> {
+        wrap_all(self.inner.split().inclusions())
+    }
+
+    /// The source projections onto the ordered summands.
+    #[getter]
+    fn projections(&self) -> Vec<PyMorphism> {
+        wrap_all(self.inner.split().projections())
+    }
+
+    /// The deterministic morphism basis of `End_A(T)`.
+    #[getter]
+    fn endomorphism_basis(&self) -> Vec<PyMorphism> {
+        wrap_all(self.inner.endo().basis())
+    }
+
+    /// An endomorphism of `T` from deterministic basis coordinates.
+    #[pyo3(text_signature = "($self, coordinates)")]
+    fn endomorphism(&self, coordinates: Vec<i64>) -> PyResult<PyMorphism> {
+        if coordinates.len() != self.inner.endo().dim() {
+            return Err(PyValueError::new_err(format!(
+                "endomorphism coordinate count is {}, expected {}",
+                coordinates.len(),
+                self.inner.endo().dim()
+            )));
+        }
+        let field = self.inner.target().field();
+        let coordinates: Vec<Fp> = coordinates
+            .into_iter()
+            .map(|value| field.elem(value))
+            .collect();
+        Ok(self.inner.endo().morphism(&coordinates).into())
+    }
+
+    /// The checked target bound quiver algebra.
+    #[getter]
+    fn target(&self) -> PyAlgebra {
+        PyAlgebra::pinned(self.inner.target().clone())
+    }
+
+    /// The limits used by this recovery.
+    #[getter]
+    fn limits(&self) -> PyTargetLimits {
+        PyTargetLimits {
+            inner: self.inner.limits().clone(),
+        }
+    }
+
+    /// The exact deterministic work counts.
+    #[getter]
+    fn work(&self) -> PyTargetWork {
+        PyTargetWork {
+            inner: self.inner.work(),
+        }
+    }
+
+    /// The first zero radical-power index of `End_A(T)`.
+    #[getter]
+    fn radical_nilpotency_index(&self) -> usize {
+        self.inner.radical_nilpotency_index()
+    }
+
+    /// Primitive idempotent images, one row per target vertex.
+    #[getter]
+    fn idempotent_images(&self) -> Vec<Vec<u64>> {
+        self.inner.idempotent_images().entries_u64()
+    }
+
+    /// Arrow images, one row per target arrow.
+    #[getter]
+    fn arrow_images(&self) -> Vec<Vec<u64>> {
+        self.inner.arrow_images().entries_u64()
+    }
+
+    /// Normal-word images in endomorphism coordinates.
+    #[getter]
+    fn normal_word_images(&self) -> Vec<Vec<u64>> {
+        self.inner.normal_word_images().entries_u64()
+    }
+
+    /// The inverse matrix from endomorphism to target coordinates.
+    #[getter]
+    fn normal_word_preimages(&self) -> Vec<Vec<u64>> {
+        self.inner.normal_word_preimages().entries_u64()
+    }
+
+    /// The target completion certificate in canonical JSON.
+    #[getter]
+    fn certificate_json(&self) -> String {
+        self.inner.completion_certificate().to_canonical_json()
+    }
+
+    /// Maps target coordinates to `End_A(T)` coordinates.
+    #[pyo3(text_signature = "($self, coordinates)")]
+    fn map_coordinates(&self, coordinates: Vec<i64>) -> PyResult<Vec<u64>> {
+        if coordinates.len() != self.inner.target().dim() {
+            return Err(PyValueError::new_err(format!(
+                "target coordinate count is {}, expected {}",
+                coordinates.len(),
+                self.inner.target().dim()
+            )));
+        }
+        let field = self.inner.target().field();
+        let coordinates: Vec<Fp> = coordinates
+            .into_iter()
+            .map(|value| field.elem(value))
+            .collect();
+        Ok(row_u64(&self.inner.map_coordinates(&coordinates)))
+    }
+
+    /// Maps `End_A(T)` coordinates back to target coordinates.
+    #[pyo3(text_signature = "($self, coordinates)")]
+    fn preimage_coordinates(&self, coordinates: Vec<i64>) -> PyResult<Vec<u64>> {
+        if coordinates.len() != self.inner.endo().dim() {
+            return Err(PyValueError::new_err(format!(
+                "endomorphism coordinate count is {}, expected {}",
+                coordinates.len(),
+                self.inner.endo().dim()
+            )));
+        }
+        let field = self.inner.target().field();
+        let coordinates: Vec<Fp> = coordinates
+            .into_iter()
+            .map(|value| field.elem(value))
+            .collect();
+        Ok(row_u64(&self.inner.preimage_coordinates(&coordinates)))
+    }
+
+    /// Recomputes the source classification, target, and algebra map.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "TargetPresentation(vertices={}, arrows={}, dimension={})",
+            self.inner.target().quiver().num_vertices(),
+            self.inner.target().quiver().num_arrows(),
+            self.inner.target().dim()
+        )
+    }
+}
+
+/// A certified target that is not split over the base prime field.
+#[pyclass(name = "UnsupportedTarget", module = "auslander", frozen)]
+struct PyUnsupportedTarget {
+    inner: NonSplitTarget,
+}
+
+#[pymethods]
+impl PyUnsupportedTarget {
+    #[getter]
+    fn module(&self) -> PyRightModule {
+        self.inner.module().into()
+    }
+
+    #[getter]
+    fn summand(&self) -> usize {
+        self.inner.summand()
+    }
+
+    #[getter]
+    fn residue_degree(&self) -> usize {
+        self.inner.residue_degree()
+    }
+
+    #[getter]
+    fn limits(&self) -> PyTargetLimits {
+        PyTargetLimits {
+            inner: self.inner.limits().clone(),
+        }
+    }
+
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "UnsupportedTarget(summand={}, residue_degree={})",
+            self.inner.summand(),
+            self.inner.residue_degree()
+        )
+    }
+}
+
+fn target_stage_name(stage: TargetCutStage) -> String {
+    match stage {
+        TargetCutStage::EndoDimension => "endomorphism_dimension".to_string(),
+        TargetCutStage::RadicalPower { power } => format!("radical_power:{power}"),
+        TargetCutStage::RadicalCorner {
+            source,
+            target,
+            power,
+        } => format!("radical_corner:{source}:{target}:{power}"),
+        TargetCutStage::Paths { length } => format!("paths:{length}"),
+        TargetCutStage::Relations { source, target } => {
+            format!("relations:{source}:{target}")
+        }
+    }
+}
+
+/// A target recovery stopped at its first rejected reservation.
+#[pyclass(name = "IncompleteTargetPresentation", module = "auslander", frozen)]
+struct PyIncompleteTargetPresentation {
+    inner: TargetPresentationCut,
+}
+
+#[pymethods]
+impl PyIncompleteTargetPresentation {
+    #[getter]
+    fn source(&self) -> PyRightModule {
+        self.inner.source().into()
+    }
+
+    #[getter]
+    fn limits(&self) -> PyTargetLimits {
+        PyTargetLimits {
+            inner: self.inner.limits().clone(),
+        }
+    }
+
+    #[getter]
+    fn tilting_limits(&self) -> PyTiltingLimits {
+        PyTiltingLimits {
+            inner: self.inner.tilting_limits(),
+        }
+    }
+
+    /// The stopped ceiling: `target_budget` or `completion_budget`.
+    #[getter]
+    fn kind(&self) -> &'static str {
+        match self.inner.reason() {
+            TargetCutReason::Budget(_) => "target_budget",
+            TargetCutReason::Completion(_) => "completion_budget",
+        }
+    }
+
+    /// The exact target stage, or the completion budget name.
+    #[getter]
+    fn stage(&self) -> String {
+        match self.inner.reason() {
+            TargetCutReason::Budget(cut) => target_stage_name(cut.stage),
+            TargetCutReason::Completion(cut) => completion_reason_name(cut.reason).to_string(),
+        }
+    }
+
+    /// The target stage kind without embedded indices.
+    #[getter]
+    fn stage_kind(&self) -> &'static str {
+        match self.inner.reason() {
+            TargetCutReason::Budget(cut) => match cut.stage {
+                TargetCutStage::EndoDimension => "endomorphism_dimension",
+                TargetCutStage::RadicalPower { .. } => "radical_power",
+                TargetCutStage::RadicalCorner { .. } => "radical_corner",
+                TargetCutStage::Paths { .. } => "paths",
+                TargetCutStage::Relations { .. } => "relations",
+            },
+            TargetCutReason::Completion(_) => "completion",
+        }
+    }
+
+    #[getter]
+    fn power(&self) -> Option<usize> {
+        match self.inner.reason() {
+            TargetCutReason::Budget(cut) => match cut.stage {
+                TargetCutStage::RadicalPower { power }
+                | TargetCutStage::RadicalCorner { power, .. } => Some(power),
+                _ => None,
+            },
+            TargetCutReason::Completion(_) => None,
+        }
+    }
+
+    #[getter]
+    fn source_vertex(&self) -> Option<u32> {
+        match self.inner.reason() {
+            TargetCutReason::Budget(cut) => match cut.stage {
+                TargetCutStage::RadicalCorner { source, .. }
+                | TargetCutStage::Relations { source, .. } => Some(source),
+                _ => None,
+            },
+            TargetCutReason::Completion(_) => None,
+        }
+    }
+
+    #[getter]
+    fn target_vertex(&self) -> Option<u32> {
+        match self.inner.reason() {
+            TargetCutReason::Budget(cut) => match cut.stage {
+                TargetCutStage::RadicalCorner { target, .. }
+                | TargetCutStage::Relations { target, .. } => Some(target),
+                _ => None,
+            },
+            TargetCutReason::Completion(_) => None,
+        }
+    }
+
+    #[getter]
+    fn path_length(&self) -> Option<usize> {
+        match self.inner.reason() {
+            TargetCutReason::Budget(cut) => match cut.stage {
+                TargetCutStage::Paths { length } => Some(length),
+                _ => None,
+            },
+            TargetCutReason::Completion(_) => None,
+        }
+    }
+
+    /// Units reserved before a target-budget cut.
+    #[getter]
+    fn used(&self) -> Option<usize> {
+        match self.inner.reason() {
+            TargetCutReason::Budget(cut) => Some(cut.used),
+            TargetCutReason::Completion(_) => None,
+        }
+    }
+
+    /// Units requested by a rejected target reservation.
+    #[getter]
+    fn requested(&self) -> Option<usize> {
+        match self.inner.reason() {
+            TargetCutReason::Budget(cut) => Some(cut.requested),
+            TargetCutReason::Completion(_) => None,
+        }
+    }
+
+    /// The target budget that rejected the reservation.
+    #[getter]
+    fn limit(&self) -> Option<usize> {
+        match self.inner.reason() {
+            TargetCutReason::Budget(cut) => Some(cut.limit),
+            TargetCutReason::Completion(_) => None,
+        }
+    }
+
+    /// Completion basis size at a completion cut.
+    #[getter]
+    fn completion_basis_len(&self) -> Option<usize> {
+        match self.inner.reason() {
+            TargetCutReason::Budget(_) => None,
+            TargetCutReason::Completion(cut) => Some(cut.basis_len),
+        }
+    }
+
+    /// Pending completion ambiguities at a completion cut.
+    #[getter]
+    fn completion_pending_ambiguities(&self) -> Option<usize> {
+        match self.inner.reason() {
+            TargetCutReason::Budget(_) => None,
+            TargetCutReason::Completion(cut) => Some(cut.pending_ambiguities),
+        }
+    }
+
+    /// Completion work units consumed before a completion cut.
+    #[getter]
+    fn completion_steps_used(&self) -> Option<usize> {
+        match self.inner.reason() {
+            TargetCutReason::Budget(_) => None,
+            TargetCutReason::Completion(cut) => Some(cut.steps_used),
+        }
+    }
+
+    /// Repeats target recovery and requires the same first cut.
+    #[pyo3(text_signature = "($self)")]
+    fn verify(&self, py: Python<'_>) -> bool {
+        py.allow_threads(|| self.inner.verify())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "IncompleteTargetPresentation(kind={:?}, stage={:?})",
+            self.kind(),
+            self.stage()
+        )
+    }
+}
+
 /// A classical tilting classification with one of three mathematical outcomes.
 ///
 /// `is_tilting` is True for a certificate, False only for a positive
@@ -5529,6 +8041,53 @@ impl PyClassicalTiltingModule {
             .cloned()
             .map(|inner| PyAddClosureWitness { inner })
             .collect()
+    }
+
+    /// A witness that `module` lies in `add(T)`, or None when it does not.
+    ///
+    /// A blocked decomposition raises `CertificationBlockedError`. The None
+    /// result is exact once both decompositions are certified.
+    #[pyo3(text_signature = "($self, module)")]
+    fn add_closure_witness(
+        &self,
+        py: Python<'_>,
+        module: &PyRightModule,
+    ) -> PyResult<Option<PyAddClosureWitness>> {
+        check_same_context(self.inner().module(), &module.inner)?;
+        let target = py
+            .allow_threads(|| BasicDecomposition::new(self.inner().module()))
+            .map_err(basic_error)?;
+        Ok(py
+            .allow_threads(|| AddClosureWitness::from_module(&module.inner, &target))
+            .map_err(basic_error)?
+            .map(|inner| PyAddClosureWitness { inner }))
+    }
+
+    /// Recovers `End_A(T)^op` as a checked split bound quiver algebra.
+    ///
+    /// The result is `TargetPresentation` on success, `UnsupportedTarget`
+    /// when a summand has residue degree greater than one, or
+    /// `IncompleteTargetPresentation` when a caller ceiling stops the run.
+    #[pyo3(text_signature = "($self, limits)")]
+    fn target_presentation<'py>(
+        &self,
+        py: Python<'py>,
+        limits: &PyTargetLimits,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        match py
+            .allow_threads(|| present_target(self.inner(), &limits.inner))
+            .map_err(target_error)?
+        {
+            TargetPresentationOutcome::Presented(inner) => {
+                Ok(Bound::new(py, PyTargetPresentation { inner })?.into_any())
+            }
+            TargetPresentationOutcome::Unsupported(inner) => {
+                Ok(Bound::new(py, PyUnsupportedTarget { inner })?.into_any())
+            }
+            TargetPresentationOutcome::Cut(inner) => {
+                Ok(Bound::new(py, PyIncompleteTargetPresentation { inner })?.into_any())
+            }
+        }
     }
 
     /// Recomputes the resolution, Ext spaces, generation route, and witnesses.
@@ -5761,7 +8320,25 @@ create_exception!(
     PyRuntimeError,
     "An internal cross-check of this library failed: a computation checked a \
      consequence of a theorem whose hypotheses hold, and the check came out \
-     false. This is a bug in auslander, never bad input."
+    false. This is a bug in auslander, never bad input."
+);
+
+create_exception!(
+    auslander,
+    TransportInputError,
+    PyValueError,
+    "The map, homotopy, witness, or target term does not fit the supplied strict \
+     transport inputs. The message and attached term or summand index identify \
+     the failed precondition."
+);
+
+create_exception!(
+    auslander,
+    DerivedCertificateError,
+    PyRuntimeError,
+    "A checked condition of the derived-equivalence certificate failed. The \
+     message and attached degree, dimension, term, or width identify that \
+     condition."
 );
 
 create_exception!(
@@ -5988,6 +8565,12 @@ fn auslander_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyHomologyDimensions>()?;
     m.add_class::<PyNonExactWitness>()?;
     m.add_class::<PyExactComplex>()?;
+    m.add_class::<PyBoundedComplex>()?;
+    m.add_class::<PyChainMap>()?;
+    m.add_class::<PyChainHomotopy>()?;
+    m.add_class::<PyHomotopyHom>()?;
+    m.add_class::<PyHomotopyHomQuotient>()?;
+    m.add_class::<PyChainHomQuotient>()?;
     m.add_class::<PyResolutionKind>()?;
     m.add_class::<PyResolutionStatus>()?;
     m.add_class::<PyResolution>()?;
@@ -5998,6 +8581,11 @@ fn auslander_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyEuclideanType>()?;
     m.add_class::<PyExtSpace>()?;
     m.add_class::<PyExtClass>()?;
+    m.add_class::<PyExtProductWitness>()?;
+    m.add_class::<PyExtAlgebra>()?;
+    m.add_class::<PyIncompleteExtAlgebra>()?;
+    m.add_class::<PyExtMultiplication>()?;
+    m.add_class::<PyExtProductRecord>()?;
     m.add_class::<PySplitWitness>()?;
     m.add_class::<PyNonSplitWitness>()?;
     m.add_class::<PyShortExactSequence>()?;
@@ -6029,10 +8617,22 @@ fn auslander_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyHochschildDegree>()?;
     m.add_class::<PyHochschildClass>()?;
     m.add_class::<PyTiltingLimits>()?;
+    m.add_class::<PyTargetLimits>()?;
+    m.add_class::<PyTargetWork>()?;
+    m.add_class::<PyTargetPresentation>()?;
+    m.add_class::<PyUnsupportedTarget>()?;
+    m.add_class::<PyIncompleteTargetPresentation>()?;
     m.add_class::<PyClassicalTiltingResult>()?;
     m.add_class::<PyClassicalTiltingModule>()?;
     m.add_class::<PyPositiveSelfExtension>()?;
     m.add_class::<PyTiltingBlocker>()?;
+    m.add_class::<PyAddTComplex>()?;
+    m.add_class::<PyProjectiveTargetComplex>()?;
+    m.add_class::<PyChainIsomorphism>()?;
+    m.add_class::<PyStrictTransport>()?;
+    m.add_class::<PyGradedHomotopyEndomorphisms>()?;
+    m.add_class::<PyDegreeZeroEndIdentification>()?;
+    m.add_class::<PyDerivedEquivalenceCertificate>()?;
     m.add(
         "TauAgreementUnknown",
         m.py().get_type::<TauAgreementUnknown>(),
@@ -6043,6 +8643,14 @@ fn auslander_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add("TruncationError", m.py().get_type::<TruncationError>())?;
     m.add("DefectError", m.py().get_type::<DefectError>())?;
+    m.add(
+        "TransportInputError",
+        m.py().get_type::<TransportInputError>(),
+    )?;
+    m.add(
+        "DerivedCertificateError",
+        m.py().get_type::<DerivedCertificateError>(),
+    )?;
     m.add(
         "CertificationBlockedError",
         m.py().get_type::<CertificationBlockedError>(),
