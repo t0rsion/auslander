@@ -6,8 +6,8 @@ authors:
   - family-names: Kringeland
     given-names: Tor
     email: tor@vixe.re
-version: 0.6.0
-date-released: 2026-08-26
+version: 0.7.0
+date-released: 2026-08-30
 repository-code: "https://github.com/t0rsion/auslander"
 url: "https://github.com/t0rsion/auslander"
 license:

@@ -8,7 +8,7 @@ at one side or the other, not at a shared assumption.
 
 Two JSON files, produced by independent tool chains:
 
-- `qpa_expected.json`: committed, at schema v8, and the oracle the harness
+- `qpa_expected.json`: committed, at schema v9, and the oracle the harness
   reads. A real GAP+QPA run of `generate_fixtures.g` generated it. This library
   never writes it. The always-on test `library_matches_the_committed_qpa_truth`
   compares the library's freshly computed values against it, and a missing or
@@ -17,7 +17,7 @@ Two JSON files, produced by independent tool chains:
   library's own output, written by the test's `QPA_ORACLE_WRITE=1` mode. It is
   kept so that unintended drift in our values fails CI even without GAP
   installed. Agreement with it is self-consistency only. Correctness comes from
-  `qpa_expected.json`. It stays at v6 because the v8 block holds
+  `qpa_expected.json`. It stays at v6 because the oracle block holds
   `brute_agreement`, a GAP-internal cross-check with no library counterpart, and
   a snapshot must not invent one. The harness implements exactly these two
   schema strings and rejects every other, so neither file goes stale unnoticed.
@@ -45,9 +45,9 @@ module are computed over the opposite algebra on its dual, which is the same
 computation as the morphisms into a module: `opposite` keeps the vertex ids and
 `dual` keeps the dimension vector, so the values compare directly.
 
-The recorded always-on run passed 97 tests in 2.46 s with
+The recorded always-on run passed 103 tests in 2.54 s with
 `cargo test -p auslander --test qpa_oracle`. The recorded live test passed in
-228.76 s with this command:
+229.96 s with this command:
 
 ```sh
 QPA_ORACLE=1 cargo test -p auslander --test qpa_oracle \
@@ -104,7 +104,7 @@ cp qpa_generated.json \
    /path/to/crates/auslander/tests/qpa-oracle/qpa_expected.json
 ```
 
-The generator emits schema v8 and the last line must read
+The generator emits schema v9 and the last line must read
 `qpa-oracle-generator-ok`. It writes `qpa_generated.json`, never
 `qpa_expected.json`, so promoting a run is the deliberate copy above.
 
@@ -113,9 +113,8 @@ It crashed on two of five runs without `-m 1g` and on none of three runs with
 it; the flag asks for a large initial workspace. The flag changes nothing in
 the output: every completed run, with the flag and without, wrote the same
 bytes. Raising the shell stack limit does not help; with
-`ulimit -s unlimited` GAP crashed sooner. Use `-m 1g`. The two v8 provenance
-runs below took 4:22.63 and 3:46.17. A crashed run leaves no output file,
-because the file is written in one final statement. A crash therefore cannot
+`ulimit -s unlimited` GAP crashed sooner. Use `-m 1g`. A crashed run leaves no
+output file, because the file is written in one final statement. A crash therefore cannot
 produce a truncated file. Repeat the run until it completes and prints the
 sentinel. Before copying either file, confirm two completed runs in fresh
 directories agree byte for byte.
@@ -149,26 +148,26 @@ oracle run as proof that this file reproduces on the runner.
 
 ## Provenance of the committed `qpa_expected.json`
 
-- Generated: 2026-08-25, on Arch Linux, package `gap 4.16.1-1`
+- Generated: 2026-08-26, on Arch Linux, package `gap 4.16.1-1`
   (`/usr/bin/gap`, `GAPInfo.Version` = `4.16dev`).
 - QPA: version 1.36, loaded from `~/.gap/pkg/qpa`, a git clone at
   `v1.36-20-g9100462`.
 - Command: `cd "$(mktemp -d)" && /usr/bin/gap -q -T -m 1g
-  .../tests/qpa-oracle/generate_fixtures.g` (24 fixtures written; schema v8),
-  4:22.63 and 3:46.17 of wall clock in two fresh temp directories.
+  .../tests/qpa-oracle/generate_fixtures.g` (24 fixtures written; schema v9).
+  The first generator run took 3:46.63. The second run, inside the full live
+  gate, took 229.96 s including parsing and comparison.
 - SHA-256:
-  `894c2a11fab65897434cdf41b0a0039cb02fb853a9886b02355bf83e8621eef8`.
+  `42b35124c9a9e399ff48b27ff2292df218afde357ab7e9a8badbbee9ec8a2c35`.
 - Two completed runs in fresh temp dirs produced byte-identical output. QPA's
   own list order is discovery order, so the generator sorts every emitted list
   by an explicit key first.
 - `provenance.command` inside the file reads
   `gap -q -T -m 1g generate_fixtures.g`. It records the executable flags but
   not the temporary directory or absolute generator path.
-- The previous committed oracle was schema v7 (SHA-256
-  `de3216e72b46c0b5cf311b8ba6219dbf5d260d1336d4b974baac516ae0f4d7b9`, generated
-  2026-08-18 with `GAPInfo.Version` `4.16dev` and QPA 1.36). Schema v8 removes
-  20 `one_tilting` fields, adds the `a3-mod-ab/f2` fixture, and adds 24
-  `classical_tilting` lists. Three of those lists are nonempty.
+- The previous committed oracle was schema v8 (SHA-256
+  `894c2a11fab65897434cdf41b0a0039cb02fb853a9886b02355bf83e8621eef8`, generated
+  2026-08-25 with `GAPInfo.Version` `4.16dev` and QPA 1.36). Schema v9 adds a
+  target outcome to each positive classical-tilting record.
 - The schema v6 oracle had SHA-256
   `d4e3561f3d9b58111381d35da7b6c6d5174d33e3152a798f3d5724fb3a9dde0c`, generated
   2026-08-06 by the same tool chain. Deleting the 23 `support_tau_tilting`
@@ -186,7 +185,7 @@ oracle run as proof that this file reproduces on the runner.
 
 Schema v6 is schema v5 unchanged, plus the Auslander-Reiten fields at the end of
 every fixture, plus the schema string. The envelope keys are the same. The
-oracle is at v8 and carries the schema string `auslander-qpa-oracle-v8`; the v6
+oracle is at v9 and carries the schema string `auslander-qpa-oracle-v9`; the v6
 string below is the one `native_snapshot.json` carries, and the fields are the
 same in both.
 
@@ -408,10 +407,10 @@ Schema history: v1 through v4 stored one implicit global field and untyped
 values. v5 added the per-fixture field and presentation. v6 adds the
 Auslander-Reiten fields above. v7 adds the support tau-tilting block below.
 Schema v8 replaces its unread one-tilting list with designated classical
-tilting candidates. The reader implements two schema strings, v8 for the
-oracle and v6 for the snapshot, and rejects every
-other, so a stale file fails loudly instead of silently skipping checks. Each
-file is validated against exactly one of the two.
+tilting candidates. Schema v9 adds their target invariants. The reader
+implements two schema strings, v9 for the oracle and v6 for the snapshot. It
+rejects every other string, so a stale file fails instead of skipping checks.
+Each file is validated against exactly one of the two.
 
 JSON is written and read by hand: the schema is small and fixed, so string
 formatting plus a strict recursive-descent reader replaces a serde dependency.
@@ -663,6 +662,45 @@ dimension vector, and runs `ClassicalTiltingModule::classify`. It compares the
 projective dimension and the generation term dimensions. QPA lists each
 per-projective complex from its last target back to the projective, so the
 harness reverses those lists before it adds them term by term.
+
+## Schema v9 targets
+
+Schema v9 adds one `target` outcome to each QPA-positive classical-tilting
+record. A computed outcome has this form:
+
+```json
+"target": {
+  "status": "computed",
+  "algebra": "endomorphism-opposite",
+  "dimension": 5,
+  "cartan": [[1, 0, 0], [1, 1, 0], [0, 1, 1]],
+  "radical_layers": [3, 2],
+  "simple_ext1": [[0, 0, 0], [1, 0, 0], [0, 1, 0]]
+}
+```
+
+QPA computes `EndOfModuleAsQuiverAlgebra(T)`, then applies
+`OppositePathAlgebra`. The result is `End_A(T)^op`, the target for right
+modules. The generator records its dimension, Cartan matrix, dimensions of
+`J^i/J^(i+1)`, and simple Ext^1 matrix. It does not record QPA's relation list.
+The relation generators are not canonical.
+
+QPA and auslander can order primitive idempotents differently. The comparator
+therefore requires one vertex permutation to match both the Cartan and Ext^1
+matrices. The same permutation applies to rows and columns. Dimension and
+radical layers are order-independent and compare directly.
+
+An unavailable QPA operation produces a typed outcome:
+
+```json
+{"status": "skipped", "reason": "operation-unavailable"}
+```
+
+The other accepted reasons are `endomorphism-presentation-failed`,
+`opposite-algebra-failed`, and `invariant-computation-failed`. The strict
+reader rejects every other reason. The three committed records are computed,
+so the always-on gate runs `present_target` and requires `Presented` for each
+one.
 
 ## Fixture manifest
 

@@ -4,6 +4,68 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-08-30
+
+Classical tilting certificates now reach their split target algebras and a
+checked derived-equivalence certificate. The release also adds bounded
+self-Ext algebras and the homotopy category of bounded module complexes.
+
+### Highlights
+
+- Recover and verify the split target algebra `End_A(T)^op` from a certified
+  classical tilting module.
+- Check a derived-equivalence certificate and strict transport on supported
+  bounded complexes.
+- Compute bounded self-Ext products and Hom spaces modulo chain homotopy.
+
+### Added
+
+- `present_target` recovers `End_A(T)^op` as a deterministic bound quiver
+  algebra. `TargetPresentationOutcome` separates a verified presentation, a
+  non-split boundary, and a resource cut. Every cut retains the source,
+  effective limits, and first rejected reservation. The non-split branch is
+  unreachable for certified tilting modules over the supported prime fields.
+- `VerifiedTargetPresentation` stores the primitive idempotents, arrow images,
+  normal-word coordinate map, inverse map, completion certificate, and exact
+  work counts. Its verifier rebuilds the target and checks every basis
+  product. A mutation corpus changes each certificate block in turn.
+- `ExtAlgebraOutcome` computes exact self-Ext grades and Yoneda tensors through
+  one degree bound. A finite resolution gives `Complete`. A nonzero next
+  syzygy gives `Cut`, with all stored grades and products still exact.
+- `BoundedComplex`, `ChainMap`, `ChainHomotopy`, and `HomotopyHom` use integer
+  homological degrees. They provide checked shifts, direct sums, cones, chain
+  homotopies, and deterministic Hom quotients modulo null-homotopy.
+- `StrictTransport` realizes `Hom_A(T, -)` on bounded `add(T)` complexes and
+  its inverse on bounded projective target complexes. Both directions carry
+  checked term models and chain round trips.
+- `DerivedEquivalenceCertificate` checks the bounded projective resolution of
+  `T`, its graded homotopy self-Hom groups, the degree-zero endomorphism
+  algebra, the generation complex, and strict transport.
+- Python classes expose the target outcomes, Ext product records and lift
+  witnesses, bounded homotopy values, strict transport, and derived
+  certificates. Long constructors and verification calls release the GIL.
+- Fresh-process determinism covers target certificates, target cuts, Ext
+  tensors, homotopy quotients, and transport data. Acceptance fixtures run
+  over F_2 and F_5.
+- QPA oracle schema v9 checks three tilting targets. It compares dimension,
+  Cartan data, radical layers, and simple Ext^1 under one vertex permutation.
+  QPA does not expose a canonical relation basis for these presentations.
+- The performance harness measures target recovery, certificate verification,
+  and strict transport separately. Tests gate exact target work counts rather
+  than elapsed time.
+
+### Limits
+
+- Ordinary target quivers require split residue fields. Every certified
+  tilting summand in the current prime-field domain is split. The typed
+  `Unsupported` boundary remains, but species are not constructed.
+- Strict transport requires an `add(T)` witness for each source term or a
+  projective witness for each target term. It does not replace arbitrary
+  bounded complexes automatically.
+- The release handles classical tilting modules, not arbitrary tilting
+  complexes. It does not construct unbounded derived categories or
+  `A-infinity` models.
+
 ## [0.6.0] - 2026-08-26
 
 Checked finite complexes now carry higher homological claims. The release adds

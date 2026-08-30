@@ -100,6 +100,8 @@ pub fn coresolve(m: &Module, steps: usize) -> Result<InjectiveCoresolution, Alge
 /// genuine: the coresolution is minimal, so a nonzero `(bound + 1)`-st cosyzygy
 /// proves `id m > bound`. `AtLeast(bound + 1)` is not a claim that `id m` is
 /// infinite. Convention: the zero module is injective, so `id 0 = Exact(0)`.
+/// At `usize::MAX`, the stored lower bound stays `usize::MAX`, the strongest
+/// value this return type can represent.
 /// Errors when building the opposite algebra fails (see [`opposite`]).
 pub fn injective_dimension(m: &Module, bound: usize) -> Result<Bounded<usize>, AlgebraBuildError> {
     let coresolution = coresolve(m, bound)?;

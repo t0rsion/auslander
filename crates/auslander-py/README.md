@@ -182,6 +182,60 @@ assert [term.dims for term in answer.tilting.generation_complex.complex.terms] =
 assert answer.verify()
 ```
 
+Target algebras and derived transport:
+`tilting.target_presentation(TargetLimits())` recovers `End_A(T)^op`.
+A complete run returns `TargetPresentation`. A resource cut returns
+`IncompleteTargetPresentation`, with the first rejected reservation. The
+`UnsupportedTarget` outcome states the non-split boundary. It is unreachable
+for a certified tilting module over the supported prime fields.
+
+`module.ext_algebra(bound)` returns `ExtAlgebra` when the resolution ends,
+or `IncompleteExtAlgebra` when the next syzygy is nonzero. Both store exact
+grades and Yoneda product tensors through the bound.
+
+`BoundedComplex`, `ChainMap`, `ChainHomotopy`, and `HomotopyHom` provide
+integer homological degrees, shifts, direct sums, cones, and Hom modulo
+null-homotopy. `DerivedEquivalenceCertificate` checks the tilting resolution,
+graded self-Hom vanishing, the degree-zero target identification, generation,
+and strict transport.
+
+This projective-dimension-two example transports a nontrivial two-term
+complex. Each source term carries an `add(T)` witness. The inverse accepts
+only checked projective target terms.
+
+```python
+F = auslander.PrimeField(5)
+A = auslander.Algebra.an_with_relations(3, [(0, 2)])
+DA = A.module(F, [2, 2, 1], [[[0, 0], [1, 0]], [[0], [1]]])
+tilting = auslander.ClassicalTiltingModule.classify(
+    DA, auslander.TiltingLimits(4, 8)
+).tilting
+target = tilting.target_presentation(auslander.TargetLimits())
+certificate = auslander.DerivedEquivalenceCertificate(tilting, target)
+assert certificate.verify()
+
+differential = next(
+    map_
+    for map_ in DA.hom(DA)
+    if not map_.is_zero and not map_.is_isomorphism()
+)
+complex_ = auslander.BoundedComplex(0, [DA, DA], [differential])
+witnesses = [tilting.add_closure_witness(term) for term in complex_.terms]
+source = auslander.AddTComplex(complex_, witnesses)
+transported = certificate.transport.forward(source)
+
+source_dims = [
+    complex_.hom(complex_, degree).quotient().dim for degree in range(-2, 3)
+]
+target_dims = [
+    transported.complex.hom(transported.complex, degree).quotient().dim
+    for degree in range(-2, 3)
+]
+assert source_dims == target_dims == [0, 3, 6, 3, 0]
+assert certificate.transport.source_round_trip(source).verify()
+assert certificate.transport.target_round_trip(transported).verify()
+```
+
 Isomorphism and decomposition: `M.is_isomorphic(N)` returns a frozen
 `IsoResult`. Its `isomorphic` is `True` (with a `witness` Morphism verified
 to have a two-sided inverse), `False` (with a proof-shaped `obstruction`

@@ -5,7 +5,7 @@
 //! indecomposable summands are pairwise non-isomorphic.
 //!
 //! The module part is a [`BasicDecomposition`]. [`BasicDecomposition::new`]
-//! runs [`krull_schmidt`], certifies every summand through
+//! runs [`crate::decompose::krull_schmidt`], certifies every summand through
 //! [`IndecomposableModule`], and rejects a repeated summand with
 //! [`BasicError::NotBasic`]. An undetermined summand is
 //! [`BasicError::CertificationBlocked`], never a silent distinct value.
@@ -38,8 +38,8 @@ use crate::algebra::Algebra;
 use crate::arquiver::IndecomposableCatalog;
 use crate::context::VerificationContext;
 use crate::decompose::{
-    Certificate, KrullSchmidtOutcome, decompose, direct_sum_or_zero, inverse_morphism,
-    krull_schmidt, krull_schmidt_with_context, mutually_inverse,
+    Certificate, Decomposition, KrullSchmidtOutcome, Split, decompose, direct_sum_or_zero,
+    inverse_morphism, krull_schmidt_from_decomposition, mutually_inverse,
 };
 use crate::endo::EndoAlgebra;
 use crate::hom::{HomError, Morphism, hom_dim};
@@ -133,13 +133,26 @@ fn defect_non_invertible() -> BasicError {
 #[derive(Clone)]
 pub struct BasicDecomposition {
     module: Module,
+    split: Split,
     summands: Vec<IndecomposableModule>,
 }
 
 /// The direct sum of certified summands, in the order given, and the zero
 /// module for an empty list.
-fn assemble(algebra: &Arc<Algebra>, summands: &[IndecomposableModule]) -> Module {
-    direct_sum_or_zero(algebra, summands.iter().map(|s| s.module())).0
+fn assemble(algebra: &Arc<Algebra>, summands: Vec<IndecomposableModule>) -> BasicDecomposition {
+    let (module, inclusions, projections) =
+        direct_sum_or_zero(algebra, summands.iter().map(|summand| summand.module()));
+    let parts = summands
+        .iter()
+        .map(|summand| summand.module().clone())
+        .collect();
+    let split = Split::new(&module, parts, inclusions, projections)
+        .expect("a direct sum carries its canonical split");
+    BasicDecomposition {
+        module,
+        split,
+        summands,
+    }
 }
 
 debug_fields!(BasicDecomposition |this| {
@@ -150,7 +163,7 @@ debug_fields!(BasicDecomposition |this| {
 impl BasicDecomposition {
     /// Decomposes `m` and requires the summands pairwise non-isomorphic.
     ///
-    /// [`krull_schmidt`] groups the summands into isomorphism classes, each
+    /// [`crate::decompose::krull_schmidt`] groups the summands into isomorphism classes, each
     /// class representative goes through [`IndecomposableModule::new`], and a
     /// class of multiplicity two or more is [`BasicError::NotBasic`]. A
     /// [`KrullSchmidtOutcome::Unknown`] or an [`IndecError::Undetermined`] is
@@ -158,7 +171,8 @@ impl BasicDecomposition {
     /// summands.
     pub fn new(m: &Module) -> Result<BasicDecomposition, BasicError> {
         hit(Site::BasicDecompositionNew);
-        Self::from_krull_schmidt(m, krull_schmidt(m))
+        let decomposition = decompose(m);
+        Self::from_decomposition(m, &decomposition)
     }
 
     pub(crate) fn new_with_context(
@@ -166,11 +180,31 @@ impl BasicDecomposition {
         context: &VerificationContext,
     ) -> Result<BasicDecomposition, BasicError> {
         hit(Site::BasicDecompositionNew);
-        Self::from_krull_schmidt(m, krull_schmidt_with_context(m, context))
+        let decomposition = context.decompose_for(m);
+        Self::from_decomposition(m, &decomposition)
+    }
+
+    /// Certifies basicness from a decomposition the caller already computed.
+    pub(crate) fn from_decomposition(
+        m: &Module,
+        decomposition: &Decomposition,
+    ) -> Result<BasicDecomposition, BasicError> {
+        hit(Site::KrullSchmidt);
+        if !decomposition.split().total().ptr_eq(m) {
+            return Err(BasicError::Defect {
+                reason: "the supplied decomposition belongs to another module".to_string(),
+            });
+        }
+        Self::from_krull_schmidt(
+            m,
+            decomposition.split().clone(),
+            krull_schmidt_from_decomposition(decomposition),
+        )
     }
 
     fn from_krull_schmidt(
         m: &Module,
+        split: Split,
         outcome: KrullSchmidtOutcome,
     ) -> Result<BasicDecomposition, BasicError> {
         let classes = match outcome {
@@ -194,6 +228,7 @@ impl BasicDecomposition {
         }
         Ok(BasicDecomposition {
             module: m.clone(),
+            split,
             summands,
         })
     }
@@ -201,7 +236,7 @@ impl BasicDecomposition {
     /// This decomposition with the summand at `slot` dropped, or `None` when
     /// `slot` is not a summand position.
     ///
-    /// Basicness is inherited, which is why no [`krull_schmidt`] runs: the
+    /// Basicness is inherited, which is why no [`crate::decompose::krull_schmidt`] runs: the
     /// kept summands are a sublist of a pairwise non-isomorphic list, so they
     /// stay pairwise non-isomorphic, and each keeps the certificate it was
     /// built with. The module is reassembled as their direct sum in the same
@@ -217,10 +252,7 @@ impl BasicDecomposition {
             .filter(|(i, _)| *i != slot)
             .map(|(_, x)| x.clone())
             .collect();
-        Some(BasicDecomposition {
-            module: assemble(self.module.algebra(), &summands),
-            summands,
-        })
+        Some(assemble(self.module.algebra(), summands))
     }
 
     /// This decomposition with `summand` appended.
@@ -229,7 +261,7 @@ impl BasicDecomposition {
     /// pairwise non-isomorphic by the invariant and `summand` carries its own
     /// indecomposability certificate, so the only way to lose basicness is
     /// for `summand` to repeat a stored summand. That is one radical
-    /// criterion test per stored summand, not a [`krull_schmidt`] of the sum.
+    /// criterion test per stored summand, not a [`crate::decompose::krull_schmidt`] of the sum.
     ///
     /// # Errors
     /// [`BasicError::NotBasic`] when `summand` is isomorphic to the stored
@@ -253,10 +285,7 @@ impl BasicDecomposition {
         }
         let mut summands = self.summands.clone();
         summands.push(summand.clone());
-        Ok(BasicDecomposition {
-            module: assemble(self.module.algebra(), &summands),
-            summands,
-        })
+        Ok(assemble(self.module.algebra(), summands))
     }
 
     /// The decomposition of the sum of the catalog entries listed in
@@ -264,7 +293,7 @@ impl BasicDecomposition {
     ///
     /// Both catalog enumerators emit one certified entry per isomorphism
     /// class, so distinct entries are pairwise non-isomorphic, distinct
-    /// entries are already a basic decomposition, and [`krull_schmidt`] has
+    /// entries are already a basic decomposition, and [`crate::decompose::krull_schmidt`] has
     /// nothing to decide. The summands are the catalog's own module values,
     /// so a [`crate::taurigid::TauCache`] keyed by module identity holds one
     /// translate per catalog entry across every subset.
@@ -292,10 +321,7 @@ impl BasicDecomposition {
             .iter()
             .map(|&i| (*catalog.entries()[i]).clone())
             .collect();
-        Ok(BasicDecomposition {
-            module: assemble(catalog.algebra(), &summands),
-            summands,
-        })
+        Ok(assemble(catalog.algebra(), summands))
     }
 
     accessor_methods! {
@@ -307,6 +333,11 @@ impl BasicDecomposition {
         pub len() -> usize = |this| this.summands.len();
         /// Whether the module is zero, which is the only case with no summands.
         pub is_empty() -> bool = |this| this.summands.is_empty();
+    }
+
+    /// The verified split that fixes the stored summand embeddings.
+    pub(crate) fn split(&self) -> &Split {
+        &self.split
     }
 
     /// The summand dimension vectors, sorted lexicographically with
@@ -777,6 +808,7 @@ fn certified_match<'a>(
 #[derive(Clone)]
 pub struct AddClosureWitness {
     module: Module,
+    split: Split,
     summands: Vec<Module>,
     target: Module,
     target_summands: Vec<Module>,
@@ -812,12 +844,14 @@ fn summand_modules(summands: &[IndecomposableModule]) -> Vec<Module> {
 
 fn add_closure_witness(
     module: Module,
+    split: Split,
     summands: &[IndecomposableModule],
     target: &BasicDecomposition,
     matches: Vec<AddMatch>,
 ) -> AddClosureWitness {
     AddClosureWitness {
         module,
+        split,
         summands: summand_modules(summands),
         target: target.module().clone(),
         target_summands: summand_modules(target.summands()),
@@ -846,6 +880,7 @@ impl AddClosureWitness {
         };
         Ok(Some(add_closure_witness(
             m.module().clone(),
+            m.split().clone(),
             m.summands(),
             t,
             matches,
@@ -887,7 +922,13 @@ impl AddClosureWitness {
         let Some(matches) = match_summands(&summands, t)? else {
             return Ok(None);
         };
-        Ok(Some(add_closure_witness(m.clone(), &summands, t, matches)))
+        Ok(Some(add_closure_witness(
+            m.clone(),
+            decomposition.split().clone(),
+            &summands,
+            t,
+            matches,
+        )))
     }
 
     accessor_methods! {
@@ -903,11 +944,27 @@ impl AddClosureWitness {
         pub matches() -> &[AddMatch] = |this| &this.matches;
     }
 
+    /// The verified split whose summands are matched by this witness.
+    pub(crate) fn split(&self) -> &Split {
+        &self.split
+    }
+
     /// Rechecks the witness: one match per summand, endpoints as recorded,
     /// and each pair of stored maps multiplies to the identity in both
     /// orders.
     pub fn verify(&self) -> bool {
         hit(Site::AddClosureWitnessVerify);
+        let split = self.split();
+        verify_guard!(split.verify());
+        verify_guard!(split.total().ptr_eq(&self.module));
+        verify_guard!(
+            split.summands().len() == self.summands.len()
+                && split
+                    .summands()
+                    .iter()
+                    .zip(&self.summands)
+                    .all(|(split, summand)| split.ptr_eq(summand))
+        );
         verify_guard!(self.matches.len() == self.summands.len());
         for (x, entry) in self.summands.iter().zip(&self.matches) {
             let_or_false!(Some(y) = self.target_summands.get(entry.target_index));
@@ -1745,6 +1802,21 @@ mod tests {
             }
             assert_eq!(hits, [2, 2], "over F_{}", field.modulus());
             assert!(witness.module().ptr_eq(&doubled));
+            let split = witness.split();
+            assert!(split.verify());
+            assert!(split.total().ptr_eq(&doubled));
+            assert_eq!(split.summands().len(), witness.summands().len());
+            for ((summand, inclusion), projection) in split
+                .summands()
+                .iter()
+                .zip(split.inclusions())
+                .zip(split.projections())
+            {
+                assert_eq!(
+                    inclusion.then(projection).expect("split endpoints agree"),
+                    crate::hom::identity(summand)
+                );
+            }
         }
     }
 

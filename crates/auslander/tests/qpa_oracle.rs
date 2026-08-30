@@ -1,6 +1,6 @@
 //! Differential harness against QPA. Design notes in `tests/qpa-oracle/README.md`.
 //!
-//! The oracle is `tests/qpa-oracle/qpa_expected.json` (schema v8). Only a real
+//! The oracle is `tests/qpa-oracle/qpa_expected.json` (schema v9). Only a real
 //! GAP+QPA run of `generate_fixtures.g` writes it. Every fixture carries its
 //! own prime field and its full presentation. The harness rebuilds each algebra
 //! from that presentation through `Relation`, `Presentation`, and
@@ -14,14 +14,14 @@
 //!
 //! Two schema strings are implemented and no others: `SCHEMA` for the oracle,
 //! and `SNAPSHOT_SCHEMA` for the snapshot, which is the v6 projection of this
-//! library's values. The v8 support tau-tilting block holds `brute_agreement`,
-//! a GAP-internal cross-check with no library counterpart, so a snapshot at v8
+//! library's values. The support tau-tilting block holds `brute_agreement`,
+//! a GAP-internal cross-check with no library counterpart, so a snapshot at v9
 //! would have to invent one.
 //!
 //! The JSON layer is hand-rolled. The schema is small and fixed, so a writer
 //! built on `format!` and a strict recursive-descent reader replace a serde
 //! dependency. The reader rejects unknown keys, duplicate keys, missing fields,
-//! and malformed values, and cross-checks the v8 block against itself before
+//! and malformed values, and cross-checks the oracle block against itself before
 //! any of it is compared.
 
 use std::collections::{BTreeMap, HashMap};
@@ -57,6 +57,7 @@ use auslander::radical::{radical, socle};
 use auslander::relation::{Presentation, Relation};
 use auslander::resolution::{Bounded, projective_dimension};
 use auslander::supporttau::{SupportTauTiltingPair, enumerate_over_catalog};
+use auslander::target::{TargetLimits, TargetPresentationOutcome, present_target};
 use auslander::taugraph::{
     MutationGraphLimits, SupportTauTiltingGraphOutcome, support_tau_tilting_graph,
 };
@@ -66,9 +67,9 @@ use auslander::tilting::{ClassicalTiltingModule, ClassicalTiltingResult, Tilting
 mod common;
 
 /// The oracle document `qpa_expected.json`, written only by GAP+QPA.
-const SCHEMA: &str = "auslander-qpa-oracle-v8";
+const SCHEMA: &str = "auslander-qpa-oracle-v9";
 /// `native_snapshot.json`, this library's own drift snapshot. It is the v6
-/// projection of the library's values: every v6 field, and none of the v8
+/// projection of the library's values: every v6 field, and none of the v9
 /// additions.
 /// The support tau-tilting block contains `brute_agreement`, a GAP-internal
 /// cross-check with no library counterpart, so a snapshot must not invent it.
@@ -148,7 +149,7 @@ const STT_KEYS_OPEN: [&str; 4] = [
     "not_computed",
 ];
 
-/// The three schema v8 records and the fixture that constructs each one.
+/// The three classical-tilting records and the fixture that constructs each one.
 const CLASSICAL_TILTING_MANIFEST: [(&str, &str, &str, &str, usize); 3] = [
     ("linear-an-3", "f5", "linear-a3-pd1", "S0+P0+P2", 1),
     ("a3-mod-ab", "f2", "a3-mod-ab-da-pd2", "I0+I1+I2", 2),
@@ -634,6 +635,29 @@ struct ClassicalTiltingRecord {
     projective_dimension: Option<usize>,
     coresolutions: Vec<Vec<Vec<usize>>>,
     coresolutions_exact: Vec<bool>,
+    target: Option<TargetOracle>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TargetOracle {
+    Computed(TargetInvariants),
+    Skipped { reason: TargetSkipReason },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TargetSkipReason {
+    OperationUnavailable,
+    EndomorphismPresentationFailed,
+    OppositeAlgebraFailed,
+    InvariantComputationFailed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TargetInvariants {
+    dimension: usize,
+    cartan: Vec<Vec<usize>>,
+    radical_layers: Vec<usize>,
+    simple_ext1: Vec<Vec<usize>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1803,6 +1827,84 @@ fn read_support_tau_tilting(
     })
 }
 
+fn read_target_oracle(
+    value: &json::Value,
+    expected_vertices: usize,
+    ctx: &str,
+) -> Result<TargetOracle, String> {
+    let pairs = as_object(value, ctx)?;
+    let status = read_str(pairs, "status", ctx)?;
+    if status == "skipped" {
+        check_keys(pairs, &["status", "reason"], ctx)?;
+        let reason = match read_str(pairs, "reason", ctx)?.as_str() {
+            "operation-unavailable" => TargetSkipReason::OperationUnavailable,
+            "endomorphism-presentation-failed" => TargetSkipReason::EndomorphismPresentationFailed,
+            "opposite-algebra-failed" => TargetSkipReason::OppositeAlgebraFailed,
+            "invariant-computation-failed" => TargetSkipReason::InvariantComputationFailed,
+            other => return Err(format!("{ctx}: unknown skipped reason {other:?}")),
+        };
+        return Ok(TargetOracle::Skipped { reason });
+    }
+    if status != "computed" {
+        return Err(format!(
+            "{ctx}: status is {status:?}, expected \"computed\" or \"skipped\""
+        ));
+    }
+    check_keys(
+        pairs,
+        &[
+            "status",
+            "algebra",
+            "dimension",
+            "cartan",
+            "radical_layers",
+            "simple_ext1",
+        ],
+        ctx,
+    )?;
+    let algebra = read_str(pairs, "algebra", ctx)?;
+    if algebra != "endomorphism-opposite" {
+        return Err(format!(
+            "{ctx}: algebra is {algebra:?}, expected \"endomorphism-opposite\""
+        ));
+    }
+    let cartan_value = get(pairs, "cartan", ctx)?;
+    let n = as_array(cartan_value, &format!("{ctx}: cartan"))?.len();
+    if n != expected_vertices {
+        return Err(format!(
+            "{ctx}: cartan has {n} rows, expected {expected_vertices}"
+        ));
+    }
+    let cartan = read_matrix(cartan_value, n, n, "cartan", ctx)?;
+    let dimension = read_usize(pairs, "dimension", ctx)?;
+    let cartan_dimension = cartan.iter().flatten().copied().sum::<usize>();
+    if cartan_dimension != dimension {
+        return Err(format!(
+            "{ctx}: cartan entries sum to {cartan_dimension}, expected dimension {dimension}"
+        ));
+    }
+    let radical_layers = as_array(get(pairs, "radical_layers", ctx)?, ctx)?
+        .iter()
+        .enumerate()
+        .map(|(i, value)| usize_value(value, &format!("{ctx}: radical_layers entry {i}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    if radical_layers.is_empty() || radical_layers.iter().sum::<usize>() != dimension {
+        return Err(format!(
+            "{ctx}: radical layers must be nonempty and sum to dimension {dimension}"
+        ));
+    }
+    if radical_layers.last() == Some(&0) {
+        return Err(format!("{ctx}: radical layers end in zero"));
+    }
+    let simple_ext1 = read_matrix(get(pairs, "simple_ext1", ctx)?, n, n, "simple_ext1", ctx)?;
+    Ok(TargetOracle::Computed(TargetInvariants {
+        dimension,
+        cartan,
+        radical_layers,
+        simple_ext1,
+    }))
+}
+
 fn read_classical_tilting(
     value: &json::Value,
     n: usize,
@@ -1830,6 +1932,7 @@ fn read_classical_tilting(
             "projective_dimension",
             "coresolutions",
             "coresolutions_exact",
+            "target",
         ];
         check_keys(pairs, if qpa_tilting { &full } else { &short }, &ictx)?;
         let projective_dimension = qpa_tilting
@@ -1898,6 +2001,11 @@ fn read_classical_tilting(
             projective_dimension,
             coresolutions,
             coresolutions_exact,
+            target: qpa_tilting
+                .then(|| {
+                    read_target_oracle(get(pairs, "target", &ictx)?, n, &format!("{ictx}: target"))
+                })
+                .transpose()?,
         });
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -2036,7 +2144,7 @@ fn check_presentation_ids(fixtures: &[Fixture]) -> Result<(), String> {
     Ok(())
 }
 
-/// Requires every designated v8 candidate once, on its construction fixture.
+/// Requires every designated candidate once, on its construction fixture.
 fn check_classical_tilting_manifest(fixtures: &[Fixture]) -> Result<(), String> {
     for &(family, case, id, construction, bound) in &CLASSICAL_TILTING_MANIFEST {
         let Some(fixture) = fixtures
@@ -2083,7 +2191,7 @@ fn check_classical_tilting_manifest(fixtures: &[Fixture]) -> Result<(), String> 
                 })
             {
                 return Err(format!(
-                    "{}/{}: classical tilting candidate {:?} is not in the schema v8 manifest",
+                    "{}/{}: classical tilting candidate {:?} is not in the oracle manifest",
                     fixture.family, fixture.case, record.id
                 ));
             }
@@ -2097,7 +2205,7 @@ fn check_classical_tilting_manifest(fixtures: &[Fixture]) -> Result<(), String> 
 /// structural defect is an error: wrong schema string, unknown or missing
 /// keys, wrong pinned bounds, malformed presentations, malformed typed
 /// outcomes, unsorted or unmerged decomposition summands, duplicate fixtures,
-/// inconsistent presentation ids, and every cross-check inside the v8 block.
+/// inconsistent presentation ids, and every cross-check inside the oracle block.
 /// A stale document fails loudly instead of silently skipping checks.
 fn parse_document(text: &str, expected: &str) -> Result<Document, String> {
     let root = json::parse(text)?;
@@ -3297,6 +3405,137 @@ fn summed_coresolution_dims(
         .collect()
 }
 
+fn target_invariants(target: &Arc<Algebra>) -> Result<TargetInvariants, String> {
+    let n = target.quiver().num_vertices() as usize;
+    let radical_dimensions: Vec<usize> = (0..=target.nilpotency_degree())
+        .map(|power| {
+            (0..n)
+                .flat_map(|source| {
+                    (0..n).map(move |sink| {
+                        target
+                            .radical_power_matrix(source as u32, sink as u32, power)
+                            .rows()
+                    })
+                })
+                .sum()
+        })
+        .collect();
+    let radical_layers = radical_dimensions
+        .windows(2)
+        .map(|pair| pair[0] - pair[1])
+        .collect();
+    let simples: Vec<Module> = (0..n as u32)
+        .map(|vertex| Module::simple(target, vertex))
+        .collect();
+    let simple_ext1 = simples
+        .iter()
+        .map(|source| {
+            simples
+                .iter()
+                .map(|sink| {
+                    ext_dim(source, sink, 1)
+                        .map_err(|error| format!("target Ext^1 failed: {error}"))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(TargetInvariants {
+        dimension: target.dim(),
+        cartan: target.cartan_matrix(),
+        radical_layers,
+        simple_ext1,
+    })
+}
+
+fn matrices_match_under_permutation(expected: &TargetInvariants, ours: &TargetInvariants) -> bool {
+    fn search(
+        expected: &TargetInvariants,
+        ours: &TargetInvariants,
+        permutation: &mut Vec<usize>,
+        unused: &mut Vec<usize>,
+    ) -> bool {
+        if unused.is_empty() {
+            let n = permutation.len();
+            return (0..n).all(|i| {
+                (0..n).all(|j| {
+                    expected.cartan[permutation[i]][permutation[j]] == ours.cartan[i][j]
+                        && expected.simple_ext1[permutation[i]][permutation[j]]
+                            == ours.simple_ext1[i][j]
+                })
+            });
+        }
+        for at in 0..unused.len() {
+            let vertex = unused.remove(at);
+            permutation.push(vertex);
+            if search(expected, ours, permutation, unused) {
+                return true;
+            }
+            permutation.pop();
+            unused.insert(at, vertex);
+        }
+        false
+    }
+
+    let n = expected.cartan.len();
+    n == ours.cartan.len()
+        && search(
+            expected,
+            ours,
+            &mut Vec::with_capacity(n),
+            &mut (0..n).collect(),
+        )
+}
+
+fn compare_target(
+    mismatches: &mut Vec<String>,
+    ctx: &str,
+    id: &str,
+    tilting: &ClassicalTiltingModule,
+    expected: &TargetOracle,
+) {
+    let TargetOracle::Computed(expected) = expected else {
+        return;
+    };
+    let outcome = match present_target(tilting, &TargetLimits::default()) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            mismatches.push(format!("{ctx}: {id}: target recovery failed: {error}"));
+            return;
+        }
+    };
+    let TargetPresentationOutcome::Presented(presented) = outcome else {
+        mismatches.push(format!(
+            "{ctx}: {id}: QPA computed the split target, ours returned {outcome:?}"
+        ));
+        return;
+    };
+    let ours = match target_invariants(presented.target()) {
+        Ok(invariants) => invariants,
+        Err(error) => {
+            mismatches.push(format!("{ctx}: {id}: {error}"));
+            return;
+        }
+    };
+    if expected.dimension != ours.dimension {
+        mismatches.push(format!(
+            "{ctx}: {id}: target dimension is {}, ours is {}",
+            expected.dimension, ours.dimension
+        ));
+    }
+    if expected.radical_layers != ours.radical_layers {
+        mismatches.push(format!(
+            "{ctx}: {id}: target radical layers are {:?}, ours are {:?}",
+            expected.radical_layers, ours.radical_layers
+        ));
+    }
+    if !matrices_match_under_permutation(expected, &ours) {
+        mismatches.push(format!(
+            "{ctx}: {id}: no vertex permutation matches target Cartan {:?} and simple Ext^1 {:?} to ours {:?} and {:?}",
+            expected.cartan, expected.simple_ext1, ours.cartan, ours.simple_ext1
+        ));
+    }
+}
+
 fn compare_classical_tilting(mismatches: &mut Vec<String>, ctx: &str, fx: &Fixture) {
     if fx.classical_tilting.is_empty() {
         return;
@@ -3363,6 +3602,16 @@ fn compare_classical_tilting(mismatches: &mut Vec<String>, ctx: &str, fx: &Fixtu
                         expected.id
                     ));
                 }
+                compare_target(
+                    mismatches,
+                    ctx,
+                    &expected.id,
+                    &ours,
+                    expected
+                        .target
+                        .as_ref()
+                        .expect("QPA-positive records carry a target outcome"),
+                );
             }
             Ok(other) => mismatches.push(format!(
                 "{ctx}: {} is tilting {} in QPA, ours returned {other:?}",
@@ -4131,7 +4380,7 @@ fn kronecker_2_truncates_on_both_sides() {
         .iter()
         .find(|fx| fx.family == "kronecker-2")
         .expect("the oracle carries kronecker-2");
-    let stt = fx.stt.as_ref().expect("the oracle is at schema v8");
+    let stt = fx.stt.as_ref().expect("the oracle is at schema v9");
     assert!(
         matches!(stt.indecomposables, Closure::NotClosed { .. }),
         "the oracle must record that GAP's walk did not close on kronecker-2"
@@ -4368,8 +4617,8 @@ mod corruption {
     #[test]
     fn reader_rejects_the_previous_schema_version() {
         let from = format!("\"schema\": \"{SCHEMA}\"");
-        let to = from.replace("-v8", "-v7");
-        assert_ne!(from, to, "the pinned schema must carry the v8 marker");
+        let to = from.replace("-v9", "-v8");
+        assert_ne!(from, to, "the pinned schema must carry the v9 marker");
         let err = read_error(&from, &to);
         assert!(err.contains("schema"), "{err}");
     }
@@ -4382,6 +4631,60 @@ mod corruption {
         );
         assert!(err.contains("unknown key \"surprise\""), "{err}");
         assert!(err.contains("classical_tilting entry 0"), "{err}");
+    }
+
+    #[test]
+    fn reader_rejects_an_unknown_target_key() {
+        let err = read_error(
+            "\"algebra\": \"endomorphism-opposite\", \"dimension\"",
+            "\"algebra\": \"endomorphism-opposite\", \"surprise\": 0, \"dimension\"",
+        );
+        assert!(err.contains("unknown key \"surprise\""), "{err}");
+        assert!(err.contains("target"), "{err}");
+    }
+
+    #[test]
+    fn reader_rejects_an_unknown_target_skip_reason() {
+        let computed = "{\"status\": \"computed\", \"algebra\": \"endomorphism-opposite\", \
+            \"dimension\": 5, \"cartan\": [[1, 0, 0], [1, 1, 0], [0, 1, 1]], \
+            \"radical_layers\": [3, 2], \"simple_ext1\": [[0, 0, 0], [1, 0, 0], [0, 1, 0]]}";
+        let err = read_error(
+            computed,
+            "{\"status\": \"skipped\", \"reason\": \"unknown\"}",
+        );
+        assert!(err.contains("unknown skipped reason"), "{err}");
+    }
+
+    #[test]
+    fn reader_accepts_a_typed_target_skip() {
+        let computed = "{\"status\": \"computed\", \"algebra\": \"endomorphism-opposite\", \
+            \"dimension\": 5, \"cartan\": [[1, 0, 0], [1, 1, 0], [0, 1, 1]], \
+            \"radical_layers\": [3, 2], \"simple_ext1\": [[0, 0, 0], [1, 0, 0], [0, 1, 0]]}";
+        let text = corrupted(
+            computed,
+            "{\"status\": \"skipped\", \"reason\": \"operation-unavailable\"}",
+        );
+        let document = parse_document(&text, SCHEMA).expect("the typed skip must parse");
+        assert!(document.fixtures.iter().any(|fixture| {
+            fixture.classical_tilting.iter().any(|record| {
+                matches!(
+                    &record.target,
+                    Some(TargetOracle::Skipped {
+                        reason: TargetSkipReason::OperationUnavailable
+                    })
+                )
+            })
+        }));
+    }
+
+    #[test]
+    fn reader_rejects_target_layers_with_the_wrong_total() {
+        let err = read_error(
+            "\"radical_layers\": [3, 2], \"simple_ext1\"",
+            "\"radical_layers\": [3, 1], \"simple_ext1\"",
+        );
+        assert!(err.contains("radical layers"), "{err}");
+        assert!(err.contains("dimension 5"), "{err}");
     }
 
     #[test]
@@ -5215,6 +5518,34 @@ mod corruption {
             mismatches
                 .iter()
                 .any(|m| m.contains("linear-a3-pd1") && m.contains("summed QPA coresolution")),
+            "{mismatches:?}"
+        );
+    }
+
+    #[test]
+    fn compare_rejects_a_wrong_target_ext_matrix() {
+        let mismatches = corrupted_mismatches(
+            "\"simple_ext1\": [[0, 0, 0], [1, 0, 0], [0, 1, 0]]",
+            "\"simple_ext1\": [[0, 0, 0], [1, 0, 0], [1, 0, 0]]",
+        );
+        assert!(
+            mismatches
+                .iter()
+                .any(|m| m.contains("linear-a3-pd1") && m.contains("vertex permutation")),
+            "{mismatches:?}"
+        );
+    }
+
+    #[test]
+    fn compare_rejects_wrong_target_radical_layers() {
+        let mismatches = corrupted_mismatches(
+            "\"radical_layers\": [3, 2], \"simple_ext1\"",
+            "\"radical_layers\": [2, 3], \"simple_ext1\"",
+        );
+        assert!(
+            mismatches
+                .iter()
+                .any(|m| m.contains("linear-a3-pd1") && m.contains("radical layers")),
             "{mismatches:?}"
         );
     }

@@ -223,14 +223,27 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+      - name: Extract release notes from the changelog
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          awk -v version="$VERSION" '
+            index($0, "## [" version "]") == 1 { emit = 1 }
+            emit && /^## \[/ && index($0, "## [" version "]") != 1 { exit }
+            emit { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
+          test -s "$RUNNER_TEMP/release-notes.md"
       - name: Compute checksums
         run: |
           cd dist
           sha256sum -- * > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
+          body_path: ${{ runner.temp }}/release-notes.md
           files: dist/*

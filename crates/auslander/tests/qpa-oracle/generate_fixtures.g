@@ -1,6 +1,6 @@
 # Builds every auslander fixture algebra in QPA and writes
 # qpa_generated.json
-# with schema auslander-qpa-oracle-v8. Each fixture carries its own prime field
+# with schema auslander-qpa-oracle-v9. Each fixture carries its own prime field
 # and its full presentation: the quiver, and relations as integer combinations
 # of paths given by arrow indices. The results per fixture: algebra dimension,
 # dimension vectors of the indecomposable projectives (the Cartan rows) and
@@ -36,6 +36,11 @@
 # constructions give three records: one projective-dimension-one control, and
 # the injective cogenerator over A3/(ab) in two fields. Each positive QPA answer
 # carries its coresolutions and an exactness check on every returned complex.
+#
+# Schema v9 adds stable invariants of End_A(T)^op to each positive classical
+# tilting record. QPA and auslander can order primitive idempotents differently,
+# so the harness compares the Cartan and simple Ext^1 matrices through one
+# simultaneous vertex permutation.
 #
 # Writes into the current working directory; run under GAP with QPA loadable
 # (discovery order in README.md):
@@ -506,6 +511,43 @@ ApproximationSample := function(A, indecs, pairs, want)
   return rec(total := N, entries := out);
 end;
 
+TargetInvariants := function(B)
+  local dims, simples;
+  dims := List(RadicalSeriesOfAlgebra(B), Dimension);
+  simples := SimpleModules(B);
+  return rec(status := "computed", dimension := Dimension(B),
+             cartan := CartanMatrix(B),
+             layers := List([1 .. Length(dims) - 1],
+                 i -> dims[i] - dims[i + 1]),
+             ext1 := List(simples,
+                 S -> List(simples, U -> Length(ExtOverAlgebra(S, U)[2]))));
+end;
+
+TargetOracle := function(M)
+  local result, target;
+  if not IsBound(EndOfModuleAsQuiverAlgebra) or
+      not IsBound(OppositePathAlgebra) or
+      not IsBound(RadicalSeriesOfAlgebra) or
+      not IsBound(ExtOverAlgebra) then
+    return rec(status := "skipped", reason := "operation-unavailable");
+  fi;
+  result := CALL_WITH_CATCH(EndOfModuleAsQuiverAlgebra, [M]);
+  if not result[1] or result[2] = fail then
+    return rec(status := "skipped",
+               reason := "endomorphism-presentation-failed");
+  fi;
+  result := CALL_WITH_CATCH(OppositePathAlgebra, [result[2][3]]);
+  if not result[1] or result[2] = fail then
+    return rec(status := "skipped", reason := "opposite-algebra-failed");
+  fi;
+  target := result[2];
+  result := CALL_WITH_CATCH(TargetInvariants, [target]);
+  if not result[1] then
+    return rec(status := "skipped", reason := "invariant-computation-failed");
+  fi;
+  return result[2];
+end;
+
 TiltingCandidate := function(id, construction, M, bound)
   local t;
   t := TiltingModule(M, bound);
@@ -516,7 +558,7 @@ TiltingCandidate := function(id, construction, M, bound)
   return rec(id := id, construction := construction, bound := bound,
              dimvec := DimensionVector(M), tilting := true, pd := t[1],
              coresolutions := List(t[2], ComplexTerms),
-             exact := List(t[2], IsExactSequence));
+             exact := List(t[2], IsExactSequence), target := TargetOracle(M));
 end;
 
 ClassicalTiltingEntries := function(spec, A, simples, projs, injs)
@@ -767,6 +809,19 @@ JsonApproximation := function(a)
       ", \"cokernel_dimvec\": ", JsonIntList(a.cokernel), "}");
 end;
 
+JsonTarget := function(t)
+  if t.status = "skipped" then
+    return Concatenation("{\"status\": \"skipped\", \"reason\": \"",
+        t.reason, "\"}");
+  fi;
+  return Concatenation("{\"status\": \"computed\", ",
+      "\"algebra\": \"endomorphism-opposite\", ",
+      "\"dimension\": ", String(t.dimension),
+      ", \"cartan\": ", JsonIntMatrix(t.cartan),
+      ", \"radical_layers\": ", JsonIntList(t.layers),
+      ", \"simple_ext1\": ", JsonIntMatrix(t.ext1), "}");
+end;
+
 JsonClassicalTilting := function(t)
   local s;
   s := Concatenation("{\"id\": \"", t.id, "\", \"construction\": \"",
@@ -779,7 +834,8 @@ JsonClassicalTilting := function(t)
   return Concatenation(s, ", \"projective_dimension\": ", String(t.pd),
       ", \"coresolutions\": ", JsonFragmentList(
           List(t.coresolutions, JsonIntMatrix)),
-      ", \"coresolutions_exact\": ", JsonBoolList(t.exact), "}");
+      ", \"coresolutions_exact\": ", JsonBoolList(t.exact),
+      ", \"target\": ", JsonTarget(t.target), "}");
 end;
 
 # QPA's list order is discovery order, so every emitted list is sorted by an
@@ -956,7 +1012,7 @@ EmitJson := function(fixtures)
   out := OutputTextString(buf, true);
   SetPrintFormattingStatus(out, false);
   AppendTo(out, "{\n");
-  AppendTo(out, "  \"schema\": \"auslander-qpa-oracle-v8\",\n");
+  AppendTo(out, "  \"schema\": \"auslander-qpa-oracle-v9\",\n");
   AppendTo(out, "  \"convention\": \"right\",\n");
   AppendTo(out, "  \"max_ext_degree\": ", String(MAX_EXT), ",\n");
   AppendTo(out, "  \"projdim_bound\": ", String(PROJDIM_BOUND), ",\n");

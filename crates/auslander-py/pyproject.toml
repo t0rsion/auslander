@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "auslander"
-version = "0.6.0"
+version = "0.7.0"
 description = "Finite-dimensional bound quiver algebras kQ/I over prime fields, and their right modules"
 authors = [{ name = "Tor Kringeland", email = "tor@vixe.re" }]
 readme = "README.md"

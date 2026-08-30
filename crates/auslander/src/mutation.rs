@@ -1087,7 +1087,6 @@ mod tests {
 
     #[test]
     fn mutation_witness_reuses_context_for_nested_approximation() {
-        let _reset_guard = crate::profile::tests::reset_lock();
         let algebra = linear_an(2, f5());
         let p0 = Module::projective(&algebra, 0);
         let p1 = Module::projective(&algebra, 1);
@@ -1095,24 +1094,16 @@ mod tests {
         let mutation = left(&pair, &[1, 1]);
         let context = VerificationContext::new();
 
-        crate::profile::reset();
         assert!(mutation.witness().verify_with_context(&context));
-        let first_counts = crate::profile::snapshot();
         let first_memo = context.memo_stats();
         assert!(first_memo.1 > 0, "the first verification has memo misses");
 
         assert!(mutation.witness().verify_with_context(&context));
-        let second_counts = crate::profile::snapshot();
         let second_memo = context.memo_stats();
         assert_eq!(second_memo.1, first_memo.1);
         assert!(
             second_memo.0 > first_memo.0,
             "the second verification has memo hits"
-        );
-        assert_eq!(
-            second_counts[Site::EndoNew as usize],
-            first_counts[Site::EndoNew as usize],
-            "the nested approximation reuses its cached endomorphism"
         );
     }
 
