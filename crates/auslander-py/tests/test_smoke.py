@@ -14,20 +14,38 @@ import auslander
 
 
 def test_ka3_mod_ab():
-    A = auslander.MonomialAlgebra.an_with_relations(3, [(0, 2)])
+    A = auslander.Algebra.an_with_relations(3, [(0, 2)])
+    F = auslander.PrimeField(5)
+    _assert_ka3_algebra(A)
+    _assert_ka3_modules(A, F)
+
+
+def _assert_ka3_algebra(A):
     assert A.dim == 5
     assert A.num_vertices == 3
     assert A.cartan_matrix() == [[1, 1, 0], [0, 1, 1], [0, 0, 1]]
 
-    F = auslander.PrimeField(5)
+
+def _assert_ka3_modules(A, F):
     S0 = A.simple(F, 0)
     S2 = A.simple(F, 2)
+    _assert_ka3_simple_ext(S0, S2)
+
+    P0 = A.projective(F, 0)
+    _assert_ka3_projective(P0)
+    _assert_ka3_resolution(A, F, S0)
+
+
+def _assert_ka3_simple_ext(S0, S2):
     assert S0.dims == [1, 0, 0]
     assert S0.ext_dim(S2, 2) == 1
 
-    P0 = A.projective(F, 0)
+
+def _assert_ka3_projective(P0):
     assert P0.dims == [1, 1, 0]
 
+
+def _assert_ka3_resolution(A, F, S0):
     res = S0.resolve(10)
     assert res.status.kind == auslander.ResolutionKind.FINITE
     assert res.status.at is None
@@ -36,13 +54,14 @@ def test_ka3_mod_ab():
     assert repr(res.pd(10)) == "Exact(2)"
     assert res.pd(10).exact == 2
     assert res.pd(10).at_least is None
+    assert res.projective_dimension.exact == 2
 
     gd = auslander.global_dimension(A, F, 10)
     assert repr(gd) == "Exact(2)"
 
 
 def test_dual_numbers_ext_table():
-    D = auslander.MonomialAlgebra.dual_numbers()
+    D = auslander.Algebra.dual_numbers()
     F = auslander.PrimeField(5)
     S = D.simple(F, 0)
     assert S.ext_table(S, 2) == [1, 1, 1]
@@ -54,6 +73,7 @@ def test_dual_numbers_ext_table():
     assert res.status != auslander.ResolutionStatus(auslander.ResolutionKind.CUT, 2)
     assert repr(res.status) == "ResolutionStatus(ResolutionKind.CUT, at=3)"
     assert repr(res.pd(3)) == "AtLeast(4)"
+    assert res.projective_dimension.at_least == 4
 
 
 def test_resolution_status_enforces_its_invariant():
@@ -67,7 +87,7 @@ def test_resolution_status_enforces_its_invariant():
 def test_hom_basis_between_a2_projectives():
     # Right modules over linearly oriented A_2: Hom(P_0, P_1) = 0 and
     # Hom(P_1, P_0) = k, spanned by e_1 -> a.
-    A = auslander.MonomialAlgebra.linear_an(2)
+    A = auslander.Algebra.linear_an(2)
     F = auslander.PrimeField(5)
     P0 = A.projective(F, 0)
     P1 = A.projective(F, 1)
@@ -79,13 +99,14 @@ def test_hom_basis_between_a2_projectives():
     # dims P1 = [0, 1] and dims P0 = [1, 1], so a 0x1 matrix at vertex 0 (no
     # rows) and a 1x1 matrix at vertex 1.
     assert f.maps == [[], [[1]]]
+    assert f.sparse_maps == [[], [(0, 0, 1)]]
     g = P1.morphism(P0, f.maps)
     assert g.maps == f.maps
     assert not f.is_isomorphism()
 
 
 def test_is_isomorphism_on_identity_and_zero():
-    A = auslander.MonomialAlgebra.linear_an(2)
+    A = auslander.Algebra.linear_an(2)
     F = auslander.PrimeField(5)
     P0 = A.projective(F, 0)
     identity = P0.morphism(P0, [[[1]], [[1]]])
@@ -95,7 +116,7 @@ def test_is_isomorphism_on_identity_and_zero():
 
 
 def test_morphism_construction_is_checked():
-    A = auslander.MonomialAlgebra.linear_an(2)
+    A = auslander.Algebra.linear_an(2)
     F = auslander.PrimeField(5)
     P0 = A.projective(F, 0)
     P1 = A.projective(F, 1)
@@ -112,7 +133,7 @@ def test_nonprime_modulus_raises():
 
 
 def test_invalid_module_raises():
-    D = auslander.MonomialAlgebra.dual_numbers()
+    D = auslander.Algebra.dual_numbers()
     F = auslander.PrimeField(5)
     # x acting as the identity violates x^2 = 0.
     with pytest.raises(ValueError):
@@ -121,8 +142,24 @@ def test_invalid_module_raises():
         D.module(F, [1, 1], [[[0]]])
 
 
+def test_sparse_module_matches_dense_input_and_checks_coordinates():
+    A = auslander.Algebra.linear_an(2)
+    F = auslander.PrimeField(5)
+    sparse = A.module_sparse(F, [2, 2], [[(0, 1, 1), (1, 0, -1)]])
+    dense = A.module(F, [2, 2], [[[0, 1], [4, 0]]])
+    assert sparse.dims == dense.dims
+    assert sparse.maps == dense.maps == [[[0, 1], [4, 0]]]
+    assert sparse.sparse_maps == [[(0, 1, 1), (1, 0, 4)]]
+    assert sparse.is_isomorphic(dense).isomorphic is True
+
+    with pytest.raises(ValueError, match="outside 2 x 2"):
+        A.module_sparse(F, [2, 2], [[(2, 0, 1)]])
+    with pytest.raises(ValueError, match="repeats coordinate"):
+        A.module_sparse(F, [2, 2], [[(0, 0, 1), (0, 0, 2)]])
+
+
 def test_module_construction_and_invariants():
-    A = auslander.MonomialAlgebra.an_with_relations(3, [(0, 2)])
+    A = auslander.Algebra.an_with_relations(3, [(0, 2)])
     F = auslander.PrimeField(5)
     # The projective P_0: k -> k -> 0 with the arrow a acting as the identity;
     # the map for b: 1 -> 2 is the 1x0 matrix, one empty row.
@@ -136,7 +173,7 @@ def test_module_construction_and_invariants():
 
 
 def test_is_isomorphic_itself_with_witness():
-    A = auslander.MonomialAlgebra.linear_an(3)
+    A = auslander.Algebra.linear_an(3)
     F = auslander.PrimeField(5)
     P0 = A.projective(F, 0)
     r = P0.is_isomorphic(P0)
@@ -150,7 +187,7 @@ def test_is_isomorphic_itself_with_witness():
 
 
 def test_is_isomorphic_distinguishes_no_from_unknown():
-    A = auslander.MonomialAlgebra.linear_an(3)
+    A = auslander.Algebra.linear_an(3)
     F = auslander.PrimeField(5)
     r = A.simple(F, 0).is_isomorphic(A.simple(F, 1))
     # False, not None: a proof-shaped obstruction.
@@ -164,7 +201,7 @@ def test_is_isomorphic_distinguishes_no_from_unknown():
 def test_is_isomorphic_kronecker_radical_criterion():
     # The representations (a, b) -> ([1], [0]) and ([0], [1]) share dimension
     # vector [1, 1]; only the radical criterion tells them apart.
-    A = auslander.MonomialAlgebra.kronecker(2)
+    A = auslander.Algebra.kronecker(2)
     F = auslander.PrimeField(5)
     M = A.module(F, [1, 1], [[[1]], [[0]]])
     N = A.module(F, [1, 1], [[[0]], [[1]]])
@@ -178,17 +215,33 @@ def test_is_isomorphic_kronecker_radical_criterion():
 def test_decompose_p0_plus_s1_with_certificates():
     # P_0 ⊕ S_1 over linear A_2, built block-diagonally: dims [1, 2] with the
     # arrow landing in the P_0 column.
-    A = auslander.MonomialAlgebra.linear_an(2)
+    A = auslander.Algebra.linear_an(2)
     F = auslander.PrimeField(5)
     M = A.module(F, [1, 2], [[[1, 0]]])
     d = M.decompose()
+    _assert_decomposition_parts(d, A, F)
+    _assert_decomposition_maps(d)
+
+
+def _assert_decomposition_parts(d, A, F):
+    _assert_decomposition_certificates(d)
+    _assert_decomposition_summands(d, A, F)
+
+
+def _assert_decomposition_certificates(d):
     assert [c.kind for c in d.certificates] == ["indecomposable", "indecomposable"]
     assert all(c.attempts is None for c in d.certificates)
+
+
+def _assert_decomposition_summands(d, A, F):
     assert sorted(s.dims for s in d.summands) == [[0, 1], [1, 1]]
     P0 = A.projective(F, 0)
     summand_dims = {tuple(s.dims): s for s in d.summands}
     assert summand_dims[(1, 1)].is_isomorphic(P0).isomorphic is True
     assert summand_dims[(0, 1)].is_isomorphic(A.simple(F, 1)).isomorphic is True
+
+
+def _assert_decomposition_maps(d):
     for s, inc, proj in zip(d.summands, d.inclusions, d.projections):
         composite = [_mat_mul(a, b, 5) for a, b in zip(inc.maps, proj.maps)]
         assert composite == [_identity(dim) for dim in s.dims]
@@ -206,7 +259,7 @@ def _identity(n):
 
 
 def test_decompose_indecomposable_is_a_single_summand():
-    A = auslander.MonomialAlgebra.linear_an(2)
+    A = auslander.Algebra.linear_an(2)
     F = auslander.PrimeField(5)
     d = A.projective(F, 0).decompose()
     assert len(d.summands) == 1
@@ -216,7 +269,7 @@ def test_decompose_indecomposable_is_a_single_summand():
 def test_krull_schmidt_multiplicities_on_s1_p0_s1():
     # S_1 ⊕ P_0 ⊕ S_1 over linear A_2: dims [1, 3], the arrow hitting the
     # middle (P_0) column.
-    A = auslander.MonomialAlgebra.linear_an(2)
+    A = auslander.Algebra.linear_an(2)
     F = auslander.PrimeField(5)
     M = A.module(F, [1, 3], [[[0, 1, 0]]])
     r = M.krull_schmidt()
@@ -230,7 +283,7 @@ def test_krull_schmidt_multiplicities_on_s1_p0_s1():
 def test_tau_of_a_projective_is_zero_and_of_a_simple_is_a_module():
     # Hand-derived translates over linear A_3: tau S_0 = [0, 1, 0] and
     # tau S_1 = [0, 0, 1]. Every projective has tau = 0.
-    A = auslander.MonomialAlgebra.linear_an(3)
+    A = auslander.Algebra.linear_an(3)
     F = auslander.PrimeField(5)
     for v in range(3):
         assert all(d == 0 for d in A.projective(F, v).tau().dims)
@@ -243,7 +296,7 @@ def test_tau_of_a_projective_is_zero_and_of_a_simple_is_a_module():
 def test_nakayama_indecomposables_count_is_the_kupisch_sum():
     F = auslander.PrimeField(5)
     for kupisch in ([2, 2, 1], [3, 2, 1]):
-        A = auslander.MonomialAlgebra.linear_nakayama(kupisch)
+        A = auslander.Algebra.linear_nakayama(kupisch)
         mods = auslander.nakayama_indecomposables(A, F)
         assert len(mods) == sum(kupisch) == A.dim
         for m, cert in mods:
@@ -255,28 +308,48 @@ def test_nakayama_indecomposables_count_is_the_kupisch_sum():
 def test_nakayama_indecomposables_rejects_non_nakayama():
     F = auslander.PrimeField(5)
     with pytest.raises(ValueError):
-        auslander.nakayama_indecomposables(auslander.MonomialAlgebra.kronecker(2), F)
+        auslander.nakayama_indecomposables(auslander.Algebra.kronecker(2), F)
 
 
 def test_injective_coresolution_of_s2_over_ka3_mod_ab():
     # The injectives of kA_3/(ab) are I_0 = (1,0,0), I_1 = (1,1,0) and
     # I_2 = (0,1,1). The socle of S_2 sits at vertex 2, so I^0 = I_2 with
     # cokernel S_1, whose envelope is I_1 with cokernel S_0 = I_0.
-    A = auslander.MonomialAlgebra.an_with_relations(3, [(0, 2)])
+    A = auslander.Algebra.an_with_relations(3, [(0, 2)])
     F = auslander.PrimeField(32003)
     S2 = A.simple(F, 2)
     c = S2.coresolve(5)
+    _assert_coresolution_terms(c)
+    _assert_coresolution_embedding(A, F, S2, c)
+    _assert_coresolution_dimensions(A, F, S2)
+
+
+def _assert_coresolution_terms(c):
+    _assert_coresolution_shape(c)
+    _assert_coresolution_status(c)
+
+
+def _assert_coresolution_shape(c):
     assert c.terms_dims == [[0, 1, 1], [1, 1, 0], [1, 0, 0]]
     assert [t.dims for t in c.terms] == c.terms_dims
     assert len(c.maps) == len(c.terms) - 1
+
+
+def _assert_coresolution_status(c):
     assert c.status.kind == auslander.ResolutionKind.FINITE
     assert c.status.at is None
     assert c.status == auslander.ResolutionStatus(auslander.ResolutionKind.FINITE)
     assert repr(c) == "InjectiveCoresolution(terms=3, status=finite)"
+
+
+def _assert_coresolution_embedding(A, F, S2, c):
     envelope, embedding = S2.injective_envelope()
     assert envelope.dims == c.terms[0].dims == A.injective(F, 2).dims
     assert c.coaugmentation.maps == embedding.maps
     assert c.terms[0].is_isomorphic(envelope).isomorphic is True
+
+
+def _assert_coresolution_dimensions(A, F, S2):
     assert S2.injective_dimension(5).exact == 2
     assert A.simple(F, 1).injective_dimension(5).exact == 1
     assert A.simple(F, 0).injective_dimension(5).exact == 0
@@ -285,7 +358,7 @@ def test_injective_coresolution_of_s2_over_ka3_mod_ab():
 def test_projective_resolution_exposes_terms_maps_and_augmentation():
     # Dual in shape to InjectiveCoresolution: the minimal resolution of S_0
     # over kA_3/(ab) is 0 -> P_2 -> P_1 -> P_0 -> S_0 -> 0.
-    A = auslander.MonomialAlgebra.an_with_relations(3, [(0, 2)])
+    A = auslander.Algebra.an_with_relations(3, [(0, 2)])
     F = auslander.PrimeField(32003)
     S0 = A.simple(F, 0)
     res = S0.resolve(5)
@@ -303,15 +376,22 @@ def test_injective_dimension_separates_exact_from_at_least():
     # Omega S = S over k[x]/(x^2) dualizes to a periodic cosyzygy, so the
     # minimal coresolution of the simple never stops, while the regular module
     # is injective.
-    D = auslander.MonomialAlgebra.dual_numbers()
+    D = auslander.Algebra.dual_numbers()
     F = auslander.PrimeField(32003)
     S = D.simple(F, 0)
     c = S.coresolve(6)
+    _assert_unbounded_coresolution(c)
+    _assert_unbounded_dimension(D, F, S)
+
+
+def _assert_unbounded_coresolution(c):
     assert c.terms_dims == [[2]] * 7
     assert c.status.kind == auslander.ResolutionKind.CUT
     assert c.status.at == 6
     assert c.status == auslander.ResolutionStatus(auslander.ResolutionKind.CUT, 6)
 
+
+def _assert_unbounded_dimension(D, F, S):
     unbounded = S.injective_dimension(10)
     assert unbounded.exact is None
     assert unbounded.at_least == 11
@@ -327,7 +407,7 @@ def test_injective_dimension_separates_exact_from_at_least():
 def test_truncated_polynomial_algebras_are_self_injective():
     F = auslander.PrimeField(32003)
     for n in range(2, 6):
-        T = auslander.MonomialAlgebra.truncated_poly(n)
+        T = auslander.Algebra.truncated_poly(n)
         P = T.projective(F, 0)
         assert P.dims == [n]
         assert P.injective_dimension(6).exact == 0
@@ -338,6 +418,12 @@ def test_truncated_polynomial_algebras_are_self_injective():
 
 def test_dynkin_recognition_of_an_and_d4():
     DF = auslander.DiagramFamily
+    _assert_an_recognition(DF)
+    _assert_d4_recognition(DF)
+    _assert_a3_roots(DF)
+
+
+def _assert_an_recognition(DF):
     for n in range(1, 6):
         t = auslander.DynkinType(DF.A, n)
         q = auslander.dynkin_quiver(t)
@@ -347,6 +433,9 @@ def test_dynkin_recognition_of_an_and_d4():
         assert str(t) == "A_%d" % n
         assert t.family == DF.A
         assert t.n == n
+
+
+def _assert_d4_recognition(DF):
     # D_4 is the three-armed star; recognition ignores the orientation.
     d4 = auslander.DynkinType(DF.D, 4)
     inward = auslander.Quiver(4, [(0, 2), (1, 2), (3, 2)])
@@ -361,6 +450,9 @@ def test_dynkin_recognition_of_an_and_d4():
         [-1, -1, 2, -1],
         [0, 0, -1, 2],
     ]
+
+
+def _assert_a3_roots(DF):
     # A_3 has the six interval roots, ordered by height then lexicographically.
     a3 = auslander.dynkin_quiver(auslander.DynkinType(DF.A, 3))
     assert auslander.positive_roots(a3) == [
@@ -440,15 +532,23 @@ def test_dynkin_indecomposable_counts_are_the_positive_root_counts():
     DF = auslander.DiagramFamily
     types = [auslander.DynkinType(DF.A, n) for n in range(1, 6)]
     types.append(auslander.DynkinType(DF.D, 4))
+    _assert_dynkin_modules(types, F)
+    _assert_dynkin_counts(DF)
+
+
+def _assert_dynkin_modules(types, F):
     for t in types:
         q = auslander.dynkin_quiver(t)
-        A = auslander.MonomialAlgebra(q, [])
+        A = auslander.Algebra(q, [])
         mods = auslander.dynkin_indecomposables(A, F)
         assert len(mods) == t.indecomposable_count
         assert [m.dims for m, _ in mods] == auslander.positive_roots(q)
         for _, cert in mods:
             assert cert.kind == "indecomposable"
             assert cert.attempts is None
+
+
+def _assert_dynkin_counts(DF):
     assert auslander.DynkinType(DF.A, 4).indecomposable_count == 4 * 5 // 2
     assert auslander.DynkinType(DF.D, 4).indecomposable_count == 12
 
@@ -456,8 +556,13 @@ def test_dynkin_indecomposable_counts_are_the_positive_root_counts():
 def test_kronecker_is_euclidean_and_rejected_by_the_enumerator():
     F = auslander.PrimeField(32003)
     DF = auslander.DiagramFamily
-    K = auslander.MonomialAlgebra.kronecker(2)
+    K = auslander.Algebra.kronecker(2)
     affine_a1 = auslander.EuclideanType(DF.A, 1)
+    _assert_kronecker_types(K, affine_a1)
+    _assert_kronecker_rejection(K, F, affine_a1)
+
+
+def _assert_kronecker_types(K, affine_a1):
     assert auslander.euclidean_type(K.quiver) == affine_a1
     assert auslander.dynkin_type(K.quiver) is None
     # No finite root system, so no root list rather than a truncated one.
@@ -467,6 +572,8 @@ def test_kronecker_is_euclidean_and_rejected_by_the_enumerator():
     assert affine_a1.n == 1
     assert affine_a1.num_vertices == 2
 
+
+def _assert_kronecker_rejection(K, F, affine_a1):
     with pytest.raises(auslander.NotDynkinError) as caught:
         auslander.dynkin_indecomposables(K, F)
     # The rejected precondition survives as the exception class, and the
@@ -479,7 +586,7 @@ def test_kronecker_is_euclidean_and_rejected_by_the_enumerator():
 def test_a_graph_that_is_neither_dynkin_nor_euclidean_reports_no_euclidean_type():
     F = auslander.PrimeField(5)
     # Two isolated vertices: a disconnected graph is neither.
-    A = auslander.MonomialAlgebra(auslander.Quiver(2, []), [])
+    A = auslander.Algebra(auslander.Quiver(2, []), [])
     with pytest.raises(auslander.NotDynkinError) as caught:
         auslander.dynkin_indecomposables(A, F)
     assert caught.value.euclidean is None
@@ -489,7 +596,7 @@ def test_bound_algebra_is_rejected_for_a_nonzero_ideal():
     F = auslander.PrimeField(32003)
     # kA_3/(ab) is Dynkin as a quiver, so only the ideal stands in the way and
     # the rejection must say so rather than blame the graph.
-    A = auslander.MonomialAlgebra.an_with_relations(3, [(0, 2)])
+    A = auslander.Algebra.an_with_relations(3, [(0, 2)])
     assert auslander.dynkin_type(A.quiver) == auslander.DynkinType(
         auslander.DiagramFamily.A, 3
     )
@@ -502,7 +609,7 @@ def test_bound_algebra_is_rejected_for_a_nonzero_ideal():
 
 def test_is_isomorphic_needs_one_algebra_object():
     F = auslander.PrimeField(5)
-    A = auslander.MonomialAlgebra.linear_an(2)
-    B = auslander.MonomialAlgebra.linear_an(2)
+    A = auslander.Algebra.linear_an(2)
+    B = auslander.Algebra.linear_an(2)
     with pytest.raises(ValueError):
         A.simple(F, 0).is_isomorphic(B.simple(F, 0))

@@ -76,6 +76,57 @@ pub struct Relation {
     terms: Vec<(Fp, PathWord)>,
 }
 
+fn check_coefficient(index: usize, coeff: Fp, field: &PrimeField) -> Result<(), RelationError> {
+    if coeff.is_zero() {
+        return Err(RelationError::ZeroCoefficient { index });
+    }
+    if coeff.raw() >= field.modulus() {
+        return Err(RelationError::NonCanonicalCoefficient { index });
+    }
+    Ok(())
+}
+
+fn check_uniformity(
+    index: usize,
+    word: &PathWord,
+    first: Option<&PathWord>,
+) -> Result<(), RelationError> {
+    let Some(first) = first else {
+        return Ok(());
+    };
+    if word.source() != first.source() {
+        return Err(RelationError::MixedSource { index });
+    }
+    if word.target() != first.target() {
+        return Err(RelationError::MixedTarget { index });
+    }
+    Ok(())
+}
+
+fn validate_term(
+    quiver: &Quiver,
+    field: &PrimeField,
+    index: usize,
+    coeff: Fp,
+    arrows: Vec<ArrowId>,
+    first: Option<&PathWord>,
+    seen: &mut std::collections::BTreeSet<Vec<ArrowId>>,
+) -> Result<(Fp, PathWord), RelationError> {
+    check_coefficient(index, coeff, field)?;
+    if arrows.len() < 2 {
+        return Err(RelationError::WordTooShort {
+            index,
+            len: arrows.len(),
+        });
+    }
+    let word = PathWord::from_arrows(quiver, &arrows)
+        .map_err(|error| RelationError::InvalidWord { index, error })?;
+    check_uniformity(index, &word, first)?;
+    seen.insert(arrows)
+        .then_some((coeff, word))
+        .ok_or(RelationError::DuplicateWord { index })
+}
+
 impl Relation {
     /// A uniform relation over `quiver` and `field` from the given `terms`.
     ///
@@ -95,32 +146,10 @@ impl Relation {
         let mut checked: Vec<(Fp, PathWord)> = Vec::with_capacity(terms.len());
         let mut seen = std::collections::BTreeSet::new();
         for (index, (coeff, arrows)) in terms.into_iter().enumerate() {
-            if coeff.is_zero() {
-                return Err(RelationError::ZeroCoefficient { index });
-            }
-            if coeff.raw() >= field.modulus() {
-                return Err(RelationError::NonCanonicalCoefficient { index });
-            }
-            if arrows.len() < 2 {
-                return Err(RelationError::WordTooShort {
-                    index,
-                    len: arrows.len(),
-                });
-            }
-            let word = PathWord::from_arrows(quiver, &arrows)
-                .map_err(|error| RelationError::InvalidWord { index, error })?;
-            if let Some((_, first)) = checked.first() {
-                if word.source() != first.source() {
-                    return Err(RelationError::MixedSource { index });
-                }
-                if word.target() != first.target() {
-                    return Err(RelationError::MixedTarget { index });
-                }
-            }
-            if !seen.insert(arrows) {
-                return Err(RelationError::DuplicateWord { index });
-            }
-            checked.push((coeff, word));
+            let first = checked.first().map(|(_, word)| word);
+            checked.push(validate_term(
+                quiver, &field, index, coeff, arrows, first, &mut seen,
+            )?);
         }
         checked.sort_by(|(_, a), (_, b)| word_cmp(b.arrows(), a.arrows()));
         Ok(Relation {

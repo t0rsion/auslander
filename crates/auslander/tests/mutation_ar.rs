@@ -1,4 +1,4 @@
-//! v0.4 mutation corpus for the AR layer (design section 15).
+//! Mutation corpus for AR operations.
 //!
 //! Every mutation reachable from the public API is exercised below. Several
 //! section 15 bullets target stored witness fields that no public

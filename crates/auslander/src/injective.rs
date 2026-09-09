@@ -15,8 +15,8 @@
 //! [`ResolutionEnd`] and [`Bounded`].
 
 use crate::algebra::AlgebraBuildError;
-use crate::hom::Morphism;
-use crate::module::Module;
+use crate::hom::{Morphism, cokernel};
+use crate::module::{Module, same_morphism_data, same_representation, same_slice};
 use crate::opposite::{dual, dual_morphism, opposite};
 use crate::resolution::{Bounded, ResolutionEnd, bounded_dimension, projective_cover, resolve};
 
@@ -48,12 +48,75 @@ pub fn injective_envelope(m: &Module) -> Result<(Module, Morphism), AlgebraBuild
 /// so `maps.len() == terms.len() − 1`; `coaugmentation` is the envelope `M ↪ I^0`.
 /// Minimality: each `d^k` factors as `I^k ↠ C^{k+1} ↪ I^{k+1}` with the cosyzygy
 /// `C^{k+1}` essential in `I^{k+1}`, so `soc I^k` lies in `ker d^k`.
+#[derive(Clone)]
 pub struct InjectiveCoresolution {
     pub terms: Vec<Module>,
     pub maps: Vec<Morphism>,
     pub coaugmentation: Morphism,
     pub end: ResolutionEnd,
 }
+
+impl InjectiveCoresolution {
+    /// Whether two coresolution prefixes have the same end, terms, and maps.
+    pub(crate) fn agrees_with(&self, other: &InjectiveCoresolution) -> bool {
+        self.end == other.end
+            && same_slice(&self.terms, &other.terms, same_representation)
+            && same_slice(&self.maps, &other.maps, same_morphism_data)
+            && same_morphism_data(&self.coaugmentation, &other.coaugmentation)
+    }
+}
+
+/// The data that identifies an iterated cosyzygy.
+#[derive(Clone)]
+pub enum CosyzygyWitness {
+    /// The zeroth cosyzygy is the source module itself.
+    Identity,
+    /// A minimal coresolution prefix whose last cokernel is the cosyzygy.
+    Coresolution(InjectiveCoresolution),
+}
+
+/// An iterated cosyzygy with its minimal coresolution witness.
+#[derive(Clone)]
+pub struct Cosyzygy {
+    source: Module,
+    degree: usize,
+    module: Module,
+    witness: CosyzygyWitness,
+}
+
+impl Cosyzygy {
+    accessor_methods! {
+        /// The module whose cosyzygy was computed.
+        pub source() -> &Module = |this| &this.source;
+        /// The exponent `n` in `Ω^(-n)(source)`.
+        pub degree() -> usize = |this| this.degree;
+        /// The module `Ω^(-n)(source)`.
+        pub module() -> &Module = |this| &this.module;
+        /// The identity or minimal coresolution witness.
+        pub witness() -> &CosyzygyWitness = |this| &this.witness;
+    }
+
+    /// Recomputes the cosyzygy and its minimal coresolution witness.
+    pub fn verify(&self) -> bool {
+        let Ok(rebuilt) = cosyzygy(&self.source, self.degree) else {
+            return false;
+        };
+        same_representation(&self.module, &rebuilt.module)
+            && match (&self.witness, &rebuilt.witness) {
+                (CosyzygyWitness::Identity, CosyzygyWitness::Identity) => true,
+                (CosyzygyWitness::Coresolution(left), CosyzygyWitness::Coresolution(right)) => {
+                    left.agrees_with(right)
+                }
+                _ => false,
+            }
+    }
+}
+
+debug_fields! { Cosyzygy |this| {
+    "degree" => this.degree;
+    "source" => this.source.dim_vector();
+    "module" => this.module.dim_vector();
+} }
 
 /// A minimal injective coresolution of `m` with at most `steps` differentials
 /// (`terms.len() ≤ steps + 1`).
@@ -90,6 +153,39 @@ pub fn coresolve(m: &Module, steps: usize) -> Result<InjectiveCoresolution, Alge
         maps,
         coaugmentation,
         end: resolution.end,
+    })
+}
+
+/// Computes `Ω^(-degree)(m)` with the minimal coresolution prefix that proves it.
+///
+/// Degree zero returns `m` with [`CosyzygyWitness::Identity`]. If the
+/// coresolution ends before `degree`, the returned module is zero and the
+/// finite coresolution proves that value.
+pub fn cosyzygy(m: &Module, degree: usize) -> Result<Cosyzygy, AlgebraBuildError> {
+    if degree == 0 {
+        return Ok(Cosyzygy {
+            source: m.clone(),
+            degree,
+            module: m.clone(),
+            witness: CosyzygyWitness::Identity,
+        });
+    }
+    let coresolution = coresolve(m, degree - 1)?;
+    let module = if coresolution.terms.len() < degree {
+        Module::zero(m.algebra())
+    } else {
+        let boundary = if degree == 1 {
+            &coresolution.coaugmentation
+        } else {
+            &coresolution.maps[degree - 2]
+        };
+        cokernel(boundary).0
+    };
+    Ok(Cosyzygy {
+        source: m.clone(),
+        degree,
+        module,
+        witness: CosyzygyWitness::Coresolution(coresolution),
     })
 }
 
@@ -336,6 +432,50 @@ mod tests {
             }
             assert_eq!(injective_dimension(&s, 10).unwrap(), Bounded::AtLeast(11));
         }
+    }
+
+    #[test]
+    fn iterated_cosyzygies_keep_their_minimal_coresolution_witness() {
+        for field in fields() {
+            let algebra = dual_numbers(field);
+            let simple = Module::simple(&algebra, 0);
+            for degree in 0..5 {
+                let value = cosyzygy(&simple, degree).unwrap();
+                assert_eq!(value.source().dim_vector(), &[1]);
+                assert_eq!(value.degree(), degree);
+                assert_eq!(value.module().dim_vector(), &[1]);
+                assert!(value.verify());
+                assert_eq!(
+                    matches!(value.witness(), CosyzygyWitness::Identity),
+                    degree == 0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cosyzygy_is_zero_past_a_finite_coresolution() {
+        let algebra = linear_an(3, PrimeField::new(5).unwrap());
+        let simple = Module::simple(&algebra, 2);
+        assert_eq!(
+            cosyzygy(&simple, 0).unwrap().module().dim_vector(),
+            &[0, 0, 1]
+        );
+        assert_eq!(
+            cosyzygy(&simple, 1).unwrap().module().dim_vector(),
+            &[1, 1, 0]
+        );
+        assert!(cosyzygy(&simple, 2).unwrap().module().is_zero());
+        let injective = Module::injective(&algebra, 1);
+        assert!(cosyzygy(&injective, 1).unwrap().module().is_zero());
+    }
+
+    #[test]
+    fn a_cosyzygy_with_a_changed_degree_fails_verification() {
+        let algebra = dual_numbers(PrimeField::new(5).unwrap());
+        let mut value = cosyzygy(&Module::simple(&algebra, 0), 2).unwrap();
+        value.degree = 1;
+        assert!(!value.verify());
     }
 
     // A cyclic Nakayama algebra with constant Kupisch series is self-injective;

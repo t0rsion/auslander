@@ -1,0 +1,30 @@
+name: Quality
+
+on:
+  workflow_call:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: clippy, rustfmt
+      - run: cargo +1.92.0 fmt --all --check
+      - run: cargo +1.92.0 clippy --all-targets -- -D warnings
+      - name: Check Rust documentation
+        run: cargo +1.92.0 doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - run: cargo +1.92.0 install rust-code-analysis-cli --version 0.0.25 --locked
+      - run: python tools/check_text_line_budget.py --self-test
+      - run: python tools/check_text_line_budget.py
+      - run: python tools/check_complexity.py --self-test
+      - run: python tools/check_complexity.py --json "$RUNNER_TEMP/quality-complexity.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quality-complexity
+          path: ${{ runner.temp }}/quality-complexity.json
+          if-no-files-found: ignore

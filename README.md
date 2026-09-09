@@ -25,6 +25,56 @@ Install the Python package from PyPI:
 python -m pip install auslander
 ```
 
+## Research runs and theorem artifacts
+
+The current release compiles repeated finite-field families, limits the live
+state of homological surveys, and writes portable checkpoints. A fresh process
+verifies the algebra, census, completed rows, cursor, counters, and checksum
+before it resumes a run. A cut remains typed and retains every exact completed
+row.
+
+The fixed-interface Hom plan eliminates unchanged equations once. Each fiber
+solves `ker(D_J K_J^T) K`, then checks its global morphisms. For a
+finite-dimensional path algebra, the same two ranks give exact `Ext^1` and all
+higher Ext groups vanish. The generic Hom and Ext paths remain available for
+the same fibers.
+
+`auslander-theorem-v1` records a finite self-Ext locus. Verification rebuilds
+the complete census, replays its homological checkpoint, and recomputes the
+locus through `ExtSpace::new`. That constructor is the crate's generic Ext
+path. The locus check can stop at the first mismatch.
+
+```sh
+auslander theorem self-ext-locus homology.aus.json 1 4 locus.aus.json
+auslander theorem inspect locus.aus.json
+auslander theorem verify locus.aus.json
+```
+
+The flagship study covers the commutative square over `F_2` at dimension
+vector `[2,1,1,2]`. It checks all 256 raw tuples, accepts 58 modules, and
+retains 12 representatives. Degree 1 vanishes at indices `[5,10,11]`. Degrees
+1 through 3 vanish at `[5,10]`. Representative 11 has Ext dimensions
+`[5,0,1,0]` and is isomorphic to `P_0 + S_0 + S_3`. A finite hand count of
+accepted modules is `58 = 7^2 + 9`. This is a checked finite computation on
+that raw matrix domain, not a classification theorem.
+
+The starter census at dimension `[1,1,1,1]` remains: 16 raw tuples, 10
+classes, and representative 9 as the unique vanishing class in degrees 1
+through 3. That all-one representation is `P_0`, also `I_3`, so its vanishing
+is a projective check. Run the construction and separate replay path:
+
+```sh
+cargo run -p auslander --example self_ext_workflow
+cargo test -p auslander --test self_ext_artifact
+```
+
+See the [application study](docs/commutative-square-study.md),
+[computation results](docs/checked-computation-results.md),
+[compiled-family performance](docs/compiled-family-performance.md),
+[theorem artifact guide](docs/theorem-artifacts.md), and
+[Python workbench guide](crates/auslander-py/README.md). The derived workbench
+remains documented in its [release contract](docs/derived-equivalence-workbench.md).
+
 ## First result
 
 Named constructors build common algebras. This example computes the dimension
@@ -45,9 +95,8 @@ source and one target. `ab - cd` is a relation, and so is the inhomogeneous
 Non-uniform input is rejected, not decomposed.
 
 Every algebra comes from one pipeline. Completion turns the relations into the
-reduced Groebner basis of the ideal and emits a serializable certificate. An
-independent verifier reads that certificate back from bytes and rechecks the
-whole claim.
+reduced Groebner basis of the ideal and emits a serializable certificate. The
+verifier reads that certificate back from bytes and rechecks the whole claim.
 
 The verifier checks both ideal inclusions: each basis element expands to a
 two-sided combination of the input relations, and each input relation reduces to
@@ -60,10 +109,10 @@ acyclicity, and the certificate's claim must agree; an infinite claim needs a
 `(prefix, cycle)` witness the verifier replays in full.
 
 The verifier shares no completion, ambiguity enumeration, or reduction code with
-the engine. An `Algebra` value exists only after verification passes, and the
-engine's own output goes through the verifier like any other bytes. Dimension,
-the Cartan matrix, and every multiplication table are therefore exact. Nothing
-in the crate truncates silently.
+the engine. An `Algebra` value exists only after typed verification accepts a
+completion certificate. The byte-input verifier also checks certificates loaded
+from JSON. Dimension, the Cartan matrix, and every multiplication table
+are therefore exact. Nothing in the crate truncates silently.
 
 Two types split the work. `Algebra` is the runtime algebra and owns its prime
 field. The dimension and the structure constants of a general quotient depend on
@@ -482,14 +531,14 @@ let s2 = Module::simple(&algebra, 2);
 assert_eq!(ext_table(&s0, &s2, 4).unwrap(), vec![0, 0, 1, 0, 0]);
 ```
 
-The `v06` example converts the projective resolution of `S_0` over
+The checked example converts the projective resolution of `S_0` over
 `kA_3/(ab)` into an `ExactComplex`, computes
 `HH^0..HH^2(k[x]/(x^3)) = (3, 2, 2)`, checks a zero-work bar cut, and certifies
 `D(A)` as a classical tilting module of projective dimension two over F_2 and
 F_5:
 
 ```sh
-cargo run -p auslander --example v06
+cargo run -p auslander --example tilting_and_hochschild
 ```
 
 The tilting certificate stores this exact generation complex:
@@ -498,18 +547,16 @@ The tilting certificate stores this exact generation complex:
 [1, 2, 2] -> [1, 3, 2] -> [1, 1, 0] -> [1, 0, 0]
 ```
 
-See [`crates/auslander/examples/v06.rs`](crates/auslander/examples/v06.rs) for
-the complete Rust code. The Python acceptance path is
-`test_v06_acceptance_path` in
-[`crates/auslander-py/tests/test_v06.py`](crates/auslander-py/tests/test_v06.py).
+The complete Rust example and its Python acceptance path are part of the
+repository test suite.
 
-The `v07` example continues from the same projective-dimension-two tilting
-module. It recovers `End_A(T)^op`, checks the derived-equivalence certificate,
-transports a two-term `add(T)` complex in both directions, and compares its
-graded homotopy Hom dimensions:
+The `classical_tilting` example continues from the same
+projective-dimension-two tilting module. It recovers `End_A(T)^op`, checks the
+derived-equivalence certificate, transports a two-term `add(T)` complex in
+both directions, and compares its graded homotopy Hom dimensions:
 
 ```sh
-cargo run -p auslander --example v07
+cargo run -p auslander --example classical_tilting
 ```
 
 The example prints:
@@ -518,9 +565,10 @@ The example prints:
 target dimension: 5; resolution width: 2; graded Hom dimensions: [(-2, 0), (-1, 3), (0, 6), (1, 3), (2, 0)]
 ```
 
-Both strict round-trip chain isomorphisms pass verification. See
-[`crates/auslander/examples/v07.rs`](crates/auslander/examples/v07.rs) for
-the complete Rust code.
+Both strict round-trip chain isomorphisms pass verification. The derived
+workbench example adds ordinary-complex
+replacement, derived Hom, automatic transport, tilting-complex discovery,
+target recovery, and a verified portable artifact.
 
 Decomposing a module and reading the certificates:
 
@@ -576,9 +624,8 @@ assert_eq!(quiver.vertices().len(), 3);
 assert_eq!(quiver.arrows().len(), 4);
 ```
 
-The last three examples run as tests in `crates/auslander/tests/fixtures.rs`.
-Every value in the first one is pinned by
-`crates/auslander/tests/acceptance_nonmonomial.rs`.
+The examples run as acceptance tests. Their displayed values are pinned by
+the test suite.
 
 ## Python
 
@@ -609,72 +656,15 @@ MSRV 1.88; development is pinned to Rust 1.92 via `rust-toolchain.toml`:
 cargo test
 ```
 
+Release workflows configure non-publish `workflow_dispatch` rehearsal and
+hosted ARM and macOS architecture checks. Those jobs are GitHub-hosted runner
+configuration. They are not a local execution record.
+
 ## Correctness protocol
 
-- Unit tests live in every module and are named after the fact they check. They
-  include randomized dense-vs-sparse solver agreement and structural properties
-  of resolutions: `d^2 = 0`, exactness of computed prefixes, and minimality.
-- `crates/auslander/tests/fixtures.rs` holds twelve textbook fixtures (A_2, A_3,
-  D_4, `k[x]/(x^2)`, `k[x]/(x^3)`, kA_3/(ab), Kronecker-2, a radical-square-zero
-  cycle, three Nakayama algebras, a gentle tree algebra) with hand-derived
-  dimensions, Cartan matrices, radical series, Ext tables, and projective and
-  global dimensions. Each fixture runs over both F_2 and F_5. Two fixtures
-  preserve regression coverage for incorrect or non-terminating behavior.
-  Hereditary Kronecker has global dimension exactly 1. Kupisch series
-  [2, 2, 1] runs to completion.
-- `crates/auslander/tests/acceptance_nonmonomial.rs` runs the high-level
-  operations over three non-monomial quotients: the commutative square
-  `kQ/(ab - cd)` over F_5, the preprojective algebra of A_3 over F_2, and the
-  inhomogeneous `kQ/(ab - cde)` over F_5. Each pinned value is hand-derived on
-  the test that uses it, and the values that the oracle also stores agree with
-  it.
-- `crates/auslander/tests/residue_degree.rs` pins the field generality of the
-  support tau-tilting layer. The completeness certificate needs no
-  algebraically closed base field: every step holds for finite dimensional
-  algebras over an arbitrary field. Approximation multiplicities are counted
-  over the residue division ring `End(N_i)/rad End(N_i)`, not over the base
-  field, so the certificate stays correct when that ring is larger. Over the
-  prime fields this crate supports, that case cannot arise on the tau-tilting
-  path: every approximation generator is a tau-rigid indecomposable, and over
-  a finite field every tau-rigid indecomposable of `kQ/I` has residue degree
-  1. The file carries that proof and its hypotheses. The residue arithmetic is
-  exercised away from mutation instead, at degree 3 by a Kronecker fixture and
-  at degree 2 by a non-hereditary one.
-- `crates/auslander/tests/acceptance_ar.rs` pins the AR layer in two tiers.
-  Ext spaces, the Yoneda product laws on every basis tuple within the degree
-  bound, extension round trips, and AR-duality almost-split sequences run on
-  the full non-monomial matrix. AR quivers, catalog witnesses, and arrow
-  valuations run where an exhaustive catalog exists, with the almost-split
-  sequences of `k[x]/(x^3)`, linear A_3, the commutative square, and
-  preprojective A_3 pinned against hand-derived terms.
-  `tests/mutation_ar.rs` feeds every reachable witness verifier tampered data
-  and requires rejection. `tests/determinism_ar.rs` checks a fresh-process
-  fingerprint and compares the committed golden AR-quiver renderings under
-  `tests/golden-ar/` byte for byte.
-- The verifier is tested against a tamper corpus: a wrong schema string, a
-  composite field, an out-of-range arrow, a non-canonical coefficient, a
-  non-monic or non-reduced basis, an origin expansion that gives the wrong
-  value, membership traces with dropped steps, forged contexts, absent words and
-  non-eliminating coefficients, missing, extra, duplicated and misplaced
-  ambiguities, and normal-word lists with a missing word, an extra word, or the
-  wrong order. Every one is rejected with its own error.
-- Certificate bytes are byte-identical across two constructions in one process
-  and across two fresh processes.
-- Facts that are characteristic-free are checked over a large prime as well as
-  over F_2 and F_5. Small fields hide failure modes that depend on how rare
-  units are. A decomposition defect survived the suite because every test ran at
-  F_2 and F_5: there a random endomorphism of `P ⊕ P` is a non-unit often enough
-  to split by luck.
-- `crates/auslander/tests/qpa-oracle/` is a differential harness against QPA
-  under GAP. The committed `qpa_expected.json` was produced by a real GAP+QPA
-  run (provenance in `crates/auslander/tests/qpa-oracle/README.md`), and an
-  always-on test compares the library against it. Every fixture carries its own
-  prime field and its coefficient-bearing relations, so the non-monomial cases
-  are compared like the monomial ones. A missing or corrupted file is a hard
-  failure, and regression tests pin the corruption checks.
-  `native_snapshot.json` is a drift snapshot of the library's own output, not an
-  oracle. Setting `QPA_ORACLE=1` invokes GAP itself and fails hard if GAP or QPA
-  is unavailable or any value disagrees.
+The test suite checks exact fixtures, typed cuts, witness replay, deterministic
+bytes, characteristic-sensitive cases, and a committed GAP+QPA oracle. See
+[the correctness protocol](docs/correctness-protocol.md) for the full matrix.
 
 ## License
 

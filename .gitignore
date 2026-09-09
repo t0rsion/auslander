@@ -1,2 +1,6 @@
 target/
 __pycache__/
+dist/
+paper-*-private/
+/crates/auslander-py/python/auslander/_core*.so
+/crates/auslander-py/python/auslander/_core*.pyd

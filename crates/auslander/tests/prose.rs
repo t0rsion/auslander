@@ -62,11 +62,11 @@ const TOMBSTONES: &[Tombstone] = &[
     },
     Tombstone {
         text: "The release is additive",
-        reason: "v0.5 removes Algebra::from_monomial, the Tau enum, and three \
-                 witness types, and changes Python's Module.tau()",
+        reason: "the current API removes Algebra::from_monomial, the Tau enum, \
+                 and three witness types, and changes Python's Module.tau()",
         scope: Scope::Everywhere,
-        // v0.4 WAS additive, and its design doc says so truthfully.
-        allowed: &[SELF, "docs/v0.4-design.md"],
+        // The AR layer document describes an additive change.
+        allowed: &[SELF, "docs/witnessed-ar-layer.md"],
     },
     Tombstone {
         text: "3707228",
@@ -113,12 +113,7 @@ const TOMBSTONES: &[Tombstone] = &[
         reason: "the Tau enum is deleted; tau returns the zero module, which \
                  keeps its algebra",
         scope: Scope::CodeOnly,
-        allowed: &[
-            SELF,
-            "CHANGELOG.md",
-            "docs/v0.2-plan.md",
-            "docs/v0.4-design.md",
-        ],
+        allowed: &[SELF, "CHANGELOG.md", "docs/witnessed-ar-layer.md"],
     },
     Tombstone {
         text: "1.77 s to 1.99 s",
@@ -129,9 +124,8 @@ const TOMBSTONES: &[Tombstone] = &[
     },
     Tombstone {
         text: "ClassicalOneTiltingModule",
-        reason: "cut before v0.5.0: it verified one supplied module and \
-                 enumerated nothing, so it carried none of the release theme. \
-                 Tilting returns with the checked complex layer",
+        reason: "this removed type verified one supplied module. Classical \
+                 tilting now uses the checked complex layer",
         scope: Scope::CodeOnly,
         allowed: &[SELF, "CHANGELOG.md"],
     },
@@ -157,8 +151,8 @@ const TOMBSTONES: &[Tombstone] = &[
         allowed: &[
             SELF,
             "CHANGELOG.md",
-            "docs/migrating-to-0.3.md",
-            "docs/v0.3-design.md",
+            "docs/migration-to-certified-algebra.md",
+            "docs/certified-bound-quiver.md",
         ],
     },
 ];
@@ -218,7 +212,7 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
 /// slashes so the table reads the same on every platform.
 fn allowed(path: &Path, suffixes: &[&str]) -> bool {
     let text = path.to_string_lossy().replace('\\', "/");
-    suffixes.iter().any(|s| text.ends_with(s))
+    text.contains("/docs/changelog/") || suffixes.iter().any(|s| text.ends_with(s))
 }
 
 /// Every tombstone `body` violates at `path`, as printable lines.
@@ -304,4 +298,10 @@ fn clean_prose_produces_no_violation() {
     let fake = PathBuf::from("/synthetic/not-allowlisted/probe.rs");
     let body = "The cache keys on nominal module identity. Counts are exact.";
     assert!(violations(&fake, body).is_empty());
+}
+
+#[test]
+fn archived_changelog_claims_remain_historical_records() {
+    let path = Path::new("workspace/docs/changelog/v0.5-v0.4.md");
+    assert!(violations(path, "The release is additive").is_empty());
 }

@@ -1,4 +1,4 @@
-//! Decomposition and isomorphism testing across the v0.1 fixtures.
+//! Decomposition and isomorphism tests across the algebra fixtures.
 //!
 //! Most checks run over F_2 and F_5. The facts are characteristic-free, so
 //! disagreement between the two runs is a bug. Repeated summands are checked

@@ -1,0 +1,28 @@
+{
+  "schema": "auslander-compute-v1",
+  "algebra": {
+    "presentation": "field 5\nvertices 0 1\narrows a:0->1\n"
+  },
+  "modules": {
+    "P0": {
+      "dims": [1, 1],
+      "sparse_maps": [[[0, 0, 1]]]
+    },
+    "S1": {
+      "dims": [0, 1],
+      "sparse_maps": [[]]
+    }
+  },
+  "operations": [
+    {
+      "op": "homological_batch",
+      "modules": ["P0", "S1"],
+      "max_degree": 2,
+      "all_pairs": true
+    },
+    {
+      "op": "decompose",
+      "module": "P0"
+    }
+  ]
+}

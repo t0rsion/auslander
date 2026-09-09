@@ -1,0 +1,41 @@
+# command	CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 RUST_TEST_THREADS=1 nice -n 10 cargo bench -p auslander --bench perf --profile release -- --group family --trials 7
+# toolchain	rust-toolchain.toml
+# target	x86_64-unknown-linux-gnu
+# operating_system	Linux
+# cpu	13th Gen Intel(R) Core(TM) i9-13900KS
+# auslander perf harness
+# profiling feature	false
+# trials	7
+# mode	time
+group	case	ns_per_op	reps	trials
+family	compile family square-diagonal-dimension-2-f5	910.7	7268	7
+family	specialize compiled square-diagonal-dimension-2-f5	214.4	14155	7
+family	specialize generic square-diagonal-dimension-2-f5	225.4	37951	7
+family	Hom compiled square-diagonal-dimension-2-f5	2137.8	3125	7
+family	Hom generic square-diagonal-dimension-2-f5	2144.6	4888	7
+family	compile family square-diagonal-dimension-4-f5	3949.2	3237	7
+family	specialize compiled square-diagonal-dimension-4-f5	326.2	15061	7
+family	specialize generic square-diagonal-dimension-4-f5	345.6	29456	7
+family	Hom compiled square-diagonal-dimension-4-f5	10523.6	1081	7
+family	Hom generic square-diagonal-dimension-4-f5	9754.3	1525	7
+family	compile family square-diagonal-dimension-8-f5	22426.2	263	7
+family	specialize compiled square-diagonal-dimension-8-f5	883.4	9421	7
+family	specialize generic square-diagonal-dimension-8-f5	945.8	10444	7
+family	Hom compiled square-diagonal-dimension-8-f5	78268.8	208	7
+family	Hom generic square-diagonal-dimension-8-f5	73998.3	235	7
+family	compile family a16-dimension-4-interface-2-f5	13858.4	1156	7
+family	compile interface plan a16-dimension-4-interface-2-f5	196735.6	63	7
+family	Hom fixed-interface a16-dimension-4-interface-2-f5	52798.9	299	7
+family	Hom fixed-interface modules a16-dimension-4-interface-2-f5	49692.3	380	7
+family	Hom generic a16-dimension-4-interface-2-f5	96228.3	181	7
+family	compile family a16-dimension-4-interface-4-f5	13141.9	1134	7
+family	compile interface plan a16-dimension-4-interface-4-f5	194722.3	71	7
+family	Hom fixed-interface a16-dimension-4-interface-4-f5	109165.0	154	7
+family	Hom fixed-interface modules a16-dimension-4-interface-4-f5	101180.5	178	7
+family	Hom generic a16-dimension-4-interface-4-f5	90068.1	188	7
+family	compile family a16-dimension-4-interface-8-f5	13092.3	1272	7
+family	compile interface plan a16-dimension-4-interface-8-f5	158095.2	114	7
+family	Hom fixed-interface a16-dimension-4-interface-8-f5	289204.3	61	7
+family	Hom fixed-interface modules a16-dimension-4-interface-8-f5	286284.8	65	7
+family	Hom generic a16-dimension-4-interface-8-f5	89865.2	188	7
+# cases	30

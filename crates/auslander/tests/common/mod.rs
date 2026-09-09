@@ -22,11 +22,16 @@ use auslander::arquiver::IndecomposableCatalog;
 use auslander::completion::CompletionLimits;
 use auslander::ext::{ExtClass, ExtSpace};
 use auslander::field::{Fp, PrimeField};
+use auslander::homotopy::BoundedComplex;
 use auslander::indec::IndecomposableModule;
 use auslander::linalg::DenseMat;
 use auslander::module::{Module, direct_sum};
 use auslander::quiver::{ArrowId, Quiver};
 use auslander::relation::{Presentation, Relation};
+use auslander::tilting_complex::{
+    CertifiedTiltingComplex, TiltingComplexLimits, TiltingComplexResult, TiltingMutationOutcome,
+    left_tilting_mutation, regular_tilting_complex,
+};
 
 pub fn f2() -> PrimeField {
     PrimeField::new(2).unwrap()
@@ -34,6 +39,37 @@ pub fn f2() -> PrimeField {
 
 pub fn f5() -> PrimeField {
     PrimeField::new(5).unwrap()
+}
+
+pub fn one_term(module: &Module) -> BoundedComplex {
+    BoundedComplex::new(0, vec![module.clone()], Vec::new()).unwrap()
+}
+
+pub fn certified_regular(algebra: &Arc<Algebra>) -> CertifiedTiltingComplex {
+    match regular_tilting_complex(algebra, TiltingComplexLimits::default()).unwrap() {
+        TiltingComplexResult::Tilting(value) => *value,
+        outcome => panic!("regular generator did not certify: {outcome:?}"),
+    }
+}
+
+pub fn genuine_left_mutation(regular: &CertifiedTiltingComplex) -> CertifiedTiltingComplex {
+    (0..regular.candidate().len())
+        .find_map(|summand| {
+            match left_tilting_mutation(regular, summand, TiltingComplexLimits::default()).unwrap()
+            {
+                TiltingMutationOutcome::Tilting(value)
+                    if value
+                        .candidate()
+                        .summands()
+                        .iter()
+                        .any(|part| part.complex().len() > 1) =>
+                {
+                    Some(*value)
+                }
+                _ => None,
+            }
+        })
+        .expect("the A2 fixture has a multi-degree left mutation")
 }
 
 pub fn ids(raw: &[u32]) -> Vec<ArrowId> {
@@ -311,37 +347,62 @@ pub fn random_sum_module(rng: &mut XorShift64, algebra: &Arc<Algebra>, budget: u
 
 /// An invertible `d × d` matrix built from random elementary row operations on
 /// the identity.
+fn other_row(rng: &mut XorShift64, row: usize, dimension: usize) -> usize {
+    (row + 1 + rng.below(dimension as u64 - 1) as usize) % dimension
+}
+
+fn swap_rows(matrix: &mut DenseMat, first: usize, second: usize, dimension: usize) {
+    for column in 0..dimension {
+        let (left, right) = (matrix.get(first, column), matrix.get(second, column));
+        matrix.set(first, column, right);
+        matrix.set(second, column, left);
+    }
+}
+
+fn scale_row(matrix: &mut DenseMat, field: &PrimeField, row: usize, scalar: Fp) {
+    for column in 0..matrix.cols() {
+        matrix.set(row, column, field.mul(matrix.get(row, column), scalar));
+    }
+}
+
+fn add_row(matrix: &mut DenseMat, field: &PrimeField, source: usize, target: usize, scalar: Fp) {
+    for column in 0..matrix.cols() {
+        let value = field.add(
+            matrix.get(target, column),
+            field.mul(scalar, matrix.get(source, column)),
+        );
+        matrix.set(target, column, value);
+    }
+}
+
+fn random_row_operation(
+    rng: &mut XorShift64,
+    field: &PrimeField,
+    matrix: &mut DenseMat,
+    dimension: usize,
+) {
+    let row = rng.below(dimension as u64) as usize;
+    match rng.below(3) {
+        0 if dimension >= 2 => swap_rows(matrix, row, other_row(rng, row, dimension), dimension),
+        1 => {
+            let scalar = field.elem(1 + rng.below(field.modulus() - 1) as i64);
+            scale_row(matrix, field, row, scalar);
+        }
+        _ if dimension >= 2 => {
+            let source = other_row(rng, row, dimension);
+            add_row(matrix, field, source, row, rand_elem(rng, field));
+        }
+        _ => {}
+    }
+}
+
 pub fn random_invertible(rng: &mut XorShift64, field: &PrimeField, d: usize) -> DenseMat {
     let mut g = DenseMat::identity(d);
     if d == 0 {
         return g;
     }
     for _ in 0..2 * d + 2 {
-        let i = rng.below(d as u64) as usize;
-        match rng.below(3) {
-            0 if d >= 2 => {
-                let j = (i + 1 + rng.below(d as u64 - 1) as usize) % d;
-                for c in 0..d {
-                    let (a, b) = (g.get(i, c), g.get(j, c));
-                    g.set(i, c, b);
-                    g.set(j, c, a);
-                }
-            }
-            1 => {
-                let c = field.elem(1 + rng.below(field.modulus() - 1) as i64);
-                for k in 0..d {
-                    g.set(i, k, field.mul(g.get(i, k), c));
-                }
-            }
-            _ if d >= 2 => {
-                let j = (i + 1 + rng.below(d as u64 - 1) as usize) % d;
-                let c = rand_elem(rng, field);
-                for k in 0..d {
-                    g.set(i, k, field.add(g.get(i, k), field.mul(c, g.get(j, k))));
-                }
-            }
-            _ => {}
-        }
+        random_row_operation(rng, field, &mut g, d);
     }
     g
 }

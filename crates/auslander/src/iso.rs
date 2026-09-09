@@ -224,6 +224,114 @@ fn certified_single(d: &Decomposition) -> bool {
     d.certificates() == [Certificate::Indecomposable]
 }
 
+fn structural_outcome(m: &Module, n: &Module, zero: &Morphism) -> Option<IsoOutcome> {
+    if m.dim_vector() != n.dim_vector() {
+        return Some(IsoOutcome::NotIsomorphic(Obstruction::DimensionVector {
+            source: m.dim_vector().to_vec(),
+            target: n.dim_vector().to_vec(),
+        }));
+    }
+    if m.is_zero() {
+        return Some(IsoOutcome::Isomorphic(zero.clone()));
+    }
+    // This keeps the relation reflexive when decomposition cannot certify a
+    // summand. Nominally equal modules need no decomposition witness.
+    if Module::ptr_eq(m, n) {
+        return Some(IsoOutcome::Isomorphic(identity(m)));
+    }
+    let source = radical_series(m);
+    let target = radical_series(n);
+    (source != target).then_some(IsoOutcome::NotIsomorphic(Obstruction::LoewySeries {
+        source,
+        target,
+    }))
+}
+
+fn hom_dimensions(m: &Module, n: &Module) -> Result<[usize; 4], HomError> {
+    // Only the ranks decide the obstruction, so no Hom basis is built.
+    Ok([
+        hom_dim(m, m)?,
+        hom_dim(n, n)?,
+        hom_dim(m, n)?,
+        hom_dim(n, m)?,
+    ])
+}
+
+fn hom_dimension_obstruction(dimensions: [usize; 4]) -> Option<Obstruction> {
+    let [end_source, end_target, forward, backward] = dimensions;
+    (end_source != end_target || forward != backward).then_some(Obstruction::HomDimension {
+        end_source,
+        end_target,
+        forward,
+        backward,
+    })
+}
+
+fn decomposition_outcome(
+    m: &Module,
+    n: &Module,
+    source: &Decomposition,
+    target: &Decomposition,
+) -> Result<Option<IsoOutcome>, HomError> {
+    if certified_single(source) && certified_single(target) {
+        return Ok(None);
+    }
+    if let Some(obstruction) = hom_dimension_obstruction(hom_dimensions(m, n)?) {
+        return Ok(Some(IsoOutcome::NotIsomorphic(obstruction)));
+    }
+    Ok(undetermined_reason(source)
+        .or_else(|| undetermined_reason(target))
+        .map(|reason| IsoOutcome::Unknown { reason }))
+}
+
+fn matching_summand(
+    module: &Module,
+    endo: &EndoAlgebra,
+    target: &Decomposition,
+    used: &[bool],
+) -> Option<(usize, Morphism)> {
+    for (index, candidate) in target.summands().iter().enumerate() {
+        if used[index] {
+            continue;
+        }
+        if let Some(witness) = indecomposable_iso(module, candidate, endo) {
+            return Some((index, witness));
+        }
+    }
+    None
+}
+
+fn match_decompositions(
+    m: &Module,
+    n: &Module,
+    source: &Decomposition,
+    target: &Decomposition,
+    mut witness: Morphism,
+) -> IsoOutcome {
+    let mut used = vec![false; target.summands().len()];
+    for (source_index, module) in source.summands().iter().enumerate() {
+        let Some((target_index, isomorphism)) =
+            matching_summand(module, &source.endos()[source_index], target, &used)
+        else {
+            return if source.summands().len() == 1 && target.summands().len() == 1 {
+                IsoOutcome::NotIsomorphic(Obstruction::RadicalCriterion)
+            } else {
+                IsoOutcome::NotIsomorphic(Obstruction::UnmatchedSummand {
+                    dim_vector: module.dim_vector().to_vec(),
+                })
+            };
+        };
+        used[target_index] = true;
+        let term = source.split().projections()[source_index]
+            .then(&isomorphism)
+            .expect("endpoints agree")
+            .then(&target.split().inclusions()[target_index])
+            .expect("endpoints agree");
+        witness = add_morphisms(&witness, &term);
+    }
+    verified(m, n, witness)
+}
+
 /// Whether `m ≅ n`: a verified witness, a proof of non-isomorphism, or
 /// [`IsoOutcome::Unknown`] when neither could be certified. `Unknown` has two
 /// sources, an undetermined summand and a witness that fails its inverse check;
@@ -232,29 +340,8 @@ fn certified_single(d: &Decomposition) -> bool {
 pub fn is_isomorphic(m: &Module, n: &Module) -> Result<IsoOutcome, HomError> {
     hit(Site::IsIsomorphic);
     let zero = zero_morphism(m, n)?;
-    if m.dim_vector() != n.dim_vector() {
-        return Ok(IsoOutcome::NotIsomorphic(Obstruction::DimensionVector {
-            source: m.dim_vector().to_vec(),
-            target: n.dim_vector().to_vec(),
-        }));
-    }
-    if m.is_zero() {
-        return Ok(IsoOutcome::Isomorphic(zero));
-    }
-    // One module is isomorphic to itself by the identity, whatever the
-    // decomposition routes below can certify. Without this the relation is not
-    // reflexive: a module whose summands stay undetermined would be reported
-    // `Unknown` against itself.
-    if Module::ptr_eq(m, n) {
-        return Ok(IsoOutcome::Isomorphic(identity(m)));
-    }
-    let source_series = radical_series(m);
-    let target_series = radical_series(n);
-    if source_series != target_series {
-        return Ok(IsoOutcome::NotIsomorphic(Obstruction::LoewySeries {
-            source: source_series,
-            target: target_series,
-        }));
+    if let Some(outcome) = structural_outcome(m, n, &zero) {
+        return Ok(outcome);
     }
     let dm = decompose(m);
     let dn = decompose(n);
@@ -262,56 +349,10 @@ pub fn is_isomorphic(m: &Module, n: &Module) -> Result<IsoOutcome, HomError> {
     // in the matching loop, which decides it completely; anything else gets
     // the Hom-dimension check first, so an exact obstruction is never
     // suppressed by an undetermined certificate.
-    if !(certified_single(&dm) && certified_single(&dn)) {
-        // Only the four dimensions decide this obstruction, so take them by
-        // rank and never build a basis.
-        let end_source = hom_dim(m, m)?;
-        let end_target = hom_dim(n, n)?;
-        let forward = hom_dim(m, n)?;
-        let backward = hom_dim(n, m)?;
-        if end_source != end_target || forward != backward {
-            return Ok(IsoOutcome::NotIsomorphic(Obstruction::HomDimension {
-                end_source,
-                end_target,
-                forward,
-                backward,
-            }));
-        }
-        if let Some(reason) = undetermined_reason(&dm).or_else(|| undetermined_reason(&dn)) {
-            return Ok(IsoOutcome::Unknown { reason });
-        }
+    if let Some(outcome) = decomposition_outcome(m, n, &dm, &dn)? {
+        return Ok(outcome);
     }
-    let mut used = vec![false; dn.summands().len()];
-    let mut witness = zero;
-    for (i, mi) in dm.summands().iter().enumerate() {
-        let mut matched = false;
-        for (j, nj) in dn.summands().iter().enumerate() {
-            if used[j] {
-                continue;
-            }
-            let Some(w) = indecomposable_iso(mi, nj, &dm.endos()[i]) else {
-                continue;
-            };
-            used[j] = true;
-            let term = dm.split().projections()[i]
-                .then(&w)
-                .expect("endpoints agree")
-                .then(&dn.split().inclusions()[j])
-                .expect("endpoints agree");
-            witness = add_morphisms(&witness, &term);
-            matched = true;
-            break;
-        }
-        if !matched {
-            if dm.summands().len() == 1 && dn.summands().len() == 1 {
-                return Ok(IsoOutcome::NotIsomorphic(Obstruction::RadicalCriterion));
-            }
-            return Ok(IsoOutcome::NotIsomorphic(Obstruction::UnmatchedSummand {
-                dim_vector: mi.dim_vector().to_vec(),
-            }));
-        }
-    }
-    Ok(verified(m, n, witness))
+    Ok(match_decompositions(m, n, &dm, &dn, zero))
 }
 
 // Certifies the assembled witness: the per-vertex inverses must form a morphism

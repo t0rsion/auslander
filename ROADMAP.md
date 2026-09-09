@@ -4,7 +4,7 @@ Releases ship when their gates hold. A gate is a checkable condition: a
 test suite, a certificate, an oracle comparison. This file does not
 promise dates.
 
-## v0.3: certified general bound quiver algebras
+## Certified general bound quiver algebras
 
 One theme: every operation the crate offers works over a general
 admissible ideal, not only a monomial one. The enabling machinery is a
@@ -64,12 +64,12 @@ Every existing high-level operation is tested over at least one genuinely
 non-monomial quotient: opposite algebra and duality, `ElementMatrix`,
 `EndoAlgebra`, projectives and injectives, resolutions and coresolutions,
 Ext dimensions, radical and socle series, `decompose` and `krull_schmidt`,
-`is_isomorphic`, and both `tau` routes. The full v0.2 suite must pass
+`is_isomorphic`, and both `tau` routes. The full preceding suite must pass
 unchanged through the new substrate.
 
 The enumerators keep their existing domains. Dynkin enumeration stays on the
 zero ideal; Nakayama enumeration keeps its preconditions. Widening them is
-not a v0.3 goal.
+outside this scope.
 
 ### Oracle
 
@@ -91,7 +91,7 @@ and coresolutions, Ext dimensions. `EndoAlgebra` and `ElementMatrix` stay
 Rust-only. The release ships one non-monomial example in both languages, a
 migration guide, and a capability matrix.
 
-### Cut from v0.3
+### Outside this scope
 
 Ext representatives and Yoneda products, the category radical, almost-split
 sequences, AR component exploration, chain complexes and Hochschild
@@ -99,12 +99,12 @@ cohomology, tilting and tau-tilting, module Groebner resolution backends,
 user-defined orders, one-sided Groebner bases, infinite-dimensional
 quotients, string and gentle enumeration, characteristic zero.
 
-## v0.4: the Auslander-Reiten layer, witnessed
+## Witnessed Auslander-Reiten layer
 
 One theme: the homological layer moves from dimensions to objects with
 checkable witnesses. Ext classes, actual extensions, the distinguished AR
 class, almost-split sequences, irreducible morphisms, valued AR quivers.
-The binding specification is `docs/v0.4-design.md`.
+The binding specification is `docs/witnessed-ar-layer.md`.
 
 - `HomSpace` with subspaces, quotients, deterministic complements, and
   coordinates; `IndecomposableModule` tied to its End-locality proof.
@@ -126,11 +126,11 @@ The binding specification is `docs/v0.4-design.md`.
   a capability spike; the acceptance matrix split between the general
   tier and the catalog tier.
 
-## v0.5: support tau-tilting, witnessed
+## Support tau-tilting
 
 One theme: enumeration stops being a list and becomes a certificate.
 Candidate verification is general; a completeness claim requires a closed
-mutation graph. The binding specification is `docs/v0.5-design.md`.
+mutation graph. The binding specification is `docs/support-tau-tilting.md`.
 
 - `TauRigidModule` and `TauRigidityOutcome`, witnessed both ways. A vanishing
   claim stores no witness data, because it has none to store: private
@@ -155,10 +155,10 @@ mutation graph. The binding specification is `docs/v0.5-design.md`.
   D_4 and truncated Kronecker; a QPA oracle at schema v7; fresh-process
   determinism.
 
-## v0.6: checked higher homology
+## Checked higher homology
 
 One theme: every higher homological claim factors through a checked finite
-complex. The binding specification is `docs/v0.6-design.md`.
+complex. The binding specification is `docs/checked-higher-homology.md`.
 
 - `CheckedComplex` validates display-order endpoints and zero composites.
   Exactness returns `ExactComplex` or the first `NonExactWitness`, with exact
@@ -178,13 +178,14 @@ complex. The binding specification is `docs/v0.6-design.md`.
   candidates.
 - Gates: independent full-bar, center, and derivation checks; fresh-process
   bases and cut diagnostics; F2 and F5 tilting fixtures; a live QPA run; and a
-  production code count below v0.5.0.
+  production code count below the preceding baseline.
 
-## v0.7: certified tilting-derived equivalences
+## Certified derived-equivalence workbench
 
-One theme: a classical tilting certificate now reaches its split target and a
-checked derived-equivalence certificate. The binding specification is
-`docs/v0.7-design.md`.
+One workflow: build, replace, discover, transport, export, and verify. A
+classical tilting certificate reaches its split target first. Ordinary bounded
+complexes and tilting-complex mutation build on that checked foundation. The
+binding specification is `docs/derived-equivalence-workbench.md`.
 
 - Recover `End_A(T)^op` as a deterministic bound quiver presentation when
   every tilting summand has residue degree one. A non-split target is a typed
@@ -204,11 +205,32 @@ checked derived-equivalence certificate. The binding specification is
   determinism, F2 and F5 fixtures, a live QPA comparison where QPA exposes the
   needed invariants, Python parity, and a fixed target-work ceiling.
 
+- Replace an ordinary bounded complex by a checked bounded projective model.
+  A quasi-isomorphism exists only after its mapping cone passes exactness.
+- Compute derived Hom from stored projective models. Extend the classical strict
+  equivalence through checked projective and `add(T)` replacements.
+- Certify exceptional tilting complexes through finite shifted Hom checks and
+  a recursive mutation witness back to the regular generator.
+- Mutate tilting complexes through checked homotopy-category approximations.
+  A budgeted graph retains complete edges but claims closure only with a
+  separate closure witness.
+- Recover and verify `End_K(T)^op`, then form checked paths of forward and
+  formal inverse derived-equivalence edges.
+- Export canonical `auslander-derived-v1` mutation-recipe artifacts. A
+  standalone verifier that runs no graph discovery replays the recipe from
+  the original algebra certificate.
+- Ship a command-line verifier and a Python workbench with a session, text
+  input, canonical JSON computation, stable-category batches, sparse module
+  data, rich displays, type stubs, persistence, and optional adapters.
+- Gates: mutation corpora, fresh-process artifacts and renderings,
+  F2 and F5 fixtures, the live schema-v9 QPA regression, exact work
+  ceilings, package tests, and the full workbench release matrix.
+
 ## Later
 
-Non-split species, automatic `add(T)` replacement for arbitrary complexes,
-and A-infinity minimal models. Each needs the same witness discipline before
-it enters a release.
+Non-split species, extension fields, characteristic zero, dg target algebras,
+and `A-infinity` minimal models remain separate releases. Each needs the same
+witness discipline before it enters a release.
 
 ## sylvester
 
@@ -216,7 +238,7 @@ it enters a release.
 it: the commutative engine and the noncommutative engine solve different
 problems, and the projects share testing and certification lessons only.
 
-Its own track: the repaired tree stays frozen while v0.3 is built. A
+Its own track: the repaired tree stays frozen while certified algebra work is built. A
 certification sprint (per-run two-sided transformation identities,
 zero-remainder input certificates, a public certificate verifier, the two
 recorded resource-exhaustion defects) happens only alongside a real

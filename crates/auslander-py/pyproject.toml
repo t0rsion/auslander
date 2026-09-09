@@ -4,9 +4,9 @@ build-backend = "maturin"
 
 [project]
 name = "auslander"
-version = "0.7.0"
+version = "0.8.0"
 description = "Finite-dimensional bound quiver algebras kQ/I over prime fields, and their right modules"
-authors = [{ name = "Tor Kringeland", email = "tor@vixe.re" }]
+authors = [{ name = "Tor Kringeland" }]
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT OR Apache-2.0"
@@ -19,6 +19,10 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Mathematics",
 ]
 
+[project.optional-dependencies]
+display = ["networkx>=3.0"]
+test = ["pytest>=8.0", "networkx>=3.0"]
+
 [project.urls]
 Homepage = "https://github.com/t0rsion/auslander"
 Repository = "https://github.com/t0rsion/auslander"
@@ -26,5 +30,14 @@ Documentation = "https://github.com/t0rsion/auslander/tree/main/crates/auslander
 Changelog = "https://github.com/t0rsion/auslander/blob/main/CHANGELOG.md"
 Issues = "https://github.com/t0rsion/auslander/issues"
 
+[project.scripts]
+auslander = "auslander.__main__:main"
+
 [tool.maturin]
-module-name = "auslander"
+module-name = "auslander._core"
+python-source = "python"
+exclude = ["**/__pycache__/**", "**/*.py[cod]"]
+
+[tool.maturin.sbom]
+# Generated Rust dependency reports contain absolute checkout paths.
+rust = false
