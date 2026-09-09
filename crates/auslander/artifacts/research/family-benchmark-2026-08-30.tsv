@@ -1,0 +1,15 @@
+# command	cargo bench -p auslander --bench perf -- --group family --trials 7
+# rustc	1.92.0 (ded5c06cf 2025-12-08)
+# host	x86_64-unknown-linux-gnu
+# kernel	Linux 7.1.11-arch1-1 x86_64 GNU/Linux
+# cpu	13th Gen Intel(R) Core(TM) i9-13900KS
+# logical_cpus	32
+# trials	7
+# mode	time
+group	case	ns_per_op	reps	trials
+family	specialize compiled square-diagonal-4-f5	335.9	11521	7
+family	specialize generic square-diagonal-4-f5	351.9	27511	7
+family	Hom compiled square-diagonal-4-f5	9937.4	1016	7
+family	Hom generic square-diagonal-4-f5	9672.4	1430	7
+family	Hom fixed-interior a16-d4-f5	49422.9	332	7
+family	Hom generic a16-d4-f5	92372.0	197	7

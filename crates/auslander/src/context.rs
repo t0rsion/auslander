@@ -450,9 +450,9 @@ mod tests {
         BasicDecomposition::new(m).expect("a kronecker regular module is indecomposable")
     }
 
-    // The v0.5 defect this type exists to prevent. X and Y share the dimension
-    // vector (1, 1) and are not isomorphic, tau X is X and tau Y is Y, and Hom
-    // between them is zero. A cache keyed by a caller index answered the
+    // X and Y share the dimension vector (1, 1) and are not isomorphic.
+    // tau X is X and tau Y is Y, and Hom between them is zero.
+    // A cache keyed by a caller index answered the
     // second question with tau X and called Y tau-rigid, which it is not:
     // dim Hom(Y, tau Y) is 1. Every memo below is warmed with X and then asked
     // for Y. Weakening ModuleKey to the dimension vector makes the entry for Y

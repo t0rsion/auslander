@@ -1,4 +1,4 @@
-//! v0.7 acceptance and fresh-process determinism gates for bounded homotopy.
+//! Acceptance and fresh-process determinism tests for bounded homotopy.
 
 use std::env;
 use std::fmt::Write as _;

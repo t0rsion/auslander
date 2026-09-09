@@ -1,0 +1,368 @@
+# Certified general bound quiver algebras
+
+This design fixes the module layout, data model, certificate format, verifier
+obligations, and migration map. Deviations require a recorded reason.
+
+## 1. Module layout (crates/auslander/src)
+
+New files:
+
+- `relation.rs`: `Relation`, `Presentation`, validation, typed errors.
+- `order.rs`: the sealed admissible order (deglex over the arrow order).
+- `completion.rs`: the completion engine. Emits a `Certificate`.
+- `certificate.rs`: certificate data model plus canonical JSON encode and
+  strict decode. No external dependencies; the crate keeps rustc-hash as
+  its only dependency.
+- `verify.rs`: the independent verifier. Owns its own reduction code.
+  Produces `VerifiedCompletion`, the sole gateway to `Algebra`.
+
+Rewritten files:
+
+- `algebra.rs`: `Algebra` (field-owning runtime type), `MonomialPresentation`
+  (field-free analysis type), constructors. `MonomialAlgebra` is removed.
+
+Every other file migrates per section 7.
+
+## 2. Data model
+
+```rust
+// relation.rs
+pub struct Relation {
+    // Terms sorted strictly descending in the sealed order; coefficients
+    // canonical and nonzero; words distinct valid paths of length >= 2;
+    // all words share one source and one target (uniformity).
+    terms: Vec<(Fp, PathWord)>,
+}
+pub struct Presentation {
+    quiver: Quiver,
+    field: PrimeField,
+    relations: Vec<Relation>,
+}
+```
+
+`Relation::new(quiver, field, terms)` validates and normalizes: it sorts
+terms in strictly descending order, rejects empty relations, zero or
+non-canonical coefficients, duplicate words, non-path words, words of
+length < 2, and mixed sources or targets (`RelationError::{Empty,
+ZeroCoefficient, NonCanonicalCoefficient, DuplicateWord, InvalidWord,
+WordTooShort, MixedSource, MixedTarget}`).
+
+A general admissible relation is a k-combination of paths with one common
+source and one common target. Non-uniform input is rejected, not
+decomposed.
+
+## 3. The sealed order
+
+`order.rs` defines exactly one order, identified by the string
+`"deglex-arrowid-v1"`:
+
+- Compare word length first; the longer word is larger.
+- On equal length, compare arrow sequences lexicographically by `ArrowId`
+  numeric order; the larger sequence is the larger word.
+
+This order is admissible: well-founded, total on the paths between any two
+vertices, and compatible with concatenation on both sides where products
+are defined. No user-supplied comparators exist.
+
+## 4. Completion engine (`completion.rs`)
+
+Plain Bergman-style completion. No F5 signatures, no matrix batching.
+
+- State: a list of monic reduced relations (the working basis), each with
+  provenance (a two-sided expression in the input relations).
+- Reduction: full remainder division. Replace the largest reducible word;
+  record every step as `(position word, basis index, left context, right
+  context, coefficient)`. Every step strictly decreases the reduced word
+  in the sealed order.
+- Compositions: for each ordered pair of working-basis elements, every
+  overlap ambiguity (a proper suffix of one leading word equals a proper
+  prefix of the other) and every inclusion ambiguity (one leading word is
+  a proper factor of the other). Self-overlaps included. Reduce every
+  composition to normal form; a nonzero normal form joins the basis with
+  combined provenance.
+- Termination and interreduction: run to a fixed point, then interreduce
+  to the unique reduced Groebner basis (monic; no leading word divides a
+  factor of any other element's words). Provenance is carried through
+  interreduction.
+- Limits: `CompletionLimits { max_basis, max_word_len, max_steps }`
+  checked inside reduction loops, ambiguity processing, and normal-word
+  emission, not between phases. `max_steps` counts work units: each
+  reduction step and each emitted normal word costs one, checked before
+  the word is allocated, so a huge finite language truncates instead of
+  exhausting memory. Exhaustion returns
+  `Outcome::Truncated(TruncationDiagnostics)` with counts of pending
+  ambiguities and the consumed budget. A truncated outcome carries no
+  certificate.
+- Determinism: `BTreeMap`/`BTreeSet`/sorted `Vec` only, or explicitly
+  sorted iteration. Ambiguities processed in a canonical documented order.
+  Identical input and limits produce identical certificate bytes.
+
+Outcome:
+
+```rust
+pub enum Outcome {
+    Complete(Certificate),
+    Truncated(TruncationDiagnostics),
+}
+```
+
+The engine emits, inside `Certificate`:
+
+- `schema`: `"auslander-completion-certificate-v1"`.
+- `field`, `quiver`, `order` (= `"deglex-arrowid-v1"`), `input_relations`.
+- `basis`: the reduced Groebner basis.
+- `origin[j]`: terms `(coeff, left word, input index, right word)` with
+  `g_j = Σ c · u · r_i · v` (checkable by naive expansion).
+- `membership[i]`: a reduction trace of input relation `r_i` by `basis`
+  ending at zero.
+- `ambiguities`: one entry per overlap and inclusion ambiguity of `basis`
+  leading words, canonically keyed `(i, j, kind, offset)`, each with a
+  reduction trace of the composition ending at zero.
+- `normal_words`: the claimed basis of the quotient (all words irreducible
+  with respect to `basis` leading words), in the fixed basis order of
+  section 6. Empty when `finiteness` claims an infinite quotient.
+- `automaton`: the normal-word automaton as
+  `{"states": [...], "transitions": [...]}`. States are one empty word
+  per vertex in vertex order, then every proper nonempty leading-word
+  prefix sorted lexicographically, each serialized as its arrow-id word.
+  Transitions are sparse `(state, arrow, next state)` triples sorted by
+  state then arrow; a missing pair is noncomposable or completes a
+  leading word.
+- `finiteness`: exactly `{"finite": true}` or
+  `{"infinite": {"prefix": [...], "cycle": [...]}}`. In the infinite case
+  the engine extracts the witness from its own automaton: the prefix
+  reads from the start state of its source vertex to a state on a cycle,
+  and the cycle returns to exactly that state. The strict parser accepts
+  the literals `true` and `false`, but the schema stores a boolean only
+  here and only as `true`; `false` anywhere is a shape error.
+
+## 5. Verifier (`verify.rs`)
+
+Input: certificate bytes (untrusted). The verifier shares no completion,
+ambiguity-enumeration, automaton, or reduction code with the engine; only
+the wire structs and the ordering contract are shared. It owns a naive
+reduction routine written from the definition. It may share `Fp`,
+`PrimeField`, `Quiver`, `PathWord`, and the certificate types.
+
+Resource envelope: the parser bounds container nesting
+(`MAX_JSON_DEPTH = 64`) and rejects duplicate keys with a set-based
+check. Before the quiver is built, the automaton must declare at least
+one state per declared vertex, so allocation stays proportional to the
+certificate size. The ambiguity and normal-word comparisons run in
+lockstep against lazy enumerations, so verifier memory stays bounded by
+the automaton and certificate sizes and work stays polynomial in
+automaton size times list length.
+
+Checks, in order, each with a typed `VerifyError`:
+
+1. Schema string, order id, field primality, the automaton state count
+   against the declared vertex count, quiver well-formedness.
+2. Input relations valid per section 2 (re-validated from bytes).
+3. Basis elements monic, uniform, reduced against each other.
+4. `origin`: expand each two-sided expression naively; the sum must equal
+   `g_j` exactly.
+5. `membership`: replay each trace with its own arithmetic; every step
+   must name a present word, use a basis element whose leading word
+   matches the named factor, and strictly descend; the final value must
+   be zero.
+6. `ambiguities`: walk a lazy generator of every overlap and inclusion
+   ambiguity of the basis leading words, self-overlaps included, in
+   canonical `(i, j, kind, offset)` order, in lockstep with the list. A
+   duplicate, an extra, a missing, and an out-of-order key are four
+   distinct errors. Replay every trace to zero as in step 5.
+7. `automaton`: rebuild the automaton from the basis leading words with
+   the verifier's own construction; the certificate's states and
+   transitions must match it exactly in canonical order. A false edge, a
+   missing state, reordered states, a duplicate transition, and
+   out-of-order transitions are tamper classes.
+8. `finiteness`: decide finiteness by acyclicity of the verifier's own
+   automaton; the claim must match the decision. For an infinite claim,
+   verify the witness in full: the cycle is nonempty, `prefix·cycle^2` is
+   a composable path, no leading word occurs as a factor of it, the
+   prefix replays to a state `s`, and one cycle replays from `s` back to
+   exactly `s` (state return proves arbitrary repetition). The
+   normal-word list must be empty, and the result is
+   `VerifyError::InfiniteDimensional` carrying the certificate's own
+   verified witness.
+9. `normal_words` (finite claim): compare the list in lockstep with a
+   lazy enumeration in the fixed basis order (a depth-first walk with a
+   longest-walk table), failing at the first divergence and requesting at
+   most one word past the end of the list. An empty list is legitimate
+   exactly for the zero-vertex quiver.
+10. Emit `VerifiedCompletion { certificate, normal_words, .. }`.
+
+`VerifiedCompletion` has no public constructor outside `verify`.
+
+## 6. `Algebra` (`algebra.rs`)
+
+```rust
+pub struct Algebra {
+    quiver: Quiver,
+    field: PrimeField,
+    relations: Vec<Relation>,      // the reduced Groebner basis
+    basis: Vec<PathWord>,          // normal words, fixed order (below)
+    // per-arrow action tables: right_mul[i][a] and left_mul[a][i] are
+    // sparse rows Σ (BasisIdx, Fp): NF(basis[i]·a), NF(a·basis[i]).
+    ...
+}
+```
+
+Basis order follows the module arithmetic layer: `basis[v] = e_v` for
+`v < num_vertices`; the rest sorted by length, then source, then
+lexicographic arrow word. All old index conventions survive.
+
+Construction:
+
+- `Algebra::new(presentation, limits) -> Result<Arc<Algebra>, AlgebraBuildError>`
+  runs completion, serializes the certificate, verifies the serialized
+  bytes, and builds tables from the verified basis using the verifier's
+  division routine, not the engine's.
+- `Algebra::from_verified(v: VerifiedCompletion)
+  -> Result<Arc<Algebra>, AlgebraBuildError>` is the reverify workflow entry
+  (dump bytes, reload, verify, rebuild). It keeps the default limits:
+  certificate bytes never carry or select downstream budgets.
+  `Algebra::from_verified_with_limits(v, limits)` preserves budgets across a
+  reload. Both are fallible because a certificate can verify and still
+  describe a non-admissible ideal; see the admissibility paragraph below.
+- The algebra stores its effective `CompletionLimits`
+  (`completion_limits()`); derived completions such as `opposite` run
+  with the stored limits, so tau, injective envelopes, coresolutions, and
+  injective dimensions inherit them.
+- `Algebra::certificate(&self) -> &Certificate` for dumping.
+- `Algebra::from_monomial(field, &MonomialPresentation, limits)` routes
+  monomial input through the same pipeline as general input (each
+  forbidden word is a one-term relation).
+  `monomial_completion_limits` derives limits that
+  are always adequate for a monomial presentation
+  (`max_word_len >= 2·L - 1` for the longest forbidden word length `L`),
+  and the named monomial constructors use them.
+
+```rust
+pub enum AlgebraBuildError {
+    Relation(RelationError),
+    InfiniteDimensional { certificate: Certificate, witness: CycleWitness },
+    Truncated(TruncationDiagnostics),
+    Verification(VerifyError), // an engine defect; still typed
+}
+```
+
+Deviation, recorded here: the shipped enum has a fifth variant,
+`Monomial(AlgebraError)`, for a `MonomialPresentation` that
+`from_monomial` rejects before completion starts, and it boxes the
+certificate as `InfiniteDimensional { certificate: Box<Certificate>, .. }`
+to keep the error small.
+
+Admissibility, added after this document was first written. The length-two
+check on relations gives `I` inside `J^2`, which is necessary and not
+sufficient: it does not make `J` nilpotent. The finiteness test in the
+certificate decides whether the normal-word language is finite, which is a
+statement about leading words and is strictly weaker. The witness is one
+vertex, one loop, and the relation `x^3 - x^2`: both terms have length two or
+more, the leading word is `x^3`, the automaton over it is acyclic, so the
+certificate verifies and the algebra has dimension three, yet `x^3 = x^2`
+makes `J^k` equal to the span of `x^2` for every `k`. Downstream that used to
+loop forever in `radical_series` and to fire an internal assert in
+`nilpotency_degree`, blaming the library for accepted input.
+
+No leading-word criterion can decide this, since `(x^3)` and `(x^3 - x^2)`
+share a leading word, an automaton, and a normal-word set while only the
+first is nilpotent. So the decision is a subspace iteration: step the radical
+at most `dim` times, and either it reaches zero, giving the nilpotency
+degree, or two consecutive powers have equal nonzero dimension, hence are
+equal and stable forever. The second case is
+`AlgebraBuildError::NonAdmissible { stable_power, dimension }`. The check
+runs where the multiplication tables exist, so every construction path is
+covered and `from_verified` cannot bypass it. `nilpotency_degree()` is then a
+stored field read and carries no assert.
+
+`Algebra::new` additionally checks that the verified certificate's
+`input_relations` are the relations of the `Presentation` it was handed,
+reporting `InputRelationsMismatch { index }`. Without it the trust chain tied
+the basis to `input_relations` and `input_relations` into the ideal, but tied
+nothing to what the caller asked for.
+
+API surface kept (same names, new semantics where products are non-unique):
+
+- `dim`, `quiver`, `field` (the runtime field), `basis`, `path_index`,
+  `vertex_idempotent`, `paths_from`, `paths_to`, `paths_between`,
+  `cartan_matrix`.
+- `right_mul(i, a) -> &[(BasisIdx, Fp)]` and `left_mul(a, i)` now return
+  sparse coefficient rows. Monomial algebras produce rows of length <= 1.
+- `relations() -> &[Relation]` replaces `forbidden()`.
+- `nf_word(&self, word) -> Vec<(BasisIdx, Fp)>` normal form of any path.
+- `radical_power_dims()` etc: `J^k` is computed as an iterated row space
+  (`J^1` = span of non-trivial basis words; `J^{k+1}` = span of
+  `x·a` over `x` spanning `J^k`), never by word length. Inhomogeneous
+  relations put short normal words inside deep radical powers.
+
+`MonomialPresentation` keeps the field-free combinatorics (validation,
+minimal words, automaton, finiteness, basis, `dim`, `cartan_matrix`,
+`paths_*`): field-free analysis, not a runtime algebra.
+
+Convenience constructors gain a field parameter and return
+`Arc<Algebra>`: `linear_an(n, field)`, `kronecker(m, field)`,
+`dual_numbers(field)`, `truncated_poly(n, field)`, `linear_nakayama`,
+`cyclic_nakayama`, `radical_square_zero_cycle`, `an_with_relations`.
+New: `commutative_square(field)`, the relation `ab - cd`. A
+`preprojective(dynkin, field)` constructor was listed here as optional.
+(Deviation, recorded here: it was not added. The acceptance fixtures and
+the QPA oracle inline the preprojective A_3 presentation instead, so no
+public constructor exists.)
+
+## 7. Migration map
+
+- `module.rs`: `Module::new(algebra: Arc<Algebra>, dims, maps)`. The
+  field comes from the algebra; the separate field argument is removed.
+  Validation: every relation (the reduced Groebner basis) acts as zero:
+  `Σ c_i M(p_i) = 0`. Checking generators suffices because the action of
+  `u·r·v` factors through `M(r)`. `projective`/`injective`: the arrow
+  action row for basis path `p` writes every `(q, c)` of
+  `right_mul(p, a)` (resp. `left_mul`), not a single 1.
+- `hom.rs`, `linalg.rs`: linear algebra over module matrices, so signature
+  churn only (the field now comes from the algebra).
+- `radical.rs`: module-level radical (`M·J` via arrow images) unchanged;
+  any algebra-level series that goes by word length must switch to the
+  row-space iteration of section 6.
+- `resolution.rs`, `injective.rs`: projective covers/kernels are linear
+  algebra; the projective/injective constructions come from `module.rs`.
+  Check top/radical computations for length assumptions.
+- `opposite.rs`: the opposite algebra reverses the quiver and every
+  relation word, then runs completion and verification independently.
+  Do not assume reversal maps normal words to normal words. It does for
+  deglex with the reversed arrow order, but do not rely on that; verify.
+  `ElementMatrix` entries are already coefficient vectors; products now
+  route through `nf_word` and the action tables.
+- `endo.rs`, `decompose.rs`, `iso.rs`: linear algebra over module data;
+  should migrate with signature churn only. Anything reaching into path
+  monomial structure is a defect to fix.
+- `ar.rs`: minimal presentations + transpose over the opposite algebra +
+  Nakayama; routes through the migrated machinery. Both routes and the
+  cross-check survive unchanged in shape.
+- `enumerate.rs`, `dynkin.rs`: keep existing domains (Nakayama, zero
+  ideal). Constructors adapt to the new signatures. No scope widening.
+- `crates/auslander-py`: `Algebra` exposure with general relations
+  (terms as `(coeff, [arrow ids])` lists), same high-level surface as
+  the existing API plus `algebra.certificate_json()`; errors map per the existing
+  error model (`ValueError` for rejected input with the Rust message).
+
+## 8. Gates
+
+- The preceding Rust, Python, and QPA suite passes through the new substrate.
+- Acceptance matrix: duality, `ElementMatrix`, `EndoAlgebra`,
+  projectives/injectives, resolutions/coresolutions, Ext dimensions,
+  radical/socle, `decompose`/`krull_schmidt`, `is_isomorphic`, and both
+  `tau` routes. Each is exercised over the commutative square and at least
+  one further non-monomial quotient.
+- Certificate determinism: byte-identical across two fresh processes, and
+  byte-identical to the committed golden certificates
+  (`tests/golden-certificates/`).
+- Tamper corpus: every listed mutation class rejected by the verifier.
+- QPA oracle fields from a live GAP and QPA run, as specified by the oracle documentation.
+- `cargo fmt --check`, `clippy --all-targets -D warnings`, `cargo test`
+  (1.92 and 1.88), `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`,
+  maturin + pytest.
+
+## 9. Style
+
+Every word this repository ships follows `docs/writing-style.md`. Commit
+messages: single line, no trailers.

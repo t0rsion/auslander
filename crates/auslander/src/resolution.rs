@@ -57,6 +57,56 @@ pub struct ProjectiveResolution {
     pub end: ResolutionEnd,
 }
 
+/// The data that identifies an iterated syzygy.
+#[derive(Clone)]
+pub enum SyzygyWitness {
+    /// The zeroth syzygy is the source module itself.
+    Identity,
+    /// A minimal resolution prefix whose last computed kernel is the syzygy.
+    Resolution(ProjectiveResolution),
+}
+
+/// An iterated syzygy with its minimal resolution witness.
+#[derive(Clone)]
+pub struct Syzygy {
+    source: Module,
+    degree: usize,
+    module: Module,
+    witness: SyzygyWitness,
+}
+
+impl Syzygy {
+    accessor_methods! {
+        /// The module whose syzygy was computed.
+        pub source() -> &Module = |this| &this.source;
+        /// The exponent `n` in `Ω^n(source)`.
+        pub degree() -> usize = |this| this.degree;
+        /// The module `Ω^n(source)`.
+        pub module() -> &Module = |this| &this.module;
+        /// The identity or minimal resolution witness.
+        pub witness() -> &SyzygyWitness = |this| &this.witness;
+    }
+
+    /// Recomputes the syzygy and its minimal resolution witness.
+    pub fn verify(&self) -> bool {
+        let rebuilt = syzygy(&self.source, self.degree);
+        same_representation(&self.module, &rebuilt.module)
+            && match (&self.witness, &rebuilt.witness) {
+                (SyzygyWitness::Identity, SyzygyWitness::Identity) => true,
+                (SyzygyWitness::Resolution(left), SyzygyWitness::Resolution(right)) => {
+                    left.agrees_with(right)
+                }
+                _ => false,
+            }
+    }
+}
+
+debug_fields! { Syzygy |this| {
+    "degree" => this.degree;
+    "source" => this.source.dim_vector();
+    "module" => this.module.dim_vector();
+} }
+
 impl ProjectiveResolution {
     /// Whether two resolution prefixes have the same end, terms, and maps.
     pub(crate) fn agrees_with(&self, other: &ProjectiveResolution) -> bool {
@@ -183,6 +233,39 @@ pub fn resolve(m: &Module, steps: usize) -> ProjectiveResolution {
         maps,
         augmentation,
         end,
+    }
+}
+
+/// Computes `Ω^degree(m)` with the minimal resolution prefix that proves it.
+///
+/// Degree zero returns `m` with [`SyzygyWitness::Identity`]. If the resolution
+/// ends before `degree`, the returned module is zero and the finite resolution
+/// proves that value.
+pub fn syzygy(m: &Module, degree: usize) -> Syzygy {
+    if degree == 0 {
+        return Syzygy {
+            source: m.clone(),
+            degree,
+            module: m.clone(),
+            witness: SyzygyWitness::Identity,
+        };
+    }
+    let resolution = resolve(m, degree - 1);
+    let module = if resolution.terms.len() < degree {
+        Module::zero(m.algebra())
+    } else {
+        let boundary = if degree == 1 {
+            &resolution.augmentation
+        } else {
+            &resolution.maps[degree - 2]
+        };
+        kernel(boundary).0
+    };
+    Syzygy {
+        source: m.clone(),
+        degree,
+        module,
+        witness: SyzygyWitness::Resolution(resolution),
     }
 }
 
@@ -346,6 +429,42 @@ mod tests {
             assert_eq!(term.dim_vector(), &[2]);
         }
         assert_eq!(projective_dimension(&s, 10), Bounded::AtLeast(11));
+    }
+
+    #[test]
+    fn iterated_syzygies_keep_their_minimal_resolution_witness() {
+        let algebra = dual_numbers(f5());
+        let simple = Module::simple(&algebra, 0);
+        for degree in 0..5 {
+            let value = syzygy(&simple, degree);
+            assert_eq!(value.source().dim_vector(), &[1]);
+            assert_eq!(value.degree(), degree);
+            assert_eq!(value.module().dim_vector(), &[1]);
+            assert!(value.verify());
+            assert_eq!(
+                matches!(value.witness(), SyzygyWitness::Identity),
+                degree == 0
+            );
+        }
+    }
+
+    #[test]
+    fn syzygy_is_zero_past_a_finite_resolution() {
+        let algebra = linear_an(3, f5());
+        let simple = Module::simple(&algebra, 0);
+        assert_eq!(syzygy(&simple, 0).module().dim_vector(), &[1, 0, 0]);
+        assert_eq!(syzygy(&simple, 1).module().dim_vector(), &[0, 1, 1]);
+        assert!(syzygy(&simple, 2).module().is_zero());
+        let projective = Module::projective(&algebra, 1);
+        assert!(syzygy(&projective, 1).module().is_zero());
+    }
+
+    #[test]
+    fn a_syzygy_with_a_changed_degree_fails_verification() {
+        let algebra = dual_numbers(f5());
+        let mut value = syzygy(&Module::simple(&algebra, 0), 2);
+        value.degree = 1;
+        assert!(!value.verify());
     }
 
     #[test]

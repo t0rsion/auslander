@@ -1,0 +1,153 @@
+# Classical tilting performance record
+
+This component record measures the projective-dimension-two dual tilting
+fixture over F_5.
+
+The machine and toolchain were:
+
+```text
+Linux 7.1.9-arch1-2 x86_64
+13th Gen Intel(R) Core(TM) i9-13900KS
+32 logical CPUs, 2 threads per core
+rustc 1.92.0
+cargo 1.92.0
+```
+
+Elapsed samples use the release profile. The harness calibrates each case,
+runs five trials, and reports the best trial. These values describe this
+machine. Tests gate deterministic work counts, not elapsed time.
+
+```text
+group	case	ns_per_op	reps	trials
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	588348.0	35	5
+target	verify pd2-dual-f5	533666.5	37	5
+derived	end-to-end certificate pd2-dual-f5	2582525.5	8	5
+derived	verify certificate pd2-dual-f5	1697699.6	12	5
+derived	forward one-term pd2-dual-f5	46179.3	327	5
+derived	reverse one-term pd2-dual-f5	37481.7	271	5
+```
+
+The target certificate records four algorithm-level work counts. They are
+`endo=5`, `radical=40`, `paths=1`, and `terms=1`. The acceptance test fixes
+these values for this fixture.
+
+The following table is the complete nonzero profile output for target recovery
+and independent target verification. The `distinct` column is zero at sites
+that do not record module identity.
+
+```text
+group	case	site	calls	distinct
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	field::mul	9820	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	field::reduce_wide	8586	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	field::add	5416	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	DenseMat::mul	3904	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	field::sub	1986	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	DenseMat::echelon_in_place	1347	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	field::inv	1278	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	Morphism::then	1016	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	DenseMat::transpose	1001	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	DenseMat::rref	693	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	DenseMat::solve_many	500	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	DenseMat::first_noncanonical	488	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	DenseMat::kernel_basis	369	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	DenseMat::row_space_basis	324	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	DenseMat::add	207	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	RowReducer::push	178	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	Module::new	172	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	Module::new relation check	172	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	hom::express_in_row_basis	170	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	HomSpace::new	156	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	SparseMat::echelon_in_place	156	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	SparseMat::kernel_basis	156	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	SparseMat::rref	156	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	hom::hom	156	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	DenseMat::rank	154	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	DenseMat::inverse	126	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	Morphism::new commuting square	96	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	Module::word_action	94	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	DenseMat::solve	80	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	hom::solve_columns	76	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	Module::projective	60	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	EndoAlgebra::over	58	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	DenseMat::mul_vec	54	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	Morphism::new	48	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	hom::submodule_with_inclusion	48	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	IndecomposableModule::from_endo	40	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	hom::quotient_with_projection	38	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	iso::indecomposable_iso	36	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	EndoAlgebra::new	34	13
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	module::direct_sum	26	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	Algebra::mul_basis	25	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	EndoAlgebra::from_summand	24	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	hom::kernel	24	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	IndecomposableModule::new	18	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	Fingerprint::of	12	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	decompose::decompose	10	7
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	AddClosureWitness::verify	6	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	approx::left_approximation	6	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	hom::cokernel	6	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	decompose::krull_schmidt	4	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	Algebra::from_verified_with_limits	2	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	BasicDecomposition::new	2	0
+target	present_target pd2-dual-f5 endo=5 radical=40 paths=1 terms=1	Algebra::new	1	0
+target	verify pd2-dual-f5	field::mul	8825	0
+target	verify pd2-dual-f5	field::reduce_wide	7662	0
+target	verify pd2-dual-f5	field::add	4783	0
+target	verify pd2-dual-f5	DenseMat::mul	3494	0
+target	verify pd2-dual-f5	field::sub	1874	0
+target	verify pd2-dual-f5	DenseMat::echelon_in_place	1238	0
+target	verify pd2-dual-f5	field::inv	1185	0
+target	verify pd2-dual-f5	DenseMat::transpose	934	0
+target	verify pd2-dual-f5	Morphism::then	887	0
+target	verify pd2-dual-f5	DenseMat::rref	618	0
+target	verify pd2-dual-f5	DenseMat::first_noncanonical	480	0
+target	verify pd2-dual-f5	DenseMat::solve_many	468	0
+target	verify pd2-dual-f5	DenseMat::kernel_basis	348	0
+target	verify pd2-dual-f5	DenseMat::row_space_basis	270	0
+target	verify pd2-dual-f5	DenseMat::add	186	0
+target	verify pd2-dual-f5	Module::new	168	0
+target	verify pd2-dual-f5	Module::new relation check	168	0
+target	verify pd2-dual-f5	RowReducer::push	162	0
+target	verify pd2-dual-f5	hom::express_in_row_basis	154	0
+target	verify pd2-dual-f5	DenseMat::rank	152	0
+target	verify pd2-dual-f5	HomSpace::new	151	0
+target	verify pd2-dual-f5	SparseMat::echelon_in_place	151	0
+target	verify pd2-dual-f5	SparseMat::kernel_basis	151	0
+target	verify pd2-dual-f5	SparseMat::rref	151	0
+target	verify pd2-dual-f5	hom::hom	151	0
+target	verify pd2-dual-f5	DenseMat::inverse	114	0
+target	verify pd2-dual-f5	Morphism::new commuting square	96	0
+target	verify pd2-dual-f5	Module::word_action	94	0
+target	verify pd2-dual-f5	DenseMat::solve	76	0
+target	verify pd2-dual-f5	hom::solve_columns	76	0
+target	verify pd2-dual-f5	Module::projective	60	0
+target	verify pd2-dual-f5	DenseMat::mul_vec	54	0
+target	verify pd2-dual-f5	EndoAlgebra::over	53	0
+target	verify pd2-dual-f5	Morphism::new	48	0
+target	verify pd2-dual-f5	hom::submodule_with_inclusion	44	0
+target	verify pd2-dual-f5	hom::quotient_with_projection	38	0
+target	verify pd2-dual-f5	IndecomposableModule::from_endo	37	0
+target	verify pd2-dual-f5	iso::indecomposable_iso	36	0
+target	verify pd2-dual-f5	EndoAlgebra::new	33	13
+target	verify pd2-dual-f5	module::direct_sum	26	0
+target	verify pd2-dual-f5	Algebra::mul_basis	25	0
+target	verify pd2-dual-f5	hom::kernel	24	0
+target	verify pd2-dual-f5	EndoAlgebra::from_summand	20	0
+target	verify pd2-dual-f5	IndecomposableModule::new	18	0
+target	verify pd2-dual-f5	Fingerprint::of	9	0
+target	verify pd2-dual-f5	decompose::decompose	9	7
+target	verify pd2-dual-f5	AddClosureWitness::verify	6	0
+target	verify pd2-dual-f5	approx::left_approximation	6	0
+target	verify pd2-dual-f5	hom::cokernel	6	0
+target	verify pd2-dual-f5	decompose::krull_schmidt	3	0
+target	verify pd2-dual-f5	BasicDecomposition::new	2	0
+target	verify pd2-dual-f5	Algebra::from_verified_with_limits	1	0
+```
+
+Commands:
+
+```sh
+cargo bench -p auslander --bench perf --profile release -- --group target --case pd2-dual-f5 --trials 5
+cargo bench -p auslander --bench perf --profile release --features profiling -- --counts --group target --case pd2-dual-f5 --trials 5
+cargo bench -p auslander --bench perf --profile release -- --group derived --case pd2-dual-f5 --trials 5
+```

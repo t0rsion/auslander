@@ -458,57 +458,134 @@ fn finite_resolution_valid(
         && resolution.augmentation.target().ptr_eq(module)
 }
 
-fn build_generation(
-    module: &Module,
-    basic: &BasicDecomposition,
-    max_steps: usize,
-) -> Result<GenerationBuild, TiltingError> {
-    let summands: Vec<Module> = basic
-        .summands()
-        .iter()
-        .map(|summand| summand.module().clone())
-        .collect();
-    let mut current = regular_module(module.algebra());
-    let mut terms = vec![current.clone()];
-    let mut maps = Vec::new();
-    let mut previous_projection: Option<Morphism> = None;
-    let mut add_witnesses = Vec::new();
-    let mut stage = 0usize;
-    loop {
-        if stage == max_steps {
-            let partial = partial_complex(&terms, &maps)?;
-            return Ok(GenerationBuild::Blocked(GenerationBlocker::StepLimit {
-                module: module.clone(),
-                max_steps,
-                stage,
-                partial,
-                cokernel_dimension_vector: current.dim_vector().to_vec(),
-                cokernel: current,
-            }));
+struct GenerationState {
+    current: Module,
+    terms: Vec<Module>,
+    maps: Vec<Morphism>,
+    previous_projection: Option<Morphism>,
+    add_witnesses: Vec<AddClosureWitness>,
+    stage: usize,
+}
+
+enum GenerationStep {
+    Continue(GenerationState),
+    Finished(GenerationBuild),
+}
+
+enum ApproximationStep {
+    Ready(MinimalLeftApproximation),
+    Blocked(GenerationBuild),
+}
+
+impl GenerationState {
+    fn new(algebra: &Arc<Algebra>) -> GenerationState {
+        let current = regular_module(algebra);
+        GenerationState {
+            terms: vec![current.clone()],
+            current,
+            maps: Vec::new(),
+            previous_projection: None,
+            add_witnesses: Vec::new(),
+            stage: 0,
         }
+    }
+
+    fn step_limit(
+        &self,
+        module: &Module,
+        max_steps: usize,
+    ) -> Result<GenerationBuild, TiltingError> {
+        let partial = partial_complex(&self.terms, &self.maps)?;
+        Ok(GenerationBuild::Blocked(GenerationBlocker::StepLimit {
+            module: module.clone(),
+            max_steps,
+            stage: self.stage,
+            partial,
+            cokernel_dimension_vector: self.current.dim_vector().to_vec(),
+            cokernel: self.current.clone(),
+        }))
+    }
+
+    fn monic_approximation(
+        &self,
+        module: &Module,
+        summands: &[Module],
+        max_steps: usize,
+    ) -> Result<ApproximationStep, TiltingError> {
         let approximation =
-            left_approximation(&current, &summands).map_err(TiltingError::Approx)?;
+            left_approximation(&self.current, summands).map_err(TiltingError::Approx)?;
         let (approximation_kernel, _) = kernel(approximation.map());
-        if !approximation_kernel.is_zero() {
-            let partial = partial_complex(&terms, &maps)?;
-            return Ok(GenerationBuild::Blocked(GenerationBlocker::NonMonic {
+        if approximation_kernel.is_zero() {
+            return Ok(ApproximationStep::Ready(approximation));
+        }
+        let partial = partial_complex(&self.terms, &self.maps)?;
+        Ok(ApproximationStep::Blocked(GenerationBuild::Blocked(
+            GenerationBlocker::NonMonic {
                 module: module.clone(),
                 max_steps,
-                stage,
+                stage: self.stage,
                 partial,
                 kernel_dimension_vector: approximation_kernel.dim_vector().to_vec(),
                 approximation: Box::new(approximation),
-            }));
-        }
-        let target = approximation.map().target().clone();
-        let Some(add_witness) =
-            AddClosureWitness::from_module(&target, basic).map_err(TiltingError::Basic)?
-        else {
-            return Err(TiltingError::Defect {
+            },
+        )))
+    }
+
+    fn closure_witness(
+        target: &Module,
+        basic: &BasicDecomposition,
+    ) -> Result<AddClosureWitness, TiltingError> {
+        match AddClosureWitness::from_module(target, basic).map_err(TiltingError::Basic)? {
+            Some(witness) => Ok(witness),
+            None => Err(TiltingError::Defect {
                 reason: "a minimal left add(T)-approximation target lay outside add(T)".to_string(),
-            });
-        };
-        let displayed = match previous_projection.take() {
+            }),
+        }
+    }
+
+    fn finish(self) -> Result<GenerationBuild, TiltingError> {
+        let checked = partial_complex(&self.terms, &self.maps)?;
+        match checked.exactness() {
+            ExactnessOutcome::Exact(exact) => Ok(GenerationBuild::Complete(GenerationSuccess {
+                exact,
+                add_witnesses: self.add_witnesses,
+            })),
+            ExactnessOutcome::NotExact(witness) => Err(TiltingError::Defect {
+                reason: format!(
+                    "the monic cokernel construction has homology at term {}",
+                    witness.homology().index()
+                ),
+            }),
+        }
+    }
+
+    fn continue_or_finish(
+        mut self,
+        next: Module,
+        projection: Morphism,
+    ) -> Result<GenerationStep, TiltingError> {
+        if next.is_zero() {
+            return Ok(GenerationStep::Finished(self.finish()?));
+        }
+        self.current = next;
+        self.previous_projection = Some(projection);
+        self.stage = self
+            .stage
+            .checked_add(1)
+            .ok_or_else(|| TiltingError::Defect {
+                reason: "the generation stage overflowed usize".to_string(),
+            })?;
+        Ok(GenerationStep::Continue(self))
+    }
+
+    fn advance_monic(
+        mut self,
+        approximation: MinimalLeftApproximation,
+        basic: &BasicDecomposition,
+    ) -> Result<GenerationStep, TiltingError> {
+        let target = approximation.map().target().clone();
+        let add_witness = Self::closure_witness(&target, basic)?;
+        let displayed = match self.previous_projection.take() {
             Some(projection) => {
                 projection
                     .then(approximation.map())
@@ -519,31 +596,47 @@ fn build_generation(
             None => approximation.map().clone(),
         };
         let (next, projection) = cokernel(approximation.map());
-        terms.push(target);
-        maps.push(displayed);
-        add_witnesses.push(add_witness);
-        if next.is_zero() {
-            let checked = partial_complex(&terms, &maps)?;
-            return match checked.exactness() {
-                ExactnessOutcome::Exact(exact) => {
-                    Ok(GenerationBuild::Complete(GenerationSuccess {
-                        exact,
-                        add_witnesses,
-                    }))
-                }
-                ExactnessOutcome::NotExact(witness) => Err(TiltingError::Defect {
-                    reason: format!(
-                        "the monic cokernel construction has homology at term {}",
-                        witness.homology().index()
-                    ),
-                }),
-            };
+        self.terms.push(target);
+        self.maps.push(displayed);
+        self.add_witnesses.push(add_witness);
+        self.continue_or_finish(next, projection)
+    }
+
+    fn advance(
+        self,
+        module: &Module,
+        basic: &BasicDecomposition,
+        summands: &[Module],
+        max_steps: usize,
+    ) -> Result<GenerationStep, TiltingError> {
+        if self.stage == max_steps {
+            return self
+                .step_limit(module, max_steps)
+                .map(GenerationStep::Finished);
         }
-        current = next;
-        previous_projection = Some(projection);
-        stage = stage.checked_add(1).ok_or_else(|| TiltingError::Defect {
-            reason: "the generation stage overflowed usize".to_string(),
-        })?;
+        match self.monic_approximation(module, summands, max_steps)? {
+            ApproximationStep::Ready(approximation) => self.advance_monic(approximation, basic),
+            ApproximationStep::Blocked(blocked) => Ok(GenerationStep::Finished(blocked)),
+        }
+    }
+}
+
+fn build_generation(
+    module: &Module,
+    basic: &BasicDecomposition,
+    max_steps: usize,
+) -> Result<GenerationBuild, TiltingError> {
+    let summands: Vec<Module> = basic
+        .summands()
+        .iter()
+        .map(|summand| summand.module().clone())
+        .collect();
+    let mut state = GenerationState::new(module.algebra());
+    loop {
+        match state.advance(module, basic, &summands, max_steps)? {
+            GenerationStep::Continue(next) => state = next,
+            GenerationStep::Finished(result) => return Ok(result),
+        }
     }
 }
 
@@ -575,178 +668,4 @@ fn same_generation_blocker(x: &GenerationBlocker, y: &GenerationBlocker) -> bool
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::algebra::{an_with_relations, dual_numbers, kronecker, linear_an};
-    use crate::field::PrimeField;
-    use crate::linalg::DenseMat;
-    use crate::module::direct_sum;
-
-    fn fields() -> [PrimeField; 2] {
-        [PrimeField::new(2).unwrap(), PrimeField::new(5).unwrap()]
-    }
-
-    fn generous() -> TiltingLimits {
-        TiltingLimits {
-            max_projective_dimension: 4,
-            max_generation_steps: 5,
-        }
-    }
-
-    fn sum(parts: &[Module]) -> Module {
-        direct_sum(&parts.iter().collect::<Vec<_>>()).0
-    }
-
-    #[test]
-    fn regular_module_is_zero_tilting_over_f2_and_f5() {
-        for field in fields() {
-            let algebra = linear_an(3, field);
-            let regular = regular_module(&algebra);
-            let ClassicalTiltingResult::Tilting(tilting) = classify(&regular, generous()).unwrap()
-            else {
-                panic!("the regular module is tilting")
-            };
-            assert_eq!(tilting.projective_dimension(), 0);
-            assert!(tilting.ext_spaces().is_empty());
-            assert_eq!(tilting.generation_complex().complex().len(), 2);
-            assert!(
-                tilting.generation_complex().complex().terms()[1].dim_vector()
-                    == regular.dim_vector()
-            );
-            assert!(tilting.verify());
-        }
-    }
-
-    #[test]
-    fn dual_numbers_simple_keeps_an_honest_projective_cut() {
-        for field in fields() {
-            let algebra = dual_numbers(field);
-            let simple = Module::simple(&algebra, 0);
-            let limits = TiltingLimits {
-                max_projective_dimension: 2,
-                max_generation_steps: 3,
-            };
-            let ClassicalTiltingResult::Undetermined(TiltingBlocker::ProjectiveDimension(blocker)) =
-                classify(&simple, limits).unwrap()
-            else {
-                panic!("the periodic resolution must cut")
-            };
-            assert_eq!(blocker.lower_bound(), 3);
-            assert!(blocker.verify());
-        }
-    }
-
-    #[test]
-    fn self_extension_is_the_only_negative_outcome() {
-        for field in fields() {
-            let algebra = kronecker(2, field);
-            let mut first = DenseMat::zero(1, 1);
-            first.set(0, 0, field.one());
-            let module =
-                Module::new(algebra, vec![1, 1], vec![first, DenseMat::zero(1, 1)]).unwrap();
-            let ClassicalTiltingResult::NotTilting(witness) =
-                classify(&module, generous()).unwrap()
-            else {
-                panic!("the Kronecker module has a self-extension")
-            };
-            assert_eq!(witness.degree(), 1);
-            assert_eq!(witness.dimension(), 1);
-            assert!(witness.verify());
-        }
-    }
-
-    #[test]
-    fn generation_has_separate_step_and_non_monic_blockers() {
-        for field in fields() {
-            let algebra = linear_an(3, field);
-            let regular = regular_module(&algebra);
-            let limits = TiltingLimits {
-                max_projective_dimension: 0,
-                max_generation_steps: 0,
-            };
-            let ClassicalTiltingResult::Undetermined(TiltingBlocker::Generation(
-                step @ GenerationBlocker::StepLimit { .. },
-            )) = classify(&regular, limits).unwrap()
-            else {
-                panic!("zero generation steps must cut")
-            };
-            assert_eq!(step.stage(), 0);
-            assert!(step.verify());
-
-            let simple = Module::simple(&algebra, 0);
-            let ClassicalTiltingResult::Undetermined(TiltingBlocker::Generation(
-                non_monic @ GenerationBlocker::NonMonic { .. },
-            )) = classify(&simple, generous()).unwrap()
-            else {
-                panic!("the approximation of A by add(S_0) is not monic")
-            };
-            assert_eq!(non_monic.stage(), 0);
-            assert!(non_monic.verify());
-        }
-    }
-
-    #[test]
-    fn dual_module_over_a3_mod_ab_is_pd2_tilting() {
-        for field in fields() {
-            let algebra = an_with_relations(3, &[(0, 2)], field).unwrap();
-            let injectives: Vec<Module> = (0..3)
-                .map(|vertex| Module::injective(&algebra, vertex))
-                .collect();
-            let dual = sum(&injectives);
-            assert_eq!(dual.dim_vector(), [2, 2, 1]);
-            let ClassicalTiltingResult::Tilting(tilting) = classify(&dual, generous()).unwrap()
-            else {
-                panic!("D(A) is the named projective-dimension-two tilting fixture")
-            };
-            assert_eq!(tilting.projective_dimension(), 2);
-            let dimensions: Vec<&[usize]> = tilting
-                .generation_complex()
-                .complex()
-                .terms()
-                .iter()
-                .map(Module::dim_vector)
-                .collect();
-            assert_eq!(
-                dimensions,
-                vec![&[1, 2, 2][..], &[1, 3, 2], &[1, 1, 0], &[1, 0, 0]]
-            );
-            assert!(tilting.verify());
-        }
-    }
-
-    #[test]
-    fn repeated_summand_is_a_basic_error() {
-        let algebra = linear_an(2, PrimeField::new(5).unwrap());
-        let projective = Module::projective(&algebra, 0);
-        let doubled = sum(&[projective.clone(), projective]);
-        assert_eq!(
-            classify(&doubled, generous()).unwrap_err(),
-            TiltingError::Basic(BasicError::NotBasic {
-                first: 0,
-                second: 1,
-            })
-        );
-    }
-
-    #[test]
-    fn pd2_generation_step_bound_keeps_the_partial_complex() {
-        let field = PrimeField::new(5).unwrap();
-        let algebra = an_with_relations(3, &[(0, 2)], field).unwrap();
-        let dual = sum(&(0..3)
-            .map(|vertex| Module::injective(&algebra, vertex))
-            .collect::<Vec<_>>());
-        let limits = TiltingLimits {
-            max_projective_dimension: 2,
-            max_generation_steps: 2,
-        };
-        let ClassicalTiltingResult::Undetermined(TiltingBlocker::Generation(
-            blocker @ GenerationBlocker::StepLimit { .. },
-        )) = classify(&dual, limits).unwrap()
-        else {
-            panic!("two maps do not finish the three-map generation complex")
-        };
-        assert_eq!(blocker.stage(), 2);
-        assert_eq!(blocker.partial_complex().len(), 3);
-        assert!(blocker.verify());
-    }
-}
+mod tests;

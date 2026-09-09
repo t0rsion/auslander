@@ -1,4 +1,4 @@
-"""Tests for the v0.5 support tau-tilting surface: tau-rigidity, pairs,
+"""Tests for the support tau-tilting surface: tau-rigidity, pairs,
 mutation, graphs.
 
 Three independent sources agree on the counts pinned here: the closed mutation
@@ -107,6 +107,11 @@ def test_every_slot_of_a_closed_graph_is_decided():
 
 def test_a_mutation_carries_its_shape_and_its_target():
     graph = auslander.Algebra.linear_an(2).support_tau_tilting_graph(F)
+    _assert_replaced_mutation(graph)
+    _assert_dropped_mutation(graph)
+
+
+def _assert_replaced_mutation(graph):
     first = graph.mutations()[0]
     assert first.source_vertex == 0
     assert first.target_vertex == 1
@@ -116,6 +121,8 @@ def test_a_mutation_carries_its_shape_and_its_target():
     assert first.verify()
     assert dims_of(first.target) == dims_of(graph.pairs()[1])
 
+
+def _assert_dropped_mutation(graph):
     drop = [m for m in graph.mutations() if m.shape == "moves_to_projective"][0]
     assert drop.multiplicity is None
     assert drop.exchanged_vertex in (0, 1)
@@ -125,13 +132,24 @@ def test_a_mutation_carries_its_shape_and_its_target():
 def test_a_walk_that_runs_out_of_budget_is_a_second_class():
     limits = auslander.MutationGraphLimits(max_vertices=6)
     graph = auslander.Algebra.kronecker(2).support_tau_tilting_graph(F, limits=limits)
+    _assert_budget_graph(graph)
+    _assert_budget_sample(graph)
 
+
+def _assert_budget_graph(graph):
+    _assert_budget_identity(graph)
+    _assert_budget_diagnostics(graph)
+
+
+def _assert_budget_identity(graph):
     assert isinstance(graph, auslander.IncompleteSupportTauTiltingGraph)
     assert not hasattr(graph, "pairs")
     assert graph.reason == "budget_exhausted"
     assert len(graph.vertices_found) == 6
     assert graph.verify_parts()
 
+
+def _assert_budget_diagnostics(graph):
     diagnostics = graph.diagnostics
     assert isinstance(diagnostics, auslander.GraphBudgetDiagnostics)
     assert diagnostics.limit == "max_vertices"
@@ -139,6 +157,8 @@ def test_a_walk_that_runs_out_of_budget_is_a_second_class():
     assert diagnostics.open_slots > 0
     assert diagnostics.work_units == graph.work_units()
 
+
+def _assert_budget_sample(graph):
     # The truncated set is a biased sample: the walk descends the preprojective
     # ray (m, m + 1) + (m + 1, m + 2) and reaches no preinjective vertex.
     found = [sorted(m.dims for m in p.module_summands) for p in graph.vertices_found]
@@ -165,18 +185,34 @@ def test_a_work_unit_budget_also_truncates():
 
 def test_tau_rigidity_answers_both_ways_and_never_raises():
     projective = auslander.Algebra.linear_an(3).projective(F, 0)
+    _assert_projective_rigidity(projective)
+
+    simple = auslander.Algebra.truncated_poly(3).simple(F, 0)
+    _assert_nonrigid_simple(simple)
+
+
+def _assert_projective_rigidity(projective):
     rigid = projective.tau_rigidity()
+    _assert_projective_rigidity_state(rigid)
+    _assert_projective_rigidity_vanishing(rigid)
+
+
+def _assert_projective_rigidity_state(rigid):
     assert rigid.is_tau_rigid
     assert rigid.morphism is None
     assert rigid.summand_pair is None
     assert rigid.verify()
+
+
+def _assert_projective_rigidity_vanishing(rigid):
     # tau of a projective is the zero module, so its witness set is empty.
     assert all(d == 0 for d in rigid.vanishing.translates[0].dims)
     assert rigid.vanishing.vanishing_pairs == []
     assert [m.dims for m in rigid.vanishing.summands] == [[1, 1, 1]]
     assert rigid.vanishing.verify()
 
-    simple = auslander.Algebra.truncated_poly(3).simple(F, 0)
+
+def _assert_nonrigid_simple(simple):
     not_rigid = simple.tau_rigidity()
     assert not not_rigid.is_tau_rigid
     assert not_rigid.vanishing is None
@@ -201,6 +237,14 @@ def test_an_accepted_pair_carries_its_parts():
     pair = auslander.SupportTauTiltingPair.classify(
         algebra, [algebra.projective(F, v) for v in range(3)], [], F
     )
+    _assert_accepted_pair(pair)
+
+    # (0, A): the zero module with every vertex in the projective support.
+    empty = auslander.SupportTauTiltingPair.classify(algebra, [], [0, 1, 2], F)
+    _assert_empty_pair(empty)
+
+
+def _assert_accepted_pair(pair):
     assert pair.is_pair
     assert pair.rejection is None
     assert pair.is_tau_tilting
@@ -209,8 +253,9 @@ def test_an_accepted_pair_carries_its_parts():
     assert dims_of(pair) == [[0, 0, 1], [0, 1, 1], [1, 1, 1]]
     assert pair.verify()
 
+
+def _assert_empty_pair(empty):
     # (0, A): the zero module with every vertex in the projective support.
-    empty = auslander.SupportTauTiltingPair.classify(algebra, [], [0, 1, 2], F)
     assert empty.is_pair
     assert not empty.is_tau_tilting
     assert empty.module_summands == []
@@ -219,6 +264,13 @@ def test_an_accepted_pair_carries_its_parts():
 
 def test_a_rejected_pair_is_a_value_and_names_its_condition():
     algebra = auslander.Algebra.truncated_poly(3)
+    _assert_hom_rejection(algebra)
+    _assert_rigidity_rejection(algebra)
+    an = _assert_count_rejection()
+    _assert_foreign_algebra_rejection(an)
+
+
+def _assert_hom_rejection(algebra):
     # Condition 2: Hom(P, M) is not zero, named by the vertex and the
     # dimension. Hom(P_v, M) = M_v for right modules, so there is no morphism
     # to carry and `witness` is None here.
@@ -233,6 +285,8 @@ def test_a_rejected_pair_is_a_value_and_names_its_condition():
     assert hom.is_tau_tilting is None
     assert hom.verify()
 
+
+def _assert_rigidity_rejection(algebra):
     # Condition 3: M is not tau-rigid, with the nonzero X_i -> tau X_j.
     rigid = auslander.SupportTauTiltingPair.classify(algebra, [algebra.simple(F, 0)], [], F)
     assert rigid.rejection.condition() == 3
@@ -240,6 +294,8 @@ def test_a_rejected_pair_is_a_value_and_names_its_condition():
     assert not rigid.rejection.witness.is_zero
     assert rigid.verify()
 
+
+def _assert_count_rejection():
     # Condition 4: the summand counts do not add up to the vertex count.
     an = auslander.Algebra.linear_an(3)
     count = auslander.SupportTauTiltingPair.classify(an, [an.projective(F, 0)], [], F)
@@ -249,7 +305,10 @@ def test_a_rejected_pair_is_a_value_and_names_its_condition():
     assert count.rejection.hom_from_projective is None
     assert count.rejection.summand_counts == {"expected": 3, "module": 1, "projective": 0}
     assert count.verify()
+    return an
 
+
+def _assert_foreign_algebra_rejection(an):
     # Condition 1 is the two parts over different algebras, and the pair
     # constructor rejects that as input before any condition is tested.
     other = auslander.Algebra.linear_an(2)
@@ -274,17 +333,28 @@ def test_an_almost_complete_pair_takes_one_summand_fewer():
     assert full.verify()
 
 
-def test_verify_holds_on_everything_the_v05_layer_accepts():
+def test_verify_holds_on_every_accepted_tilting_pair():
     algebra = auslander.Algebra.linear_an(3)
     graph = algebra.support_tau_tilting_graph(F)
+    _assert_graph_verification(graph)
+
+    listing = algebra.enumerate_over_catalog(F)
+    _assert_listing_verification(listing)
+    _assert_tau_verification(graph)
+
+
+def _assert_graph_verification(graph):
     assert graph.verify()
     assert all(pair.verify() for pair in graph.pairs())
     assert all(mutation.verify() for mutation in graph.mutations())
 
-    listing = algebra.enumerate_over_catalog(F)
+
+def _assert_listing_verification(listing):
     assert listing.verify()
     assert all(pair.verify() for pair in listing.pairs())
 
+
+def _assert_tau_verification(graph):
     assert all(
         module.tau_rigidity().verify()
         for pair in graph.pairs()
@@ -294,22 +364,38 @@ def test_verify_holds_on_everything_the_v05_layer_accepts():
 
 def test_the_exception_taxonomy_separates_answers_from_failures():
     algebra = auslander.Algebra.truncated_poly(3)
+    rejected = _assert_rejected_answer(algebra)
+    _assert_exception_types()
+    _assert_catalog_failure()
+    _assert_pair_input_failures(algebra)
+    _assert_mutation_failures(rejected)
+    _assert_field_failure(algebra)
+
+
+def _assert_rejected_answer(algebra):
     # A rejected pair is an answer, so nothing raises and nothing has to be
     # caught to read it.
     rejected = auslander.SupportTauTiltingPair.classify(algebra, [algebra.simple(F, 0)], [], F)
     assert not rejected.is_pair
+    return rejected
 
+
+def _assert_exception_types():
     # A blocked certification is its own RuntimeError subclass, never a
     # ValueError, and it is not budget exhaustion.
     assert issubclass(auslander.CertificationBlockedError, RuntimeError)
     assert not issubclass(auslander.CertificationBlockedError, ValueError)
     assert not issubclass(auslander.CertificationBlockedError, auslander.BudgetExhaustedError)
 
+
+def _assert_catalog_failure():
     # An algebra outside both catalog domains has no exhaustive catalog, so the
     # enumeration route is refused rather than truncated.
     with pytest.raises(auslander.UnsupportedDomainError):
         auslander.Algebra.kronecker(2).enumerate_over_catalog(F)
 
+
+def _assert_pair_input_failures(algebra):
     with pytest.raises(ValueError, match="not basic"):
         auslander.SupportTauTiltingPair.classify(
             algebra, [algebra.projective(F, 0), algebra.projective(F, 0)], [], F
@@ -317,11 +403,15 @@ def test_the_exception_taxonomy_separates_answers_from_failures():
     with pytest.raises(ValueError, match="out of range"):
         auslander.SupportTauTiltingPair.classify(algebra, [], [4], F)
 
+
+def _assert_mutation_failures(rejected):
     with pytest.raises(ValueError, match="not a pair"):
         rejected.mutate_at(0)
     graph = auslander.Algebra.linear_an(2).support_tau_tilting_graph(F)
     with pytest.raises(ValueError, match="out of range"):
         graph.pairs()[0].mutate_at(9)
 
+
+def _assert_field_failure(algebra):
     with pytest.raises(ValueError, match="pass a field"):
         algebra.support_tau_tilting_graph()

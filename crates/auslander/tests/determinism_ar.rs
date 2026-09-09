@@ -1,4 +1,4 @@
-//! v0.4 determinism gates for the AR layer (design section 14).
+//! Fresh-process determinism tests for AR operations.
 //!
 //! In-process: Ext spaces recomputed on separately built identical
 //! algebras carry byte-identical bases and representatives. Fresh-process:

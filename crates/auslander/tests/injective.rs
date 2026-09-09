@@ -28,7 +28,9 @@ use auslander::algebra::{
 use auslander::ext::global_dimension;
 use auslander::field::PrimeField;
 use auslander::hom::{Morphism, image, kernel};
-use auslander::injective::{coresolve, injective_dimension, injective_envelope};
+use auslander::injective::{
+    InjectiveCoresolution, coresolve, injective_dimension, injective_envelope,
+};
 use auslander::iso::{IsoOutcome, is_isomorphic};
 use auslander::module::{Module, direct_sum};
 use auslander::opposite::{dual, opposite};
@@ -313,44 +315,55 @@ fn linear_nakayama_3_2_1_has_a_non_injective_projective() {
     }
 }
 
+fn assert_coresolution_term(coresolution: &InjectiveCoresolution, index: usize, term: &Module) {
+    let (incoming, _) = if index == 0 {
+        image(&coresolution.coaugmentation)
+    } else {
+        image(&coresolution.maps[index - 1])
+    };
+    if index + 1 < coresolution.terms.len() {
+        let (kernel, _) = kernel(&coresolution.maps[index]);
+        assert_eq!(
+            kernel.dim_vector(),
+            incoming.dim_vector(),
+            "exact at I^{index}"
+        );
+    } else if coresolution.end == ResolutionEnd::Finite {
+        assert_eq!(
+            incoming.dim_vector(),
+            term.dim_vector(),
+            "a finite coresolution ends onto its last term"
+        );
+    }
+    if let Some(differential) = coresolution.maps.get(index) {
+        assert!(
+            socle(term).1.then(differential).unwrap().is_zero(),
+            "soc I^{index} survives d^{index}"
+        );
+    }
+}
+
+fn assert_coresolution_prefix(module: &Module) {
+    let coresolution = coresolve(module, 4).unwrap();
+    assert!(is_mono(&coresolution.coaugmentation));
+    assert_eq!(coresolution.maps.len() + 1, coresolution.terms.len());
+    if let Some(first) = coresolution.maps.first() {
+        assert!(coresolution.coaugmentation.then(first).unwrap().is_zero());
+    }
+    for pair in coresolution.maps.windows(2) {
+        assert!(pair[0].then(&pair[1]).unwrap().is_zero(), "d² = 0");
+    }
+    for (index, term) in coresolution.terms.iter().enumerate() {
+        assert_coresolution_term(&coresolution, index, term);
+    }
+}
+
 #[test]
 fn coresolution_prefixes_are_exact_and_minimal() {
     for field in fields() {
         for algebra in fixtures(field) {
-            for m in assorted(&algebra) {
-                let coresolution = coresolve(&m, 4).unwrap();
-                assert!(is_mono(&coresolution.coaugmentation));
-                assert_eq!(coresolution.maps.len() + 1, coresolution.terms.len());
-                if let Some(d0) = coresolution.maps.first() {
-                    assert!(coresolution.coaugmentation.then(d0).unwrap().is_zero());
-                }
-                for pair in coresolution.maps.windows(2) {
-                    assert!(pair[0].then(&pair[1]).unwrap().is_zero(), "d² = 0");
-                }
-                for (k, term) in coresolution.terms.iter().enumerate() {
-                    let (incoming, _) = if k == 0 {
-                        image(&coresolution.coaugmentation)
-                    } else {
-                        image(&coresolution.maps[k - 1])
-                    };
-                    if k + 1 < coresolution.terms.len() {
-                        let (ker, _) = kernel(&coresolution.maps[k]);
-                        assert_eq!(ker.dim_vector(), incoming.dim_vector(), "exact at I^{k}");
-                    } else if coresolution.end == ResolutionEnd::Finite {
-                        assert_eq!(
-                            incoming.dim_vector(),
-                            term.dim_vector(),
-                            "a finite coresolution ends onto its last term"
-                        );
-                    }
-                    // Minimality: soc I^k lies in the kernel of the next map.
-                    if let Some(d) = coresolution.maps.get(k) {
-                        assert!(
-                            socle(term).1.then(d).unwrap().is_zero(),
-                            "soc I^{k} survives d^{k}"
-                        );
-                    }
-                }
+            for module in assorted(&algebra) {
+                assert_coresolution_prefix(&module);
             }
         }
     }
