@@ -314,3 +314,7 @@ mod corruption {
 mod census {
     include!("qpa_oracle/census.rs");
 }
+
+mod catalog {
+    include!("qpa_oracle/catalog.rs");
+}

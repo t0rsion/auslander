@@ -51,6 +51,10 @@ def _workflow_inspection(
 
 
 def _portable_inspection(kind: str, value: Any, verification: str) -> WorkflowInspection:
+    if kind == "atlas":
+        from .atlas_report import atlas_inspection
+
+        return atlas_inspection(value, verification)
     if kind == "census":
         scope = _census_scope(value)
     elif kind == "homological":
@@ -154,6 +158,10 @@ def _verified_source(source: Any) -> Any:
 
 
 def _export_text(inspection: WorkflowInspection, format: str) -> str:
+    if inspection.kind == "atlas":
+        from .atlas_report import atlas_report
+
+        return atlas_report(inspection, format)
     if format == "markdown":
         return _markdown_report(inspection)
     if format == "csv":

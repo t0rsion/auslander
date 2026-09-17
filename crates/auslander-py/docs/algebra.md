@@ -14,9 +14,11 @@ k-dual, element matrices) stays Rust-only.
 Two kinds of algebra share the class. `Algebra(quiver, forbidden)` and the
 named constructors build a monomial algebra from forbidden words: lists of
 arrow ids, each of length >= 2 and composable left to right. A monomial
-presentation is field-independent, so one object works for every prime. A field
-enters only when building modules, and each field gets one verified runtime
-algebra, built on first use and cached.
+presentation is field-independent. By default, a monomial constructor returns
+a field-free algebra. Pass `field=F` at construction or call `algebra.over(F)`
+to bind it. Field-sensitive operations on a field-free algebra require a field;
+a bound algebra may omit it. Each field gets one verified runtime algebra,
+built on first use and cached.
 
 `Algebra.from_relations(quiver, relations, field)` builds a general-relation
 algebra. `relations` is a list of relations, each a list of
@@ -26,7 +28,7 @@ one source and one target (uniformity), and a coefficient that reduces to
 zero is rejected, not dropped. A general ideal is not field-independent: its
 dimension and structure constants depend on the field. The algebra is
 therefore bound to the one field it was verified over, `algebra.field` names
-that field (`None` for a monomial algebra), and any other field raises
+that field (`None` for a field-free monomial algebra), and any other field raises
 `ValueError`.
 
 Construction runs noncommutative completion and then typed verification of
@@ -42,17 +44,16 @@ and `max_ambiguities` of `from_relations` set the budgets, one per value
 base of every budget exhaustion, which itself subclasses `RuntimeError`. The
 class stays a `RuntimeError`, so existing `except` clauses keep working.
 
-Certificates: `algebra.certificate_json()` returns the canonical JSON text
-of the verified completion certificate, and
-`Algebra.from_certificate(json)` verifies untrusted bytes from scratch and
-rebuilds the algebra from the verified data alone. Tampered bytes raise
-`ValueError` with the verifier's message. A monomial algebra is field-free
-and a certificate is not, so a monomial algebra must pass the `field`
-argument; the reloaded algebra is always field-bound. Certificate bytes
-never carry budgets: `from_certificate` takes the same optional budget
-keywords as `from_relations` to set the rebuilt algebra's downstream
-limits, and `algebra.completion_limits` reports the effective limits as a
-dict.
+Certificates: `algebra.certificate_json(field=None)` returns the canonical JSON
+text of the verified completion certificate, and
+`Algebra.from_certificate(json, *, field=None)` verifies untrusted bytes from
+scratch and rebuilds the algebra from the verified data alone. Tampered bytes
+raise `ValueError` with the verifier's message. A field-free monomial algebra
+needs `field=F` for either operation; a bound algebra may omit it. The
+reloaded algebra is always field-bound. Certificate bytes never carry budgets:
+`from_certificate` takes the same optional budget keywords as `from_relations`
+to set the rebuilt algebra's downstream limits, and
+`algebra.completion_limits` reports the effective limits as a dict.
 
 ## Commutative square example
 
@@ -69,17 +70,17 @@ A = auslander.Algebra.from_relations(Q, [[(1, [0, 1]), (-1, [2, 3])]], F)
 assert A.dim == 9
 
 # Minimal projective resolution 0 -> P_3 -> P_1 + P_2 -> P_0 -> S_0 -> 0.
-res = A.simple(F, 0).resolve(5)
+res = A.simple(0).resolve(5)
 assert res.terms_dims == [[1, 1, 1, 1], [0, 1, 1, 2], [0, 0, 0, 1]]
 assert res.pd(5).exact == 2
 
 # Decompose P_0 + S_1 + S_1, built block diagonally.
-M = A.module(F, [1, 3, 1, 1], [[[1, 0, 0]], [[1], [0], [0]], [[1]], [[1]]])
+M = A.module([1, 3, 1, 1], [[[1, 0, 0]], [[1], [0], [0]], [[1]], [[1]]])
 classes = {tuple(rep.dims): mult for rep, mult in M.krull_schmidt().classes}
 assert classes == {(1, 1, 1, 1): 1, (0, 1, 0, 0): 2}
 
 # The AR translate of a non-projective simple.
-assert A.simple(F, 1).tau().dims == [0, 0, 1, 1]
+assert A.simple(1).tau().dims == [0, 0, 1, 1]
 
 # Dump, verify, reload.
 B = auslander.Algebra.from_certificate(A.certificate_json())
@@ -123,8 +124,10 @@ outcomes have `verify()`.
 ## Hochschild cohomology
 
 Hochschild cohomology:
-`algebra.hochschild_cohomology(field, max_degree, limits)` runs the relative
-normalized bar construction. `BarLimits` requires four independent ceilings:
+`algebra.hochschild_cohomology(max_degree, limits, field=None)` runs the
+relative normalized bar construction. A field-free monomial algebra needs
+`field=F`; a bound algebra may omit it. `BarLimits` requires four independent
+ceilings:
 tensor tuples at one degree, cochain dimension at one degree, retained matrix
 entries plus scratch, and cumulative deterministic work. A finished request
 returns `HochschildCohomology`. Its `degree(n)` returns a
@@ -155,8 +158,8 @@ The path over `A = kA_3/(ab)` and `k[x]/(x^3)`:
 
 ```python
 F = auslander.PrimeField(5)
-A = auslander.Algebra.an_with_relations(3, [(0, 2)])
-S0 = A.simple(F, 0)
+A = auslander.Algebra.an_with_relations(3, [(0, 2)]).over(F)
+S0 = A.simple(0)
 resolution = S0.resolve(2)
 exact = auslander.CheckedComplex(
     [resolution.terms[2], resolution.terms[1], resolution.terms[0], S0],
@@ -166,13 +169,13 @@ assert isinstance(exact, auslander.ExactComplex)
 assert exact.verify()
 
 bar_limits = auslander.BarLimits(10_000, 100_000, 10_000_000, 1_000_000_000)
-X3 = auslander.Algebra.truncated_poly(3)
-HH = X3.hochschild_cohomology(F, 2, bar_limits)
+X3 = auslander.Algebra.truncated_poly(3).over(F)
+HH = X3.hochschild_cohomology(2, bar_limits)
 assert HH.dimensions == [3, 2, 2]
 assert HH.verify()
 
 # D(A) = I_0 + I_1 + I_2 in block-diagonal bases.
-DA = A.module(F, [2, 2, 1], [[[0, 0], [1, 0]], [[0], [1]]])
+DA = A.module([2, 2, 1], [[[0, 0], [1, 0]], [[0], [1]]])
 answer = auslander.ClassicalTiltingModule.classify(
     DA, auslander.TiltingLimits(4, 5)
 )
@@ -210,8 +213,8 @@ only checked projective target terms.
 
 ```python
 F = auslander.PrimeField(5)
-A = auslander.Algebra.an_with_relations(3, [(0, 2)])
-DA = A.module(F, [2, 2, 1], [[[0, 0], [1, 0]], [[0], [1]]])
+A = auslander.Algebra.an_with_relations(3, [(0, 2)]).over(F)
+DA = A.module([2, 2, 1], [[[0, 0], [1, 0]], [[0], [1]]])
 tilting = auslander.ClassicalTiltingModule.classify(
     DA, auslander.TiltingLimits(4, 8)
 ).tilting

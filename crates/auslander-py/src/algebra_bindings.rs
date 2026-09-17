@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "algebra_ops.rs"]
+mod algebra_ops;
+
 /// The field-free analysis of a named monomial family. Every family the
 /// static constructors expose is finite dimensional, so the standard-path
 /// enumeration cannot fail here.
@@ -7,33 +10,30 @@ pub(crate) fn analyzed(ideal: MonomialIdeal) -> MonomialPresentation {
     MonomialPresentation::new(ideal).expect("a named monomial family is finite dimensional")
 }
 
-/// How a Python Algebra holds its verified runtime algebras.
+/// How a Python `Algebra` holds its verified runtime algebras.
 pub(crate) enum AlgebraKind {
-    /// Field-free monomial combinatorics. Each field gets one verified
-    /// runtime algebra, built on first use and cached.
+    /// Field-free monomial data with one verified runtime algebra per field.
     Monomial {
         presentation: Box<MonomialPresentation>,
         per_field: Mutex<BTreeMap<u64, Arc<Algebra>>>,
     },
-    /// A general-relation algebra, bound to the one field it was verified
-    /// over.
+    /// A field-bound runtime algebra.
     General(Arc<Algebra>),
 }
 
 /// The bound quiver algebra kQ/I over a checked prime field.
 ///
 /// Two kinds share this class. `Algebra(quiver, forbidden)` and the named
-/// constructors build a monomial algebra: forbidden words are lists of arrow
-/// ids, each of length >= 2 (admissibility) and composable left to right. A
-/// monomial presentation is field-free, so a field enters only when building
-/// modules, and each field gets one verified runtime algebra, built on first
-/// use and cached.
+/// constructors build monomial presentations: forbidden words are lists of
+/// arrow ids, each of length >= 2 and composable left to right. A constructor
+/// can bind one field, or leave the presentation field-free. Each requested
+/// field gets one verified runtime algebra, built on first use and cached.
 ///
 /// `Algebra.from_relations` and `Algebra.from_certificate` build a
 /// general-relation algebra. Its dimension and structure constants depend on
 /// the field, so it is bound to the one field it was verified over and raises
-/// ValueError for any other. `field` names that field, and is None for a
-/// monomial algebra.
+/// ValueError for any other. `field` names that field, or is None for an
+/// unbound monomial presentation.
 ///
 /// Every runtime algebra passes completion and independent certificate
 /// verification before use, so `dim` and the Cartan matrix are exact. Modules
@@ -54,15 +54,27 @@ impl PyAlgebra {
         }
     }
 
+    fn from_presentation(
+        py: Python<'_>,
+        presentation: MonomialPresentation,
+        field: Option<PrimeField>,
+    ) -> PyResult<PyAlgebra> {
+        match field {
+            None => Ok(Self::wrap(presentation)),
+            Some(field) => py
+                .allow_threads(|| algebra::monomial_algebra(presentation.ideal(), field))
+                .map_err(build_error)
+                .map(Self::pinned),
+        }
+    }
+
     pub(crate) fn pinned(algebra: Arc<Algebra>) -> PyAlgebra {
         PyAlgebra {
             kind: AlgebraKind::General(algebra),
         }
     }
 
-    /// The verified runtime algebra over `field`. A monomial algebra builds
-    /// one per field on first use and caches it; a general-relation algebra
-    /// returns its own and raises ValueError for any other field.
+    /// The verified runtime algebra over `field`.
     pub(crate) fn over(&self, py: Python<'_>, field: PrimeField) -> PyResult<Arc<Algebra>> {
         match &self.kind {
             AlgebraKind::Monomial {
@@ -100,8 +112,7 @@ impl PyAlgebra {
                     return Ok(algebra.clone());
                 }
                 Err(PyValueError::new_err(format!(
-                    "this algebra was built over F_{}; a general-relation algebra is \
-                     field-dependent, so it cannot be used over F_{}",
+                    "this algebra was built over F_{} and cannot be used over F_{}",
                     algebra.field().modulus(),
                     field.modulus()
                 )))
@@ -109,11 +120,8 @@ impl PyAlgebra {
         }
     }
 
-    /// The runtime algebra for a construction that no field-free presentation
-    /// can serve. A general-relation algebra carries its field, so `field` may
-    /// be None; a monomial one needs it and raises ValueError otherwise. `what`
-    /// names the construction in that message ("a certificate", "an AR
-    /// quiver").
+    /// Selects the runtime algebra for a field-sensitive construction.
+    /// Field-free presentations require `field`; bound algebras may omit it.
     pub(crate) fn algebra_for(
         &self,
         py: Python<'_>,
@@ -124,8 +132,7 @@ impl PyAlgebra {
             (AlgebraKind::General(algebra), None) => Ok(algebra.clone()),
             (_, Some(field)) => self.over(py, field.inner),
             (AlgebraKind::Monomial { .. }, None) => Err(PyValueError::new_err(format!(
-                "a monomial presentation is field-free and {what} is not; \
-                 pass a field to build {what} over it"
+                "this field-free algebra needs a field; pass a field to build {what}"
             ))),
         }
     }
@@ -154,16 +161,23 @@ impl PyAlgebra {
     /// when a forbidden word is too short or not a path, or when the algebra would
     /// be infinite-dimensional.
     #[new]
-    #[pyo3(text_signature = "(quiver, forbidden)")]
-    fn new(quiver: &PyQuiver, forbidden: Vec<Vec<u32>>) -> PyResult<Self> {
+    #[pyo3(signature = (quiver, forbidden, field = None), text_signature = "(quiver, forbidden, field=None)")]
+    fn new(
+        py: Python<'_>,
+        quiver: &PyQuiver,
+        forbidden: Vec<Vec<u32>>,
+        field: Option<&PyPrimeField>,
+    ) -> PyResult<Self> {
         let forbidden: Vec<Vec<ArrowId>> = forbidden
             .into_iter()
             .map(|word| word.into_iter().map(ArrowId).collect())
             .collect();
         let ideal = MonomialIdeal::new(quiver.inner.clone(), forbidden).map_err(value_error)?;
-        Ok(PyAlgebra::wrap(
+        PyAlgebra::from_presentation(
+            py,
             MonomialPresentation::new(ideal).map_err(value_error)?,
-        ))
+            field.map(|value| value.inner),
+        )
     }
 
     /// kQ/I for a general admissible ideal over one prime field. Each relation
@@ -224,8 +238,8 @@ impl PyAlgebra {
 
     /// The algebra rebuilt from certificate bytes. The bytes are verified from
     /// scratch, then the algebra is built from the verified data alone. The
-    /// result is bound to the certificate's field, exactly like a
-    /// `from_relations` algebra, whatever kind of algebra dumped the bytes.
+    /// result is bound to the certificate's field. An optional `field` checks
+    /// that binding before construction.
     ///
     /// The optional keywords set the rebuilt algebra's completion limits, used
     /// only by later derived completions such as tau and the injective
@@ -236,10 +250,15 @@ impl PyAlgebra {
     /// when the bytes fail any check, an infinite-dimensional quotient
     /// included.
     #[staticmethod]
-    #[pyo3(signature = (json, *, max_basis = None, max_word_len = None, max_steps = None, max_origin_terms = None, max_ambiguities = None))]
+    #[pyo3(signature = (json, *, field = None, max_basis = None, max_word_len = None, max_steps = None, max_origin_terms = None, max_ambiguities = None))]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "PyO3 adds the GIL token to the explicit Python keyword limits"
+    )]
     fn from_certificate(
         py: Python<'_>,
         json: &str,
+        field: Option<&PyPrimeField>,
         max_basis: Option<usize>,
         max_word_len: Option<usize>,
         max_steps: Option<usize>,
@@ -256,6 +275,15 @@ impl PyAlgebra {
         let verified = py
             .allow_threads(|| verify::verify(json))
             .map_err(value_error)?;
+        if let Some(field) = field {
+            let expected = verified.field().modulus();
+            if expected != field.inner.modulus() {
+                return Err(PyValueError::new_err(format!(
+                    "the certificate is over F_{expected}, not F_{}",
+                    field.inner.modulus()
+                )));
+            }
+        }
         // A certificate can verify and still describe a non-admissible ideal, whose
         // arrow ideal never reaches zero. That is bad input, not a crate defect.
         let algebra = Algebra::from_verified_with_limits(verified, &limits).map_err(build_error)?;
@@ -264,66 +292,102 @@ impl PyAlgebra {
 
     /// Path algebra of linearly oriented A_n: vertices 0..n, arrows i -> i+1.
     #[staticmethod]
-    #[pyo3(text_signature = "(n)")]
-    fn linear_an(n: usize) -> PyAlgebra {
-        PyAlgebra::wrap(analyzed(monomial::linear_an_ideal(n)))
+    #[pyo3(signature = (n, field = None), text_signature = "(n, field=None)")]
+    fn linear_an(py: Python<'_>, n: usize, field: Option<&PyPrimeField>) -> PyResult<PyAlgebra> {
+        PyAlgebra::from_presentation(
+            py,
+            analyzed(monomial::linear_an_ideal(n)),
+            field.map(|value| value.inner),
+        )
     }
 
     /// Kronecker-type algebra: vertices 0, 1 and m parallel arrows 0 -> 1;
     /// hereditary, dim = m + 2.
     #[staticmethod]
-    #[pyo3(text_signature = "(m)")]
-    fn kronecker(m: usize) -> PyAlgebra {
-        PyAlgebra::wrap(analyzed(monomial::kronecker_ideal(m)))
+    #[pyo3(signature = (m, field = None), text_signature = "(m, field=None)")]
+    fn kronecker(py: Python<'_>, m: usize, field: Option<&PyPrimeField>) -> PyResult<PyAlgebra> {
+        PyAlgebra::from_presentation(
+            py,
+            analyzed(monomial::kronecker_ideal(m)),
+            field.map(|value| value.inner),
+        )
     }
 
     /// k[x]/(x^2): one vertex, one loop x, forbidden word xx.
     #[staticmethod]
-    #[pyo3(text_signature = "()")]
-    fn dual_numbers() -> PyAlgebra {
-        PyAlgebra::wrap(analyzed(
-            monomial::truncated_poly_ideal(2).expect("x^2 is an admissible relation"),
-        ))
+    #[pyo3(signature = (field = None), text_signature = "(field=None)")]
+    fn dual_numbers(py: Python<'_>, field: Option<&PyPrimeField>) -> PyResult<PyAlgebra> {
+        PyAlgebra::from_presentation(
+            py,
+            analyzed(monomial::truncated_poly_ideal(2).expect("x^2 is an admissible relation")),
+            field.map(|value| value.inner),
+        )
     }
 
     /// k[x]/(x^n): one vertex, one loop x, forbidden word x^n; raises ValueError
     /// for n < 2 (the ideal would not be admissible).
     #[staticmethod]
-    #[pyo3(text_signature = "(n)")]
-    fn truncated_poly(n: usize) -> PyResult<PyAlgebra> {
-        Ok(PyAlgebra::wrap(analyzed(
-            monomial::truncated_poly_ideal(n).map_err(value_error)?,
-        )))
+    #[pyo3(signature = (n, field = None), text_signature = "(n, field=None)")]
+    fn truncated_poly(
+        py: Python<'_>,
+        n: usize,
+        field: Option<&PyPrimeField>,
+    ) -> PyResult<PyAlgebra> {
+        PyAlgebra::from_presentation(
+            py,
+            analyzed(monomial::truncated_poly_ideal(n).map_err(value_error)?),
+            field.map(|value| value.inner),
+        )
     }
 
     /// Linear Nakayama algebra over linearly oriented A_n with dim P_i = kupisch[i];
     /// raises ValueError on an invalid Kupisch series (needs kupisch[n-1] == 1,
     /// interior entries >= 2, and kupisch[i+1] >= kupisch[i] - 1).
     #[staticmethod]
-    #[pyo3(text_signature = "(kupisch)")]
-    fn linear_nakayama(kupisch: Vec<usize>) -> PyResult<PyAlgebra> {
-        Ok(PyAlgebra::wrap(analyzed(
-            monomial::linear_nakayama_ideal(&kupisch).map_err(value_error)?,
-        )))
+    #[pyo3(signature = (kupisch, field = None), text_signature = "(kupisch, field=None)")]
+    fn linear_nakayama(
+        py: Python<'_>,
+        kupisch: Vec<usize>,
+        field: Option<&PyPrimeField>,
+    ) -> PyResult<PyAlgebra> {
+        PyAlgebra::from_presentation(
+            py,
+            analyzed(monomial::linear_nakayama_ideal(&kupisch).map_err(value_error)?),
+            field.map(|value| value.inner),
+        )
     }
 
     /// Cyclic Nakayama algebra over the cycle 0 -> 1 -> ... -> n-1 -> 0 with
     /// dim P_i = kupisch[i]; raises ValueError on an invalid series (all entries
     /// >= 2 and cyclically kupisch[i+1] >= kupisch[i] - 1).
     #[staticmethod]
-    #[pyo3(text_signature = "(kupisch)")]
-    fn cyclic_nakayama(kupisch: Vec<usize>) -> PyResult<PyAlgebra> {
-        Ok(PyAlgebra::wrap(analyzed(
-            monomial::cyclic_nakayama_ideal(&kupisch).map_err(value_error)?,
-        )))
+    #[pyo3(signature = (kupisch, field = None), text_signature = "(kupisch, field=None)")]
+    fn cyclic_nakayama(
+        py: Python<'_>,
+        kupisch: Vec<usize>,
+        field: Option<&PyPrimeField>,
+    ) -> PyResult<PyAlgebra> {
+        PyAlgebra::from_presentation(
+            py,
+            analyzed(monomial::cyclic_nakayama_ideal(&kupisch).map_err(value_error)?),
+            field.map(|value| value.inner),
+        )
     }
 
     /// Cyclic quiver on n vertices with rad^2 = 0: every length-2 path forbidden;
     /// dim = 2n.
     #[staticmethod]
-    #[pyo3(text_signature = "(n)")]
-    fn radical_square_zero_cycle(n: usize) -> PyAlgebra {
-        PyAlgebra::wrap(analyzed(monomial::radical_square_zero_cycle_ideal(n)))
+    #[pyo3(signature = (n, field = None), text_signature = "(n, field=None)")]
+    fn radical_square_zero_cycle(
+        py: Python<'_>,
+        n: usize,
+        field: Option<&PyPrimeField>,
+    ) -> PyResult<PyAlgebra> {
+        PyAlgebra::from_presentation(
+            py,
+            analyzed(monomial::radical_square_zero_cycle_ideal(n)),
+            field.map(|value| value.inner),
+        )
     }
 
     /// Linearly oriented A_n with zero relations: each (start, length) pair kills
@@ -331,11 +395,18 @@ impl PyAlgebra {
     /// an_with_relations(3, [(0, 2)]). Raises ValueError when a zero path runs past
     /// the last vertex or has length < 2.
     #[staticmethod]
-    #[pyo3(text_signature = "(n, zero_paths)")]
-    fn an_with_relations(n: usize, zero_paths: Vec<(usize, usize)>) -> PyResult<PyAlgebra> {
-        Ok(PyAlgebra::wrap(analyzed(
-            monomial::an_with_relations_ideal(n, &zero_paths).map_err(value_error)?,
-        )))
+    #[pyo3(signature = (n, zero_paths, field = None), text_signature = "(n, zero_paths, field=None)")]
+    fn an_with_relations(
+        py: Python<'_>,
+        n: usize,
+        zero_paths: Vec<(usize, usize)>,
+        field: Option<&PyPrimeField>,
+    ) -> PyResult<PyAlgebra> {
+        PyAlgebra::from_presentation(
+            py,
+            analyzed(monomial::an_with_relations_ideal(n, &zero_paths).map_err(value_error)?),
+            field.map(|value| value.inner),
+        )
     }
 
     /// dim_k of the algebra: the number of basis paths, trivial paths included.
@@ -350,8 +421,7 @@ impl PyAlgebra {
         }
     }
 
-    /// The bound prime field of a general-relation algebra; None for a
-    /// monomial algebra, which pairs with any field.
+    /// The bound prime field, or None for a field-free monomial presentation.
     #[getter]
     fn field(&self) -> Option<PyPrimeField> {
         match &self.kind {
@@ -417,115 +487,16 @@ impl PyAlgebra {
         }
     }
 
-    /// The canonical JSON bytes of the verified completion certificate; feed
-    /// them to Algebra.from_certificate to rebuild the algebra. A
-    /// general-relation algebra serializes its own certificate, and `field`
-    /// must be omitted or equal to the bound field. A monomial presentation is
-    /// field-free and a certificate is not, so a monomial algebra requires
-    /// `field` and serializes the certificate of its algebra over that field.
-    #[pyo3(signature = (field = None))]
-    fn certificate_json(&self, py: Python<'_>, field: Option<&PyPrimeField>) -> PyResult<String> {
-        let algebra = self.algebra_for(py, field, "a certificate")?;
-        Ok(algebra.certificate().to_canonical_json())
-    }
-
-    /// A right module from raw data: dims[v] is the dimension at vertex v, and
-    /// maps[a] is a dims[source(a)] x dims[target(a)] integer matrix (list of rows)
-    /// for arrow a, acting on row vectors; entries are reduced mod p. A path acts
-    /// by the product of its arrow matrices in left-to-right word order. Raises
-    /// ValueError when shapes disagree with the quiver or a relation acts as a
-    /// nonzero matrix.
-    #[pyo3(text_signature = "($self, field, dims, maps)")]
-    fn module(
-        &self,
-        py: Python<'_>,
-        field: &PyPrimeField,
-        dims: Vec<usize>,
-        maps: Vec<Vec<Vec<i64>>>,
-    ) -> PyResult<PyRightModule> {
-        let f = field.inner;
-        let algebra = self.over(py, f)?;
-        let quiver = algebra.quiver();
-        let mut mats = Vec::with_capacity(maps.len());
-        for (i, rows) in maps.iter().enumerate() {
-            // The expected column count, so that e.g. dims [0, 1] accepts maps [[]].
-            let cols = quiver
-                .arrows()
-                .get(i)
-                .and_then(|&(_, t)| dims.get(t as usize).copied())
-                .unwrap_or(0);
-            mats.push(dense_from_rows(
-                f,
-                rows,
-                cols,
-                &format!("map for arrow {i}"),
-            )?);
-        }
-        Ok(Module::new(algebra, dims, mats)
-            .map_err(value_error)?
-            .into())
-    }
-
-    /// A right module from sparse arrow matrices. `maps[a]` is a list of
-    /// `(row, column, value)` entries for arrow `a`. Omitted coordinates are
-    /// zero, values are reduced mod p, and repeated coordinates are rejected.
-    #[pyo3(text_signature = "($self, field, dims, maps)")]
-    fn module_sparse(
-        &self,
-        py: Python<'_>,
-        field: &PyPrimeField,
-        dims: Vec<usize>,
-        maps: Vec<Vec<(usize, usize, i64)>>,
-    ) -> PyResult<PyRightModule> {
-        let algebra = self.over(py, field.inner)?;
-        let quiver = algebra.quiver();
-        check_sparse_module_shape(quiver, &dims, maps.len())?;
-        let matrices = maps
-            .iter()
-            .enumerate()
-            .map(|(arrow, entries)| {
-                let (source, target) = quiver.arrows()[arrow];
-                dense_from_sparse(
-                    field.inner,
-                    dims[source as usize],
-                    dims[target as usize],
-                    entries,
-                    &format!("map for arrow {arrow}"),
-                )
-            })
-            .collect::<PyResult<Vec<_>>>()?;
-        Ok(Module::new(algebra, dims, matrices)
-            .map_err(value_error)?
-            .into())
-    }
-
-    /// The simple module S_v: one-dimensional at v, zero elsewhere, all arrows
-    /// acting as zero. Raises ValueError when v is not a vertex.
-    #[pyo3(text_signature = "($self, field, v)")]
-    fn simple(&self, py: Python<'_>, field: &PyPrimeField, v: u32) -> PyResult<PyRightModule> {
-        self.check_vertex(v)?;
-        Ok(Module::simple(&self.over(py, field.inner)?, v).into())
-    }
-
-    /// The indecomposable projective P_v = e_v A: its basis at vertex w is the set
-    /// of standard paths v -> w. Raises ValueError when v is not a vertex.
-    #[pyo3(text_signature = "($self, field, v)")]
-    fn projective(&self, py: Python<'_>, field: &PyPrimeField, v: u32) -> PyResult<PyRightModule> {
-        self.check_vertex(v)?;
-        Ok(Module::projective(&self.over(py, field.inner)?, v).into())
-    }
-
     /// The valued Auslander-Reiten quiver of the algebra: one vertex per
     /// indecomposable of a complete enumeration, one arrow per nonzero space
     /// of irreducible maps.
     ///
-    /// The enumeration route is fixed. A zero ideal over a quiver of Dynkin
-    /// shape takes the Gabriel enumeration, any other Nakayama algebra takes
-    /// the Nakayama enumeration, and any other algebra raises
-    /// UnsupportedDomainError naming both failed routes. The quiver is
-    /// complete for its domain; no budget cuts it short. A general-relation
-    /// algebra carries its field, so `field` may be omitted; a monomial
-    /// presentation is field-free and needs it.
+    /// The enumeration route is fixed: Dynkin, Nakayama, then gentle tree. An
+    /// unsupported algebra raises UnsupportedDomainError naming all three
+    /// failed routes. The quiver is complete for its domain; no budget cuts it
+    /// short. A general-relation algebra and a field-bound monomial algebra
+    /// carry their field, so `field` may be omitted. An unbound monomial
+    /// presentation requires it.
     #[pyo3(signature = (field = None))]
     fn ar_quiver(&self, py: Python<'_>, field: Option<&PyPrimeField>) -> PyResult<PyArQuiver> {
         let algebra = self.algebra_for(py, field, "an AR quiver")?;
@@ -559,7 +530,7 @@ impl PyAlgebra {
     ///
     /// `limits` is a MutationGraphLimits; omitting it takes the defaults. A
     /// general-relation algebra carries its field, so `field` may be omitted;
-    /// a monomial presentation is field-free and needs it.
+    /// an unbound monomial presentation requires it.
     #[pyo3(signature = (field = None, *, limits = None))]
     fn support_tau_tilting_graph<'py>(
         &self,
@@ -590,50 +561,24 @@ impl PyAlgebra {
         }
     }
 
-    /// Computes relative normalized bar Hochschild cohomology through one
-    /// degree under four explicit resource ceilings.
-    ///
-    /// A finished request returns HochschildCohomology. A ceiling or checked
-    /// size overflow returns IncompleteHochschildCohomology with the exact
-    /// completed prefix and first rejected reservation. A cut never raises.
-    #[pyo3(text_signature = "($self, field, max_degree, limits)")]
-    fn hochschild_cohomology<'py>(
-        &self,
-        py: Python<'py>,
-        field: &PyPrimeField,
-        max_degree: usize,
-        limits: &PyBarLimits,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let algebra = self.over(py, field.inner)?;
-        match py
-            .allow_threads(|| bar_hochschild(&algebra, max_degree, limits.inner))
-            .map_err(hochschild_error)?
-        {
-            HochschildOutcome::Complete(inner) => {
-                Ok(Bound::new(py, PyHochschildCohomology { inner })?.into_any())
-            }
-            HochschildOutcome::Cut(inner) => {
-                Ok(Bound::new(py, PyIncompleteHochschildCohomology { inner })?.into_any())
-            }
-        }
-    }
-
     /// Lists every support tau-tilting pair of the algebra from the definition
     /// over an exhaustive catalog of its indecomposables.
     ///
     /// Completeness comes from the catalog's classification theorem and from
     /// nothing else. The module part of a basic pair is a direct sum of
     /// pairwise non-isomorphic indecomposables, so walking the subsets of a
-    /// complete catalog reaches every pair. Only the two catalog domains have
-    /// such a list: a path algebra of Dynkin type by Gabriel's theorem, and a
-    /// Nakayama algebra by the Nakayama classification. Any other algebra
-    /// raises UnsupportedDomainError naming both failed routes.
+    /// complete catalog reaches every pair. The catalog domains are path
+    /// algebras of Dynkin type, Nakayama algebras, and gentle tree algebras.
+    /// Any other algebra raises UnsupportedDomainError naming all failed
+    /// routes.
     ///
     /// This route is independent of the mutation-graph certificate. It uses no
     /// mutation, no approximation, and no theorem about the support
     /// tau-tilting quiver: only Hom, tau, and the four conditions of a pair.
     /// When both routes produce the same list, that is evidence, not one route
     /// restating the other.
+    /// A field-bound algebra omits `field`; an unbound monomial presentation
+    /// requires it.
     #[pyo3(signature = (field = None))]
     fn enumerate_over_catalog(
         &self,
@@ -642,30 +587,14 @@ impl PyAlgebra {
     ) -> PyResult<PyCatalogEnumeration> {
         let algebra = self.algebra_for(py, field, "a catalog enumeration")?;
         let catalog = py
-            .allow_threads(|| match IndecomposableCatalog::dynkin(&algebra) {
-                Ok(catalog) => Ok(catalog),
-                Err(dynkin) => IndecomposableCatalog::nakayama(&algebra).map_err(|nakayama| {
-                    format!(
-                        "no complete enumeration applies: the Dynkin route reports {dynkin}, \
-                         the Nakayama route reports {nakayama}"
-                    )
-                }),
-            })
-            .map_err(UnsupportedDomainError::new_err)?;
+            .allow_threads(|| IndecomposableCatalog::complete(&algebra))
+            .map_err(|error| UnsupportedDomainError::new_err(error.to_string()))?;
         Ok(PyCatalogEnumeration {
             inner: Arc::new(
                 py.allow_threads(|| supporttau::enumerate_over_catalog(&catalog))
                     .map_err(support_tau_error)?,
             ),
         })
-    }
-
-    /// The indecomposable injective I_v = D(A e_v): its basis at vertex w is dual
-    /// to the standard paths w -> v. Raises ValueError when v is not a vertex.
-    #[pyo3(text_signature = "($self, field, v)")]
-    fn injective(&self, py: Python<'_>, field: &PyPrimeField, v: u32) -> PyResult<PyRightModule> {
-        self.check_vertex(v)?;
-        Ok(Module::injective(&self.over(py, field.inner)?, v).into())
     }
 
     fn __repr__(&self) -> String {

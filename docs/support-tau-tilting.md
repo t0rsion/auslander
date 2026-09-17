@@ -150,10 +150,8 @@ certified isomorphism. Mutation approximations use it.
 
 ## 5. Tau-rigidity
 
-A vanishing claim carries no positive witness data, so no witness type
-exists for it. An earlier draft stored a whole `HomSpace` to record that its
-dimension was zero, and verification rebuilt that space anyway, so the stored
-value proved nothing the recomputation did not.
+A vanishing claim carries no positive witness data. Verification recomputes
+the Hom dimension, so it does not need a stored zero-dimensional `HomSpace`.
 
 Private construction of `TauRigidModule` is the proof token instead:
 `verify()` recomputes `tau` through the existing double route and checks
@@ -653,8 +651,7 @@ dimensions of the simple blocks of `End(M)/rad End(M)`, not multiplicities.
   `ValueError` subclasses
   and a defect raises `DefectError`. Mathematical outcomes never raise, so
   budget exhaustion and blocked certification are values: both return an
-  `IncompleteSupportTauTiltingGraph` carrying the reason, rather than the
-  exceptions an earlier draft of this section named.
+  `IncompleteSupportTauTiltingGraph` carrying the reason.
 
 ## 14. Determinism
 

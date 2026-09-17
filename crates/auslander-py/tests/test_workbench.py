@@ -84,14 +84,14 @@ def test_shell_namespace_and_typed_package_files_are_present():
     package = Path(auslander.__file__).parent
     assert (package / "py.typed").is_file()
     assert (package / "_core.pyi").is_file()
-    assert auslander.__version__ == "0.8.0"
+    assert auslander.__version__ == "0.9.0"
 
 
 def test_stable_hom_exposes_projective_factors_and_reduction():
     field = auslander.PrimeField(5)
     algebra = auslander.Algebra.dual_numbers()
-    simple = algebra.simple(field, 0)
-    projective = algebra.projective(field, 0)
+    simple = algebra.simple(0, field=field)
+    projective = algebra.projective(0, field=field)
 
     stable_simple = simple.stable_hom(simple)
     assert stable_simple.dim == 1
@@ -111,7 +111,7 @@ def test_stable_hom_exposes_projective_factors_and_reduction():
 def test_syzygy_and_cosyzygy_return_recheckable_prefixes():
     field = auslander.PrimeField(5)
     algebra = auslander.Algebra.dual_numbers()
-    simple = algebra.simple(field, 0)
+    simple = algebra.simple(0, field=field)
 
     omega = simple.syzygy()
     omega_inverse = simple.cosyzygy()
@@ -128,7 +128,7 @@ def test_syzygy_and_cosyzygy_return_recheckable_prefixes():
 def test_homological_batch_reuses_sources_and_target_covers():
     field = auslander.PrimeField(5)
     algebra = auslander.Algebra.linear_an(3)
-    modules = [algebra.simple(field, vertex) for vertex in range(3)]
+    modules = [algebra.simple(vertex, field=field) for vertex in range(3)]
     selected = [(0, 0), (0, 1), (2, 1)]
     batch = auslander.HomologicalBatch(modules, 2, selected)
     _assert_batch_work(batch, selected)
@@ -163,7 +163,7 @@ def _assert_batch_pairs(batch, modules):
 def test_homological_batch_defaults_to_self_pairs_and_checks_size_first():
     field = auslander.PrimeField(5)
     algebra = auslander.Algebra.dual_numbers()
-    modules = [algebra.simple(field, 0), algebra.projective(field, 0)]
+    modules = [algebra.simple(0, field=field), algebra.projective(0, field=field)]
     batch = auslander.HomologicalBatch(modules, 2)
     assert batch.selected_pairs == [(0, 0), (1, 1)]
 
@@ -211,8 +211,8 @@ def test_session_persists_only_canonical_verified_artifacts(tmp_path):
 def test_python_perfect_replacement_and_derived_hom_keep_typed_cuts(prime):
     field = auslander.PrimeField(prime)
     algebra = auslander.Algebra.an_with_relations(3, [(0, 2)])
-    source = auslander.BoundedComplex(0, [algebra.simple(field, 0)], [])
-    target = auslander.BoundedComplex(0, [algebra.simple(field, 2)], [])
+    source = auslander.BoundedComplex(0, [algebra.simple(0, field=field)], [])
+    target = auslander.BoundedComplex(0, [algebra.simple(2, field=field)], [])
 
     replacement = source.perfect_replacement()
     _assert_perfect_replacement(replacement)
@@ -255,7 +255,7 @@ def _assert_derived_hom_cut(hom_cut):
 def test_python_control_returns_typed_cancellation_and_progress():
     field = auslander.PrimeField(5)
     algebra = auslander.Algebra.an_with_relations(3, [(0, 2)])
-    source = auslander.BoundedComplex(0, [algebra.simple(field, 0)], [])
+    source = auslander.BoundedComplex(0, [algebra.simple(0, field=field)], [])
     control = auslander.ComputationControl()
     control.cancel()
 
@@ -356,12 +356,12 @@ def test_python_automatic_transport_accepts_ordinary_complexes(prime):
     field = auslander.PrimeField(prime)
     algebra = auslander.Algebra.an_with_relations(3, [(0, 2)])
     dual = algebra.module(
-        field,
         [2, 2, 1],
         [
             [[0, 0], [1, 0]],
             [[0], [1]],
         ],
+        field=field,
     )
     classified = auslander.ClassicalTiltingModule.classify(
         dual, auslander.TiltingLimits(4, 8)
@@ -369,7 +369,7 @@ def test_python_automatic_transport_accepts_ordinary_complexes(prime):
     target = classified.tilting.target_presentation(auslander.TargetLimits())
     certificate = auslander.DerivedEquivalenceCertificate(classified.tilting, target)
     transport = certificate.automatic_transport
-    source = auslander.BoundedComplex(0, [algebra.simple(field, 0)], [])
+    source = auslander.BoundedComplex(0, [algebra.simple(0, field=field)], [])
 
     forward = transport.forward(source)
     assert isinstance(forward, auslander.DerivedTransportResult)
@@ -385,15 +385,15 @@ def test_complete_python_session_runs_the_workbench(tmp_path):
     session = auslander.Session(5)
     field = session.field
     algebra = session.algebra("A", PRESENTATION)
-    source = auslander.BoundedComplex(0, [algebra.simple(field, 0)], [])
-    target = auslander.BoundedComplex(0, [algebra.simple(field, 2)], [])
+    source = auslander.BoundedComplex(0, [algebra.simple(0, field=field)], [])
+    target = auslander.BoundedComplex(0, [algebra.simple(2, field=field)], [])
     assert source.perfect_replacement().verify()
     assert source.derived_hom(target).dimension(2) == 1
 
     dual = algebra.module(
-        field,
         [2, 2, 1],
         [[[0, 0], [1, 0]], [[0], [1]]],
+        field=field,
     )
     tilting = auslander.ClassicalTiltingModule.classify(
         dual, auslander.TiltingLimits(4, 8)

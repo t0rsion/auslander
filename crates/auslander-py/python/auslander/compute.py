@@ -208,9 +208,9 @@ def _build_modules(algebra: Any, field: Any, recipes: Any) -> dict[str, Any]:
         dims, maps = _module_recipe(values[raw_name], name)
         try:
             if "maps" in values[raw_name]:
-                module = algebra.module(prime, dims, maps)
+                module = algebra.module(dims, maps, field=prime)
             else:
-                module = algebra.module_sparse(prime, dims, maps)
+                module = algebra.module_sparse(dims, maps, field=prime)
         except (TypeError, ValueError, OverflowError) as error:
             raise ValueError(f"module {name!r} rejected: {error}") from None
         modules[name] = module

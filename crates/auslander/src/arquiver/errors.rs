@@ -1,6 +1,7 @@
 use crate::algebra::AlgebraBuildError;
 use crate::dynkin::DynkinError;
 use crate::enumerate::EnumerateError;
+use crate::gentle::GentleError;
 use crate::hom::HomError;
 use crate::homspace::HomSpaceError;
 
@@ -15,14 +16,15 @@ pub enum ArQuiverError {
     /// Deciding injectivity needs the opposite algebra, and building it
     /// failed.
     Injective(AlgebraBuildError),
-    /// The algebra is neither a path algebra of Dynkin type nor a Nakayama
-    /// algebra, so no complete enumeration of its indecomposables exists in
-    /// this release. Both rejections are carried.
+    /// The algebra is outside all complete classifications in this release.
+    /// Every route rejection is carried.
     UnsupportedDomain {
         /// Why the Dynkin route rejected the algebra.
         dynkin: DynkinError,
         /// Why the Nakayama route rejected the algebra.
         nakayama: EnumerateError,
+        /// Why the gentle-tree route rejected the algebra.
+        gentle: GentleError,
     },
     /// `rad^2(X, Y)` came out with a member outside `rad(X, Y)`. The radical
     /// is an ideal, so this is a crate defect. The dimension vectors of `X`
@@ -51,7 +53,7 @@ display_error! { error ArQuiverError {
     Self::Hom(error) => "morphism rejected: {error}";
     Self::Space(error) => "hom space rejected the input: {error}";
     Self::Injective(error) => "the opposite algebra could not be built: {error}";
-    Self::UnsupportedDomain { dynkin, nakayama } => "no complete enumeration applies: the Dynkin route reports {dynkin}, the Nakayama route reports {nakayama}";
+    Self::UnsupportedDomain { dynkin, nakayama, gentle } => "no complete enumeration applies: the Dynkin route reports {dynkin}, the Nakayama route reports {nakayama}, and the gentle-tree route reports {gentle}";
     Self::RadicalSquareNotContained { source, target } => "the radical square of ({source:?}, {target:?}) left the radical; crate defect";
     Self::ResidueDegreeDoesNotDivide { dim_vector, base_dim, residue_degree } => "residue degree {residue_degree} of {dim_vector:?} does not divide the base dimension {base_dim}; crate defect";
 } }

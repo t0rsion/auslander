@@ -199,7 +199,7 @@ pub(crate) fn sequence_error(e: SequenceError) -> PyErr {
 }
 
 /// A failed AR-quiver or category-radical call. An algebra outside the two
-/// catalog domains is UnsupportedDomainError naming both failed routes;
+/// catalog domains is UnsupportedDomainError naming the failed routes;
 /// everything else is DefectError. Both entry points validate their endpoints
 /// before the call, so a mismatched hom endpoint or space here means the crate
 /// contradicted itself, exactly like a failed internal division or containment.
@@ -542,9 +542,8 @@ create_exception!(
     auslander,
     UnsupportedDomainError,
     PyValueError,
-    "No complete enumeration of the indecomposables applies to this algebra, \
-     so it has no AR quiver in this release. The message names both failed \
-     routes, the Dynkin one and the Nakayama one."
+    "No complete catalog route applies to this algebra. The message names \
+     the failed Dynkin, Nakayama, and gentle-tree domain checks."
 );
 
 create_exception!(

@@ -5,7 +5,7 @@ type: software
 authors:
   - family-names: Kringeland
     given-names: Tor
-version: 0.8.0
+version: 0.9.0
 repository-code: "https://github.com/t0rsion/auslander"
 url: "https://github.com/t0rsion/auslander"
 license:

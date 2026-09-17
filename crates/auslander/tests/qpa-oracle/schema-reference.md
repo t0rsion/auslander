@@ -15,6 +15,17 @@ own list order is discovery order, so the generator sorts every emitted list
 by an explicit key first. The recorded command contains executable flags, but
 no temporary directory or absolute generator path.
 
+## Provenance of the committed `catalog_qpa_expected.json`
+
+The gentle-tree document records the GAP version, QPA version, and generator
+command in its `provenance` object. Its SHA-256 is
+`f982a25bed98ac771119c059528cf138b3756e1f7f407a7d78dbcffd2320a9b9`.
+
+Two completed runs in fresh directories produced byte-identical output. The
+generator enumerates the gentle tree over F_2 and F_5 with QPA, then records
+the modules, Hom, Ext through degree 3, AR sequences, and irreducible maps.
+The Rust test reads this document and never writes it.
+
 ## Schema v6
 
 Schema v6 is schema v5 unchanged, plus the Auslander-Reiten fields at the end of

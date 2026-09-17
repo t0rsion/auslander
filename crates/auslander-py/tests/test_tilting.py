@@ -184,10 +184,10 @@ def test_a_work_unit_budget_also_truncates():
 
 
 def test_tau_rigidity_answers_both_ways_and_never_raises():
-    projective = auslander.Algebra.linear_an(3).projective(F, 0)
+    projective = auslander.Algebra.linear_an(3).projective(0, field=F)
     _assert_projective_rigidity(projective)
 
-    simple = auslander.Algebra.truncated_poly(3).simple(F, 0)
+    simple = auslander.Algebra.truncated_poly(3).simple(0, field=F)
     _assert_nonrigid_simple(simple)
 
 
@@ -224,7 +224,7 @@ def _assert_nonrigid_simple(simple):
 
 def test_the_zero_module_is_tau_rigid_with_an_empty_witness_set():
     algebra = auslander.Algebra.linear_an(2)
-    zero = algebra.module(F, [0, 0], [[]])
+    zero = algebra.module([0, 0], [[]], field=F)
     rigid = zero.tau_rigidity()
     assert rigid.is_tau_rigid
     assert rigid.vanishing.is_zero_module
@@ -235,7 +235,7 @@ def test_the_zero_module_is_tau_rigid_with_an_empty_witness_set():
 def test_an_accepted_pair_carries_its_parts():
     algebra = auslander.Algebra.linear_an(3)
     pair = auslander.SupportTauTiltingPair.classify(
-        algebra, [algebra.projective(F, v) for v in range(3)], [], F
+        algebra, [algebra.projective(v, field=F) for v in range(3)], [], F
     )
     _assert_accepted_pair(pair)
 
@@ -274,7 +274,7 @@ def _assert_hom_rejection(algebra):
     # Condition 2: Hom(P, M) is not zero, named by the vertex and the
     # dimension. Hom(P_v, M) = M_v for right modules, so there is no morphism
     # to carry and `witness` is None here.
-    hom = auslander.SupportTauTiltingPair.classify(algebra, [algebra.projective(F, 0)], [0], F)
+    hom = auslander.SupportTauTiltingPair.classify(algebra, [algebra.projective(0, field=F)], [0], F)
     assert not hom.is_pair
     assert hom.rejection.condition() == 2
     assert hom.rejection.kind == "hom_from_projective_nonzero"
@@ -288,7 +288,7 @@ def _assert_hom_rejection(algebra):
 
 def _assert_rigidity_rejection(algebra):
     # Condition 3: M is not tau-rigid, with the nonzero X_i -> tau X_j.
-    rigid = auslander.SupportTauTiltingPair.classify(algebra, [algebra.simple(F, 0)], [], F)
+    rigid = auslander.SupportTauTiltingPair.classify(algebra, [algebra.simple(0, field=F)], [], F)
     assert rigid.rejection.condition() == 3
     assert rigid.rejection.kind == "not_tau_rigid"
     assert not rigid.rejection.witness.is_zero
@@ -298,7 +298,7 @@ def _assert_rigidity_rejection(algebra):
 def _assert_count_rejection():
     # Condition 4: the summand counts do not add up to the vertex count.
     an = auslander.Algebra.linear_an(3)
-    count = auslander.SupportTauTiltingPair.classify(an, [an.projective(F, 0)], [], F)
+    count = auslander.SupportTauTiltingPair.classify(an, [an.projective(0, field=F)], [], F)
     assert count.rejection.condition() == 4
     assert count.rejection.kind == "summand_count"
     assert count.rejection.witness is None
@@ -313,19 +313,19 @@ def _assert_foreign_algebra_rejection(an):
     # constructor rejects that as input before any condition is tested.
     other = auslander.Algebra.linear_an(2)
     with pytest.raises(ValueError, match="another algebra object"):
-        auslander.SupportTauTiltingPair.classify(an, [other.projective(F, 0)], [], F)
+        auslander.SupportTauTiltingPair.classify(an, [other.projective(0, field=F)], [], F)
 
 
 def test_an_almost_complete_pair_takes_one_summand_fewer():
     algebra = auslander.Algebra.linear_an(2)
-    pair = auslander.AlmostCompletePair.classify(algebra, [algebra.projective(F, 0)], [], F)
+    pair = auslander.AlmostCompletePair.classify(algebra, [algebra.projective(0, field=F)], [], F)
     assert pair.is_pair
     assert pair.summand_count == 1
     assert pair.projective_support == []
     assert pair.verify()
 
     full = auslander.AlmostCompletePair.classify(
-        algebra, [algebra.projective(F, 0), algebra.projective(F, 1)], [], F
+        algebra, [algebra.projective(0, field=F), algebra.projective(1, field=F)], [], F
     )
     assert not full.is_pair
     assert full.rejection.condition() == 4
@@ -375,7 +375,7 @@ def test_the_exception_taxonomy_separates_answers_from_failures():
 def _assert_rejected_answer(algebra):
     # A rejected pair is an answer, so nothing raises and nothing has to be
     # caught to read it.
-    rejected = auslander.SupportTauTiltingPair.classify(algebra, [algebra.simple(F, 0)], [], F)
+    rejected = auslander.SupportTauTiltingPair.classify(algebra, [algebra.simple(0, field=F)], [], F)
     assert not rejected.is_pair
     return rejected
 
@@ -398,7 +398,7 @@ def _assert_catalog_failure():
 def _assert_pair_input_failures(algebra):
     with pytest.raises(ValueError, match="not basic"):
         auslander.SupportTauTiltingPair.classify(
-            algebra, [algebra.projective(F, 0), algebra.projective(F, 0)], [], F
+            algebra, [algebra.projective(0, field=F), algebra.projective(0, field=F)], [], F
         )
     with pytest.raises(ValueError, match="out of range"):
         auslander.SupportTauTiltingPair.classify(algebra, [], [4], F)

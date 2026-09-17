@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from ._core import (
+    CatalogAtlasArtifact,
+    CatalogAtlasArtifactVerifyLimits,
     CensusCheckpoint,
     CensusVerifyLimits,
     HomologicalCheckpoint,
@@ -14,9 +16,12 @@ from ._core import (
     HomologicalStreamVerifyLimits,
     SelfExtLocusArtifact,
     SelfExtLocusVerifyLimits,
+    VerifiedCatalogAtlasArtifact,
     VerifiedCensusCheckpoint,
+    VerifiedDerivedArtifact,
     VerifiedHomologicalCheckpoint,
     VerifiedSelfExtLocusArtifact,
+    verify_catalog_atlas_artifact,
 )
 from .checkpoint import (
     _read_utf8_bounded,
@@ -36,16 +41,42 @@ from .workflow import (
     _stream_config,
 )
 
+_COMPUTATION_SCHEMA = "auslander-computation-v1"
+_ATLAS_KIND = "catalog-atlas-v1"
+_KIND_LIMIT_TYPES = (
+    ("census", CensusVerifyLimits),
+    ("homological", HomologicalStreamVerifyLimits),
+    ("theorem", SelfExtLocusVerifyLimits),
+    ("atlas", CatalogAtlasArtifactVerifyLimits),
+)
+_SCHEMA_KINDS = (
+    ((DEFINITION_SCHEMA, DEFINITION_KIND), "definition"),
+    ((_COMPUTATION_SCHEMA, "census-v1"), "census"),
+    ((_COMPUTATION_SCHEMA, "homological-self-pair-stream-v2"), "homological"),
+    ((_COMPUTATION_SCHEMA, _ATLAS_KIND), "atlas"),
+    (("auslander-theorem-v1", "fixed-dimension-self-ext-locus-v1"), "theorem"),
+    (("auslander-derived-v1", None), "derived"),
+)
+_PORTABLE_LOADERS = (
+    ("census", CensusCheckpoint),
+    ("homological", HomologicalCheckpoint),
+    ("theorem", SelfExtLocusArtifact),
+    ("atlas", CatalogAtlasArtifact),
+)
+
 
 def _portable_kind(value: Any) -> str | None:
     kinds = (
         ("census", (CensusCheckpoint, VerifiedCensusCheckpoint)),
         ("homological", (HomologicalCheckpoint, VerifiedHomologicalCheckpoint)),
         ("theorem", (SelfExtLocusArtifact, VerifiedSelfExtLocusArtifact)),
+        ("atlas", (CatalogAtlasArtifact, VerifiedCatalogAtlasArtifact)),
     )
     for kind, classes in kinds:
         if isinstance(value, classes):
             return kind
+    if isinstance(value, VerifiedDerivedArtifact):
+        return "derived"
     return None
 
 
@@ -54,50 +85,62 @@ def _text_value(source: str | Path) -> str:
 
 
 def _default_input_bytes() -> int:
-    return max(
+    defaults = [
         CensusVerifyLimits().max_input_bytes,
         HomologicalStreamVerifyLimits().max_input_bytes,
         SelfExtLocusVerifyLimits().max_input_bytes,
-    )
+    ]
+    defaults.append(CatalogAtlasArtifactVerifyLimits().parse.max_input_bytes)
+    return max(defaults)
 
 
 def _bounded_text(source: str | Path, limits: Any | None) -> str:
     _validate_limit_type(limits)
-    maximum = _default_input_bytes()
-    if limits is not None:
-        maximum = getattr(limits, "max_input_bytes", maximum)
-    if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 0:
-        raise TypeError("limits.max_input_bytes must be a nonnegative integer")
+    maximum = _input_limit(limits)
     return _read_utf8_bounded(source, maximum, "portable value")
 
 
+def _input_limit(limits: Any | None) -> int:
+    maximum = _default_input_bytes()
+    if isinstance(limits, CatalogAtlasArtifactVerifyLimits):
+        maximum = limits.parse.max_input_bytes
+    elif limits is not None:
+        maximum = limits.max_input_bytes
+    if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 0:
+        raise TypeError("limits.max_input_bytes must be a nonnegative integer")
+    return maximum
+
+
 def _validate_limit_type(limits: Any | None) -> None:
-    if limits is None or isinstance(
-        limits,
-        (CensusVerifyLimits, HomologicalStreamVerifyLimits, SelfExtLocusVerifyLimits),
-    ):
+    types = (
+        CensusVerifyLimits,
+        HomologicalStreamVerifyLimits,
+        SelfExtLocusVerifyLimits,
+    )
+    types += (CatalogAtlasArtifactVerifyLimits,)
+    if limits is None or isinstance(limits, types):
         return
     raise TypeError(
         "limits must be a CensusVerifyLimits, HomologicalStreamVerifyLimits, "
-        "or SelfExtLocusVerifyLimits"
+        "SelfExtLocusVerifyLimits, or CatalogAtlasArtifactVerifyLimits"
     )
 
 
 def _validate_kind_limits(kind: str, limits: Any | None) -> None:
     if limits is None:
         return
-    expected = {
-        "census": CensusVerifyLimits,
-        "homological": HomologicalStreamVerifyLimits,
-        "theorem": SelfExtLocusVerifyLimits,
-    }.get(kind)
-    if expected is not None and not isinstance(limits, expected):
+    expected = _dispatch(_KIND_LIMIT_TYPES, kind)
+    if expected is None:
+        return
+    if not isinstance(limits, expected):
         raise TypeError(f"limits must be a {expected.__name__} for a {kind}")
 
 
 def _json_kind(text: str) -> str:
     try:
-        value = json.loads(text)
+        value = json.loads(
+            text, object_pairs_hook=_pairs, parse_constant=_reject_constant
+        )
     except json.JSONDecodeError as error:
         raise ValueError(
             f"invalid portable JSON at line {error.lineno}, column {error.colno}"
@@ -108,22 +151,114 @@ def _json_kind(text: str) -> str:
 
 
 def _schema_kind(schema: Any, kind: Any) -> str:
-    kinds = {
-        (DEFINITION_SCHEMA, DEFINITION_KIND): "definition",
-        ("auslander-computation-v1", "census-v1"): "census",
-        (
-            "auslander-computation-v1",
-            "homological-self-pair-stream-v2",
-        ): "homological",
-        (
-            "auslander-theorem-v1",
-            "fixed-dimension-self-ext-locus-v1",
-        ): "theorem",
-    }
-    result = kinds.get((schema, kind))
+    _check_schema_scalars(schema, kind)
+    result = _dispatch(_SCHEMA_KINDS, (schema, kind))
     if result is None:
         raise ValueError("unsupported portable value schema")
     return result
+
+
+def _check_schema_scalars(schema: Any, kind: Any) -> None:
+    scalar = (str, int, float, bool, type(None))
+    if not isinstance(schema, scalar) or not isinstance(kind, scalar):
+        raise ValueError("portable schema and kind must be scalar values") from None
+
+
+def _dispatch(table: tuple[tuple[Any, Any], ...], key: Any) -> Any:
+    return next((value for candidate, value in table if candidate == key), None)
+
+
+def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate portable field {key!r}")
+        result[key] = value
+    return result
+
+
+def _reject_constant(value: str) -> None:
+    raise ValueError(f"JSON constant {value!r} is not allowed")
+
+
+def _verify_definition(text: str, limits: Any | None) -> WorkflowDefinition:
+    if limits is not None:
+        raise TypeError("limits do not apply to a workflow definition")
+    return WorkflowDefinition.from_json(text)
+
+
+def _verify_census(text: str, limits: Any | None) -> Any:
+    _validate_kind_limits("census", limits)
+    effective = CensusVerifyLimits() if limits is None else limits
+    from ._core import verify_census_checkpoint
+
+    return verify_census_checkpoint(text, effective)
+
+
+def _verify_homological(text: str, limits: Any | None) -> Any:
+    _validate_kind_limits("homological", limits)
+    effective = HomologicalStreamVerifyLimits() if limits is None else limits
+    from ._core import verify_homological_checkpoint
+
+    return verify_homological_checkpoint(text, effective)
+
+
+def _verify_theorem(text: str, limits: Any | None) -> Any:
+    _validate_kind_limits("theorem", limits)
+    effective = SelfExtLocusVerifyLimits() if limits is None else limits
+    from ._core import verify_self_ext_locus_artifact
+
+    return verify_self_ext_locus_artifact(text, effective)
+
+
+def _verify_derived(text: str, limits: Any | None) -> Any:
+    if limits is not None:
+        raise TypeError("limits do not apply to a derived artifact")
+    from ._core import verify_derived_artifact
+
+    return verify_derived_artifact(text)
+
+
+def _verify_atlas(text: str, limits: Any | None) -> Any:
+    _validate_kind_limits("atlas", limits)
+    effective = CatalogAtlasArtifactVerifyLimits() if limits is None else limits
+
+    return verify_catalog_atlas_artifact(text, effective)
+
+
+_VERIFY_HANDLERS = (
+    ("definition", _verify_definition),
+    ("census", _verify_census),
+    ("homological", _verify_homological),
+    ("theorem", _verify_theorem),
+    ("derived", _verify_derived),
+    ("atlas", _verify_atlas),
+)
+
+
+def _verify_dispatched(kind: str, text: str, limits: Any | None) -> Any:
+    verifier = _dispatch(_VERIFY_HANDLERS, kind)
+    if verifier is None:
+        raise ValueError(f"unsupported portable value kind {kind!r}")
+    return verifier(text, limits)
+
+
+def verify_file_text(text: str, limits: Any | None = None) -> Any:
+    """Verify one portable value selected by its schema and payload kind."""
+    if not isinstance(text, str):
+        raise TypeError("portable value must be text")
+    _validate_limit_type(limits)
+    maximum = _input_limit(limits)
+    if len(text.encode("utf-8")) > maximum:
+        raise ValueError(f"portable value exceeds max_input_bytes={maximum}")
+    kind = _json_kind(text)
+    return _verify_dispatched(kind, text, limits)
+
+
+def verify_file(path: str | Path, limits: Any | None = None) -> Any:
+    """Read and verify one portable value with a bounded input reader."""
+    text = _bounded_text(path, limits)
+    return verify_file_text(text, limits)
 
 
 def _load_value(source: Any, limits: Any | None = None) -> tuple[str, Any, str]:
@@ -185,12 +320,11 @@ def _load_portable(
     limits: Any | None,
 ) -> tuple[str, Any, str]:
     _validate_kind_limits(kind, limits)
-    constructors = {
-        "census": CensusCheckpoint,
-        "homological": HomologicalCheckpoint,
-        "theorem": SelfExtLocusArtifact,
-    }
-    constructor = constructors[kind]
+    if kind == "derived":
+        return kind, _verify_derived(text, limits), "replayed"
+    constructor = _dispatch(_PORTABLE_LOADERS, kind)
+    if constructor is None:
+        raise ValueError(f"unsupported portable value kind {kind!r}")
     return kind, constructor(text, limits), "unverified"
 
 
@@ -200,7 +334,11 @@ def _portable_verification(value: Any) -> str:
         VerifiedHomologicalCheckpoint,
         VerifiedSelfExtLocusArtifact,
     )
-    return "replayed" if isinstance(value, verified) else "unverified"
+    if isinstance(value, verified):
+        return "replayed"
+    if isinstance(value, VerifiedCatalogAtlasArtifact):
+        return "replayed"
+    return "replayed" if isinstance(value, VerifiedDerivedArtifact) else "unverified"
 
 
 def _workflow_verification(value: WorkflowResult | VerifiedWorkflowResult) -> str:
@@ -217,13 +355,21 @@ def checkpoint(
 ) -> Path:
     """Write the selected portable value from a workflow atomically."""
     if stage not in {"latest", "census", "homological", "artifact"}:
-        raise ValueError("stage must be 'latest', 'census', 'homological', or 'artifact'")
-    if isinstance(value, WorkflowResult):
-        value = _workflow_stage(value, stage)
-    elif isinstance(value, VerifiedWorkflowResult):
-        value = _workflow_stage(value, stage)
-    elif stage != "latest":
+        raise ValueError(
+            "stage must be 'latest', 'census', 'homological', or 'artifact'"
+        )
+    return _write_checkpoint_value(_checkpoint_stage(value, stage), path)
+
+
+def _checkpoint_stage(value: Any, stage: str) -> Any:
+    if isinstance(value, (WorkflowResult, VerifiedWorkflowResult)):
+        return _workflow_stage(value, stage)
+    if stage != "latest":
         raise ValueError("stage applies only to a WorkflowResult")
+    return value
+
+
+def _write_checkpoint_value(value: Any, path: str | Path) -> Path:
     if isinstance(value, WorkflowDefinition):
         return _write_canonical_json(path, value.canonical_json)
     kind = _portable_kind(value)
@@ -231,6 +377,8 @@ def checkpoint(
         raise TypeError("value must be a workflow or portable checkpoint")
     if kind == "theorem":
         return write_theorem_artifact(path, value)
+    if kind in {"atlas", "derived"}:
+        return _write_canonical_json(path, value.canonical_json)
     return write_checkpoint(path, value)
 
 
@@ -250,15 +398,30 @@ def _workflow_stage(
 
 
 def verify(source: Any, limits: Any | None = None) -> Any:
-    """Replay-verify a definition, checkpoint, theorem artifact, or workflow."""
+    """Replay-verify a checkpoint, theorem artifact, or composed workflow."""
     if isinstance(source, VerifiedWorkflowResult):
-        if limits is not None:
-            raise TypeError("limits cannot be applied to a verified workflow")
-        return source
+        return _verify_verified_workflow(source, limits)
     if isinstance(source, WorkflowResult):
-        if limits is not None:
-            raise TypeError("limits cannot be applied to an in-memory workflow")
-        return source.verify()
+        return _verify_workflow(source, limits)
+    return _verify_loaded(source, limits)
+
+
+def _verify_verified_workflow(
+    source: VerifiedWorkflowResult,
+    limits: Any | None,
+) -> VerifiedWorkflowResult:
+    if limits is not None:
+        raise TypeError("limits cannot be applied to a verified workflow")
+    return source
+
+
+def _verify_workflow(source: WorkflowResult, limits: Any | None) -> Any:
+    if limits is not None:
+        raise TypeError("limits cannot be applied to an in-memory workflow")
+    return source.verify()
+
+
+def _verify_loaded(source: Any, limits: Any | None) -> Any:
     kind, value, _ = _load_value(source, limits)
     if _portable_verification(value) == "replayed":
         if limits is not None:
@@ -328,7 +491,9 @@ def _resume_homological(
 ) -> Any:
     if value.status != "cut":
         raise ValueError("only a cut homological checkpoint can resume")
-    verified = value if isinstance(value, VerifiedHomologicalCheckpoint) else value.verify()
+    verified = (
+        value if isinstance(value, VerifiedHomologicalCheckpoint) else value.verify()
+    )
     stream = verified.resume(
         HomologicalStreamBudget() if budget is None else budget,
         control=control,
@@ -357,7 +522,9 @@ def _resume_workflow(
         raise TypeError("budget applies only to a homological checkpoint")
     census = _resume_census(source.census, census_limits, control)
     if census.status != "complete":
-        return WorkflowResult(source.definition, census, None, None, source.stream_config)
+        return WorkflowResult(
+            source.definition, census, None, None, source.stream_config
+        )
     config = _stream_config(source.stream_config)
     stream = _start_stream(source.definition, census.verify(), config, control)
     homological = _drain_stream(stream)

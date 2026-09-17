@@ -19,12 +19,12 @@ def classify_tilting(module):
 def pd2_dual(field):
     algebra = auslander.Algebra.an_with_relations(3, [(0, 2)])
     module = algebra.module(
-        field,
         [2, 2, 1],
         [
             [[0, 0], [1, 0]],
             [[0], [1]],
         ],
+        field=field,
     )
     return algebra, module
 
@@ -50,7 +50,7 @@ def add_t_complex(tilting, complex_):
 def test_split_target_presentation_keeps_maps_relations_and_work(prime):
     field = auslander.PrimeField(prime)
     algebra = auslander.Algebra.dual_numbers()
-    tilting = classify_tilting(algebra.projective(field, 0))
+    tilting = classify_tilting(algebra.projective(0, field=field))
     target = tilting.target_presentation(auslander.TargetLimits())
     _assert_split_target_shape(target)
     _assert_split_target_work(target)
@@ -82,7 +82,7 @@ def _assert_split_target_coordinates(target):
 def test_pd1_and_pd2_targets_cover_opposite_orientation(prime):
     field = auslander.PrimeField(prime)
     hereditary = auslander.Algebra.linear_an(2)
-    pd1 = hereditary.module(field, [2, 1], [[[1], [0]]])
+    pd1 = hereditary.module([2, 1], [[[1], [0]]], field=field)
     pd1_target = classify_tilting(pd1).target_presentation(auslander.TargetLimits())
     assert pd1_target.target.quiver.arrows == [(1, 0)]
     assert pd1_target.verify()
@@ -111,7 +111,7 @@ def test_pd1_and_pd2_targets_cover_opposite_orientation(prime):
 )
 def test_target_cuts_retain_the_first_rejected_reservation(prime, change, stage_kind):
     field = auslander.PrimeField(prime)
-    tilting = classify_tilting(auslander.Algebra.dual_numbers().projective(field, 0))
+    tilting = classify_tilting(auslander.Algebra.dual_numbers().projective(0, field=field))
     cut = tilting.target_presentation(auslander.TargetLimits(**change))
 
     assert isinstance(cut, auslander.IncompleteTargetPresentation)
@@ -130,11 +130,11 @@ def test_target_cuts_retain_the_first_rejected_reservation(prime, change, stage_
 def test_bounded_ext_algebra_keeps_complete_and_cut_distinct(prime):
     field = auslander.PrimeField(prime)
     hereditary = auslander.Algebra.linear_an(2)
-    projective = hereditary.projective(field, 0)
+    projective = hereditary.projective(0, field=field)
     complete = projective.ext_algebra(2)
     _assert_complete_ext_algebra(complete)
 
-    periodic = auslander.Algebra.dual_numbers().simple(field, 0)
+    periodic = auslander.Algebra.dual_numbers().simple(0, field=field)
     cut = periodic.ext_algebra(4)
     _assert_cut_ext_algebra(cut)
 
@@ -159,7 +159,7 @@ def _assert_cut_ext_algebra(cut):
 @pytest.mark.parametrize("prime", [2, 5])
 def test_ext_tensors_expose_products_and_the_unit(prime):
     field = auslander.PrimeField(prime)
-    simple = auslander.Algebra.truncated_poly(3).simple(field, 0)
+    simple = auslander.Algebra.truncated_poly(3).simple(0, field=field)
     algebra = simple.ext_algebra(4)
 
     unit = algebra.unit
@@ -233,7 +233,7 @@ def _assert_ext_record_order(algebra, records):
 @pytest.mark.parametrize("prime", [2, 5])
 def test_bounded_homotopy_checks_shifts_cones_and_quotients(prime):
     field = auslander.PrimeField(prime)
-    simple = auslander.Algebra.linear_an(1).simple(field, 0)
+    simple = auslander.Algebra.linear_an(1).simple(0, field=field)
     identity = simple.morphism(simple, [[[1]]])
     one_term = auslander.BoundedComplex(0, [simple], [])
     _assert_complex_shift(one_term)
@@ -287,7 +287,7 @@ def _assert_degree_one_quotient(one_term):
 @pytest.mark.parametrize("prime", [2, 5])
 def test_explicit_homotopy_contracts_the_identity_differential(prime):
     field = auslander.PrimeField(prime)
-    simple = auslander.Algebra.linear_an(1).simple(field, 0)
+    simple = auslander.Algebra.linear_an(1).simple(0, field=field)
     identity = simple.morphism(simple, [[[1]]])
     complex_ = auslander.BoundedComplex(0, [simple, simple], [identity])
     identity_chain = complex_.identity()
@@ -484,7 +484,7 @@ def test_derived_transport_rejections_and_homotopy_overflow_are_typed():
         )
 
     for vertex in range(target.target.num_vertices):
-        nonprojective = target.target.simple(field, vertex)
+        nonprojective = target.target.simple(vertex, field=field)
         complex_ = auslander.BoundedComplex(0, [nonprojective], [])
         try:
             certificate.transport.target_complex(complex_)
@@ -494,7 +494,7 @@ def test_derived_transport_rejections_and_homotopy_overflow_are_typed():
     else:
         pytest.fail("the nonsemisimple target has a nonprojective simple")
 
-    edge = auslander.Algebra.linear_an(1).simple(field, 0)
+    edge = auslander.Algebra.linear_an(1).simple(0, field=field)
     maximal = auslander.BoundedComplex(2**31 - 1, [edge], [])
     with pytest.raises(OverflowError, match="cannot be shifted"):
         auslander.HomotopyHom(maximal, maximal, 1)
@@ -503,7 +503,7 @@ def test_derived_transport_rejections_and_homotopy_overflow_are_typed():
 def test_ext_successor_degree_overflow_is_typed():
     field = auslander.PrimeField(5)
     algebra = auslander.Algebra.linear_an(1)
-    simple = algebra.simple(field, 0)
+    simple = algebra.simple(0, field=field)
     largest_usize = 2 * sys.maxsize + 1
     with pytest.raises(OverflowError):
         simple.ext_dim(simple, largest_usize)

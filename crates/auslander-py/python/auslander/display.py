@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from html import escape
-import math
 from typing import Any
+
+from .explanation import Explanation, explain  # noqa: F401
 
 
 @dataclass(frozen=True)
@@ -25,17 +27,6 @@ class Rendered:
 
     def _repr_svg_(self) -> str | None:
         return self.svg
-
-
-@dataclass(frozen=True)
-class Explanation:
-    """The outcome variant, completed work, first open item, and next action."""
-
-    variant: str
-    status: str
-    completed: str
-    unfinished: str | None
-    next_action: str | None
 
 
 def _bounded(items: list[str], limit: int) -> tuple[list[str], int]:
@@ -61,10 +52,14 @@ def _quiver_svg_body(count: int, arrows: list[tuple[int, int]]) -> str:
         for index in range(count)
     ]
     parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
-        f'viewBox="0 0 {width} {height}">',
-        '<defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="3" '
-        'orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#555"/></marker></defs>',
+        (
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+            f'viewBox="0 0 {width} {height}">'
+        ),
+        (
+            '<defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="3" '
+            'orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#555"/></marker></defs>'
+        ),
     ]
     for source, target in arrows:
         x1, y1 = points[source]
@@ -168,6 +163,106 @@ def _render_artifact(value: Any, _: int) -> tuple[list[str], str | None]:
     ], None
 
 
+def _field_text(value: Any) -> str:
+    """Return the public prime-field label for a catalog value."""
+    field = getattr(value, "p", value)
+    return f"F_{field}"
+
+
+def _render_catalog(value: Any, _: int) -> tuple[list[str], str | None]:
+    """Render catalog provenance and certified entry dimensions."""
+    entries = value.entries
+    lines = [
+        (
+            f"IndecomposableCatalog: {len(entries)} entries, "
+            f"provenance {value.provenance}, field {_field_text(value.field)}"
+        )
+    ]
+    lines.extend(f"  {index}: {entry.dims}" for index, entry in enumerate(entries))
+    return lines, None
+
+
+def _render_higher_orthogonality(value: Any, _: int) -> tuple[list[str], str | None]:
+    """Render higher Ext orthogonality rows and decisions."""
+    lines = [
+        (
+            f"HigherOrthogonality: chosen={value.chosen}, max_degree={value.max_degree}, "
+            f"left={value.left}, right={value.right}, rigid={value.is_rigid}"
+        ),
+        f"  two-sided maximal={value.is_two_sided_maximal}",
+    ]
+    lines.extend(
+        f"  pair {pair.source} -> {pair.target}: {pair.dimensions}"
+        for pair in value.pairs
+    )
+    return lines, None
+
+
+def _render_ext_table(value: Any, _: int) -> tuple[list[str], str | None]:
+    """Render an ordered catalog Ext table."""
+    lines = [
+        (
+            f"CatalogExtTable: {value.catalog_len} entries, "
+            f"degree bound {value.max_degree}, rows {len(value)}"
+        )
+    ]
+    lines.extend(
+        f"  {row.source} -> {row.target}: {row.dimensions}"
+        for row in value.rows
+    )
+    return lines, None
+
+
+def _render_atlas(value: Any, _: int) -> tuple[list[str], str | None]:
+    """Render catalog atlas metadata and cached work counts."""
+    work = value.work
+    lines = [
+        (
+            f"CatalogAtlas: {len(value)} entries, provenance {value.provenance}, "
+            f"field {_field_text(value.field)}, degree bound {value.max_degree}"
+        ),
+        (
+            f"  pairs={work.pairs}, ext_cells={work.ext_cells}, "
+            f"resolutions={work.resolutions}, ext_tables={work.ext_tables}"
+        ),
+    ]
+    return lines, None
+
+
+def _render_multiplicity(value: Any, _: int) -> tuple[list[str], str | None]:
+    """Render multiplicity status, verification state, and retained rows."""
+    lines = [
+        (
+            f"MultiplicityResult: status={value.status}, verification={value.verification}, "
+            f"target={value.target_dimensions}, solutions={len(value)}"
+        ),
+        f"  nodes_visited={value.nodes_visited}",
+    ]
+    lines.extend(f"  {index}: {solution}" for index, solution in enumerate(value.solutions))
+    return lines, None
+
+
+def _render_catalog_atlas_artifact(value: Any, _: int) -> tuple[list[str], str | None]:
+    """Render catalog atlas artifact metadata and multiplicity rows."""
+    lines = [
+        (
+            f"{type(value).__name__}: status={value.status}, "
+            f"verification={value.verification}, field=F_{value.field}, "
+            f"provenance={value.provenance}"
+        ),
+        (
+            f"  target={value.target_dimensions}, max_degree={value.max_degree}, "
+            f"result_rows={len(value.result_rows)}"
+        ),
+        f"  fingerprint={value.fingerprint}",
+    ]
+    lines.extend(
+        f"  {index}: {row.multiplicities} -> {row.self_ext}"
+        for index, row in enumerate(value.result_rows)
+    )
+    return lines, None
+
+
 def _render_graph(value: Any) -> tuple[list[str], str | None]:
     lines = [f"{type(value).__name__}: {value.vertex_count} vertices, {len(value.edges)} edges, stop {value.stop}"]
     lines.extend(
@@ -198,7 +293,7 @@ def _support_mutation_line(mutation: Any) -> str:
 
 
 def _support_graph_data(value: Any) -> tuple[list[Any], list[Any], str, int]:
-    if type(value).__name__ == "ClosedSupportTauTiltingGraph":
+    if hasattr(value, "pairs") and hasattr(value, "mutations"):
         return value.pairs(), value.mutations(), "complete", value.work_units()
     return value.vertices_found, value.verified_mutations, value.reason, value.work_units()
 
@@ -206,23 +301,23 @@ def _support_graph_data(value: Any) -> tuple[list[Any], list[Any], str, int]:
 def _render_support_graph(value: Any, _: int) -> tuple[list[str], str | None]:
     vertices, mutations, stop, work_units = _support_graph_data(value)
     lines = [
-        f"{type(value).__name__}: {len(vertices)} vertices, {len(mutations)} edges, "
-        f"stop {stop}, work {work_units}"
+        (
+            f"{type(value).__name__}: {len(vertices)} vertices, {len(mutations)} edges, "
+            f"stop {stop}, work {work_units}"
+        )
     ]
     lines.extend(_support_pair_line(index, pair) for index, pair in enumerate(vertices))
     lines.extend(_support_mutation_line(mutation) for mutation in mutations)
-    if type(value).__name__ == "IncompleteSupportTauTiltingGraph":
+    if hasattr(value, "diagnostics"):
         lines.append(f"  diagnostics: {value.diagnostics!r}")
     return lines, None
 
 
 def _render_optional(value: Any) -> tuple[list[str], str | None] | None:
-    if hasattr(value, "keys"):
-        if hasattr(value, "edges"):
-            return _render_graph(value)
-    elif hasattr(value, "vertices"):
-        if hasattr(value, "edges"):
-            return _render_vertices(value)
+    if hasattr(value, "keys") and hasattr(value, "edges"):
+        return _render_graph(value)
+    if hasattr(value, "vertices") and hasattr(value, "edges"):
+        return _render_vertices(value)
     return None
 
 
@@ -263,6 +358,13 @@ _RENDERERS = {
     "DerivedHom": _render_derived_hom,
     "DerivedTransportResult": _render_transport,
     "VerifiedDerivedArtifact": _render_artifact,
+    "IndecomposableCatalog": _render_catalog,
+    "HigherOrthogonality": _render_higher_orthogonality,
+    "CatalogExtTable": _render_ext_table,
+    "CatalogAtlas": _render_atlas,
+    "MultiplicityResult": _render_multiplicity,
+    "CatalogAtlasArtifact": _render_catalog_atlas_artifact,
+    "VerifiedCatalogAtlasArtifact": _render_catalog_atlas_artifact,
     "ClosedSupportTauTiltingGraph": _render_support_graph,
     "IncompleteSupportTauTiltingGraph": _render_support_graph,
 }
@@ -291,104 +393,6 @@ def show(value: Any, *, max_items: int = 200, max_chars: int = 12000) -> Rendere
     html = f"<pre>{escape(text)}</pre>"
     return Rendered(text, html, svg, omitted)
 
-
-def explain(value: Any) -> Explanation:
-    """Describe a typed result without parsing exception or repr text."""
-    variant = type(value).__name__
-    if variant == "IncompletePerfectReplacement":
-        return _explain_replacement_cut(value, variant)
-    if variant == "IncompleteDerivedHom":
-        return _explain_derived_hom_cut(value, variant)
-    return _explain_standard(value, variant)
-
-
-def _explain_standard(value: Any, variant: str) -> Explanation:
-    if hasattr(value, "is_tilting"):
-        return _explain_tilting(value, variant)
-    if hasattr(value, "stop"):
-        return _explain_stop(value, variant)
-    if _is_cut_variant(variant):
-        return _explain_cut(value, variant)
-    if hasattr(value, "verify"):
-        return Explanation(variant, "complete", "stored certificate", None, None)
-    return Explanation(variant, "value", "construction", None, None)
-
-
-def _explain_tilting(value: Any, variant: str) -> Explanation:
-    answer = value.is_tilting
-    if answer is True:
-        return Explanation(variant, "complete", "tilting obligations", None, None)
-    if answer is False:
-        return Explanation(variant, "rejected", "self-extension check", None, None)
-    blocker = type(value.blocker).__name__ if value.blocker is not None else "classification"
-    return Explanation(variant, "undetermined", "checked prefix", blocker, "raise the named limit or inspect the blocker")
-
-
-def _explain_stop(value: Any, variant: str) -> Explanation:
-    return Explanation(
-        variant,
-        "incomplete",
-        f"{value.completed_mutations} directed mutations",
-        value.stop,
-        "raise the named discovery limit or inspect blocked mutations",
-    )
-
-
-def _explain_replacement_cut(value: Any, variant: str) -> Explanation:
-    action = "raise the named resolution limit or inspect the next kernel"
-    if value.kind == "cancelled":
-        action = "rerun without cancellation or inspect the next kernel"
-    return Explanation(
-        variant,
-        "incomplete",
-        f"verified prefix length {value.prefix_length}",
-        value.kind,
-        action,
-    )
-
-
-def _explain_derived_hom_cut(value: Any, variant: str) -> Explanation:
-    next_degree = value.next_degree
-    action = "raise the named limit or inspect the replacement cut"
-    if value.kind in {"replacement_cancelled", "cancelled"}:
-        action = "rerun without cancellation or inspect the next degree"
-    elif next_degree is not None:
-        action = f"raise the named limit or inspect degree {next_degree}"
-    return Explanation(
-        variant,
-        "incomplete",
-        f"verified {len(value.dimensions)} graded dimensions",
-        value.kind,
-        action,
-    )
-
-
-def _explain_cut(value: Any, variant: str) -> Explanation:
-    kind = getattr(value, "kind", None)
-    if kind is not None:
-        unfinished = kind if isinstance(kind, str) else type(kind).__name__
-        return Explanation(
-            variant,
-            "incomplete",
-            "verified prefix",
-            unfinished,
-            "inspect the typed cut",
-    )
-    reason = getattr(value, "reason", None)
-    unfinished = (
-        reason
-        if isinstance(reason, str)
-        else type(reason).__name__
-        if reason is not None
-        else "incomplete"
-    )
-    return Explanation(variant, "incomplete", "verified prefix", unfinished, "inspect the typed cut")
-
-
-def _is_cut_variant(variant: str) -> bool:
-    if variant.startswith("Incomplete"):
-        return True
-    return variant.endswith("Cut")
 
 
 def _graph_dot(value: Any, max_items: int) -> str:

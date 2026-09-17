@@ -241,19 +241,15 @@ pub struct ProductWitness { lifts: Vec<Morphism> }
 `ProductWitness::verify(alpha, beta, product)` rechecks the two lift
 identity families, the reduction by multiplication and membership, and
 that the product space's stored cocycle, coboundary, and complement bases
-equal a fresh recomputation from the live endpoint modules. (Added during
-the layer review: membership alone cannot reject a tampered coboundary
-basis when the raw product cocycle already lies in the complement span,
-which holds on every cheap fixture, so the mutation bullet of section 15
-needs the basis recomparison.) The plain `then` discards the witness.
+equal a fresh recomputation from the live endpoint modules. Membership alone
+cannot reject a tampered coboundary basis when the raw product cocycle already
+lies in the complement span. The corruption tests in section 15 require the
+basis recomparison. The plain `then` discards the witness.
 
-The recomparison is now one shared helper, `ExtSpace::matches_recomputation`,
-because `ArDualityWitness::verify` needed the same check and did not have
-it: it consumed the class's space entirely on trust while every
-recomputation it performed ran through that same space, so a forged space
-validated itself. The boundary each verifier actually holds is stated in
-its own docstring: the product witness recomputes the product space and
-trusts the two factor spaces, and the AR duality witness recomputes the
+`ExtSpace::matches_recomputation` checks the basis data for both product and
+AR duality witnesses. Recomputing through the stored space alone would allow
+a forged space to validate itself. The product witness recomputes the product
+space and trusts the two factor spaces. The AR duality witness recomputes the
 space but takes the sequence and class from the caller.
 
 `ExtClass::then_in` and `ProductWitness::verify_against` take a
@@ -397,11 +393,9 @@ The distinguished class (design bullet 1: deterministic, not canonical):
   `chosen_ar_class`; documentation states that the class is deterministic,
   that any nonzero socle class gives an almost-split sequence isomorphic
   to the chosen one after suitable automorphisms of the end terms, and
-  never claims a canonical class. (Corrected during the layer review: this
-  paragraph first said "unique up to equivalence of extensions", which is
-  wrong. Distinct socle classes are inequivalent as extensions with fixed
-  ends; only the sequences are isomorphic, through endpoint
-  automorphisms.)
+  never claims a canonical class. Distinct socle classes are inequivalent as
+  extensions with fixed ends; only the sequences are isomorphic, through endpoint
+  automorphisms.
 
 Duality consistency checks, both internal gates (never oracle fields):
 
@@ -536,32 +530,34 @@ deterministic representatives.
 ## 12. Catalogs and the valued AR quiver (design bullets 5 and the valuation correction)
 
 ```rust
-pub enum CatalogProvenance { Nakayama, DynkinZeroIdeal }
+pub enum CatalogProvenance { Nakayama, DynkinZeroIdeal, GentleTree }
 
 pub struct IndecomposableCatalog {
     algebra: Arc<Algebra>,
     provenance: CatalogProvenance,
-    entries: Vec<IndecomposableModule>,
+    entries: Vec<Arc<IndecomposableModule>>,
 }
 ```
 
-- Constructors wrap the two existing complete enumerations:
+- Route constructors wrap the three complete enumerations:
   `IndecomposableCatalog::nakayama(algebra)` over
-  `nakayama_indecomposables` and `IndecomposableCatalog::dynkin(algebra)`
-  over `dynkin_indecomposables`. Entry order is enumerator order; the
-  stable catalog identifier of an entry is its index. Completeness
-  provenance is the wrapped theorem (Nakayama classification, Gabriel);
-  a plain module list can never become a catalog.
+  `nakayama_indecomposables`, `IndecomposableCatalog::dynkin(algebra)` over
+  `dynkin_indecomposables`, and `IndecomposableCatalog::gentle_tree(algebra)`
+  over the checked string enumeration. `IndecomposableCatalog::complete`
+  selects them in Dynkin, Nakayama, then gentle-tree order. Entry order is
+  enumerator order; the stable catalog identifier of an entry is its index.
+  Completeness provenance is the wrapped theorem. A plain module list can
+  never become a catalog.
 - `ar_quiver(algebra: &Arc<Algebra>) -> Result<ArQuiver, ArQuiverError>`
-  dispatches deterministically: zero ideal and Dynkin shape first, then
-  Nakayama shape, else
-  `ArQuiverError::UnsupportedDomain { dynkin, nakayama }` carrying both
-  rejections.
+  dispatches deterministically through `IndecomposableCatalog::complete`,
+  else returns `ArQuiverError::UnsupportedDomain { dynkin, nakayama,
+  gentle }` carrying all rejections. `ar_quiver_from_catalog` clones an
+  existing catalog and computes its radicals without rerunning classification.
 
 ```rust
 pub struct ArVertex {
     id: usize,
-    module: IndecomposableModule,
+    module: Arc<IndecomposableModule>,
     residue_degree: usize,
     projective: bool,
     injective: bool,
@@ -592,7 +588,7 @@ pub enum ArrowValuation {
   degrees are 1; otherwise `Valued { .. }`. There is no bare integer
   `multiplicity` accessor and no `None` whose reason the caller must
   remember.
-- On the two catalog domains every indecomposable is a brick or
+- On the three catalog domains every indecomposable is a brick or
   uniserial with residue degree 1, and the acceptance suite asserts this.
   (Deviation, recorded here: this bullet first promised valuation
   arithmetic exercised at the `rad`/`Irr` level by the F_8-endomorphism
@@ -613,10 +609,11 @@ pub enum ArrowValuation {
   `ArDuality` witness route and the `ExhaustiveCatalog` witness route
   must both validate the same sequence.
 
-No work budget is introduced for AR-quiver construction in this layer. Both
-catalog domains are bounded: a Nakayama catalog has `dim A` entries, and a
-Dynkin one has at most 120, the positive-root count of E8. The pair loop is
-therefore small and exact. Consequence of the consensus rule "no
+No work budget is introduced for AR-quiver construction in this layer. The
+three catalog domains are bounded: a Nakayama catalog has `dim A` entries, a
+Dynkin one has at most 120, the positive-root count of E8, and a gentle-tree
+catalog has at most `n(n + 1) / 2` entries for `n` vertices. The pair loop is
+therefore finite and exact. Consequence of the consensus rule "no
 truncation state unless a budget is actually enforced": there is no
 AR truncation error, and a constructed `ArQuiver` is always complete for
 its domain. If a later release adds larger domains, it adds the budget and
@@ -638,9 +635,8 @@ The suite pins each of these:
   wrapper.
 - The zero Ext^1 class: `from_ext1` yields the split sequence with a
   `SplitWitness`.
-- Empty catalog: impossible (a positive-dimensional algebra has at least
-  one simple per vertex; both enumerators return at least `num_vertices`
-  entries); asserted, not handled.
+- Empty catalog: legal for a zero-vertex algebra. Each vertex supplies a
+  simple module, so a catalog has at least `num_vertices` entries.
 - Isolated AR vertices (no incoming or outgoing arrows): legal output.
 - Characteristic 2: every acceptance family runs over F_2 and F_5 at
   minimum, matching the earlier matrix.

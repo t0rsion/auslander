@@ -24,15 +24,14 @@ relations a*b = 0
 session = auslander.Session(5)
 F = session.field
 A = session.algebra("A", text)
-X = auslander.BoundedComplex(0, [A.simple(F, 0)], [])
-Y = auslander.BoundedComplex(0, [A.simple(F, 2)], [])
+X = auslander.BoundedComplex(0, [A.simple(0)], [])
+Y = auslander.BoundedComplex(0, [A.simple(2)], [])
 
 replacement = X.perfect_replacement()
 assert replacement.verify()
 assert X.derived_hom(Y).dimension(2) == 1
 
 DA = A.module(
-    F,
     [2, 2, 1],
     [[[0, 0], [1, 0]], [[0], [1]]],
 )
@@ -45,7 +44,7 @@ transport = auslander.DerivedEquivalenceCertificate(
 ).automatic_transport
 assert transport.forward(X).verify()
 
-B = auslander.Algebra.linear_an(2)
+B = auslander.Algebra.linear_an(2).over(F)
 graph = auslander.discover_equivalences(
     B,
     F,
@@ -114,9 +113,9 @@ target.
 
 ```python
 F = auslander.PrimeField(5)
-A = auslander.Algebra.dual_numbers()
-S = A.simple(F, 0)
-P = A.projective(F, 0)
+A = auslander.Algebra.dual_numbers().over(F)
+S = A.simple(0)
+P = A.projective(0)
 
 omega = S.syzygy()
 omega_inverse = S.cosyzygy()

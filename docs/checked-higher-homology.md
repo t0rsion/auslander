@@ -397,11 +397,12 @@ Python exposes the same distinctions as Rust:
 `ExactComplex` or `NonExactWitness`. The witness exposes `index`,
 `dimension_vector`, and `verify()`.
 
-`Algebra.hochschild_cohomology(field, max_degree, limits)` returns
-`HochschildCohomology` or `IncompleteHochschildCohomology`. The complete class
-has `degree(index)`. The incomplete class has `completed_degrees`, `reason`,
-`diagnostics`, and `verify()`, but no accessor that can name an uncomputed
-degree.
+`Algebra.hochschild_cohomology(max_degree, limits, field=None)` returns
+`HochschildCohomology` or `IncompleteHochschildCohomology`. A field-free
+monomial algebra needs `field`; a bound algebra may omit it. The complete
+class has `degree(index)`. The incomplete class has `completed_degrees`,
+`reason`, `diagnostics`, and `verify()`, but no accessor that can name an
+uncomputed degree.
 
 `ClassicalTiltingModule.classify(module, limits)` returns
 `ClassicalTiltingResult`. Exactly one of `tilting`, `rejection`, and `blocker`

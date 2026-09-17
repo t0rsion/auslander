@@ -4,6 +4,58 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-09-18
+
+Version 0.9 adds reusable catalog computations and checked gentle-tree
+classification. The [validation record](docs/release-v09-validation.md) states the checks.
+The [migration guide](docs/migration-v09.md) covers breaking Python calls and
+saved sessions.
+
+### Added
+
+- `CatalogAtlas` caches ordered Ext dimensions over a complete catalog and
+  shares each source resolution across its target rows. Checked bilinear
+  scores evaluate direct sums without materializing them.
+- Fixed-dimension queries enumerate catalog multiplicity vectors. Complete
+  results cover every solution of the dimension equation. Row and search
+  limits return a typed Cut with its exact retained prefix.
+- `catalog-atlas-v1` artifacts store the algebra certificate, field, catalog
+  order, dimensions, degree bound, limits, status, and rows. Replay checks
+  complete coverage or the recorded Cut prefix and recomputes generic Ext
+  cells. Omitted and duplicate rows fail verification.
+- Gentle-tree recognition checks the reduced monomial quadratic relations,
+  gentle continuation conditions, and connected underlying simple tree.
+  Enumeration retains one string from each inverse pair. Catalog consumers
+  accept the resulting complete catalog.
+- Catalog coordinates map supplied modules to multiplicities with checked
+  isomorphisms. Undecided decomposition or matching remains typed Unknown;
+  matching budgets return Cut.
+- Python exposes catalogs, cached Ext queries, higher orthogonality, and
+  portable atlas replay. The executed notebook and research example use a
+  gentle tree over two prime fields and compare catalog queries with a raw
+  census. Whole-workflow benchmarks include setup and verification costs.
+
+### Changed
+
+- Python module constructors take the vertex or module data first and an
+  optional field last. Named algebra constructors accept a field, and
+  `algebra.over(field)` binds a field while retaining the cached algebra.
+- `auslander-session-v2` stores the field of each algebra and module recipe.
+  Loading rejects v1 documents. Reusing a name with a different recipe fails.
+- Explanations distinguish computation status from verification state.
+  Replay verification preserves a Cut status. Portable dispatch validates
+  the schema and kind before choosing a verifier.
+
+### Limits
+
+- Complete catalogs cover Nakayama, zero-ideal Dynkin, and gentle-tree
+  algebras. General string algebras and bands remain outside this release.
+- Atlas results cover the stored degree interval. Ext dimensions do not
+  determine Yoneda products or imply vanishing in higher degrees.
+- Replay shares library algorithms. GAP/QPA comparisons provide independent
+  evidence for the tested fixtures. Named work ceilings do not bound every
+  intermediate matrix allocation or wall-clock duration.
+
 ## [0.8.0] - 2026-09-10
 
 Version 0.8 adds certified discovery, bounded research streams, and
@@ -162,8 +214,7 @@ complexes, computes witnessed results, and exports deterministic receipts.
 
 ### Changed
 
-- The two unreleased local development lines now form one public v0.7. The
-  classical tilting example remains available as `classical_tilting`; `v07`
+- The classical tilting example remains available as `classical_tilting`; `v07`
   runs the complete workbench path.
 - Production modules and tests were split at direct cyclomatic complexity 11.
   Touched functions stay at 10 or below. Shared construction, parsing,

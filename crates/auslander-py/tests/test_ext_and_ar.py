@@ -28,8 +28,8 @@ def square(field):
 def test_ext_space_dims_match_ext_dim_on_truncated_poly():
     F = auslander.PrimeField(5)
     A = truncated(3)
-    uniserial = A.module(F, [2], [[[0, 1], [0, 0]]])
-    modules = [A.simple(F, 0), uniserial, A.projective(F, 0)]
+    uniserial = A.module([2], [[[0, 1], [0, 0]]], field=F)
+    modules = [A.simple(0, field=F), uniserial, A.projective(0, field=F)]
     _assert_truncated_ext_grid(modules)
     _assert_truncated_ext_table(A, F)
 
@@ -47,14 +47,14 @@ def _assert_truncated_ext_grid(modules):
 
 
 def _assert_truncated_ext_table(A, F):
-    S = A.simple(F, 0)
+    S = A.simple(0, field=F)
     assert [S.ext_space(S, k).dim for k in range(4)] == [1, 1, 1, 1]
 
 
 def test_ext_space_dims_match_ext_dim_on_commutative_square():
     F = auslander.PrimeField(5)
     A = square(F)
-    simples = [A.simple(F, v) for v in range(4)]
+    simples = [A.simple(v, field=F) for v in range(4)]
     for m in simples:
         for n in simples:
             for k in range(3):
@@ -66,7 +66,7 @@ def test_ext_space_dims_match_ext_dim_on_commutative_square():
 def test_ext_class_arithmetic_and_representatives():
     F = auslander.PrimeField(5)
     A = truncated(3)
-    S = A.simple(F, 0)
+    S = A.simple(0, field=F)
     space = S.ext_space(S, 1)
     e = space.basis()[0]
     _assert_ext_class_arithmetic(space, e)
@@ -123,10 +123,10 @@ def _assert_ext_unit(S, e):
 def test_incompatible_spaces_raise_instead_of_answering_false():
     F = auslander.PrimeField(5)
     A = truncated(3)
-    S = A.simple(F, 0)
+    S = A.simple(0, field=F)
     # A second simple object is a second module, so its Ext space is a
     # different space even though the two modules look alike.
-    other = A.simple(F, 0)
+    other = A.simple(0, field=F)
     left = S.ext_space(S, 1).basis()[0]
     right = other.ext_space(other, 1).basis()[0]
     with pytest.raises(auslander.IncompatibleSpacesError):
@@ -147,14 +147,14 @@ def test_incompatible_spaces_raise_instead_of_answering_false():
 
 def test_yoneda_square_vanishes_on_x3_and_survives_on_x2():
     F = auslander.PrimeField(5)
-    S3 = truncated(3).simple(F, 0)
+    S3 = truncated(3).simple(0, field=F)
     e3 = S3.ext_space(S3, 1).basis()[0]
     square3 = e3.then(e3)
     assert square3.degree == 2
     assert S3.ext_dim(S3, 2) == 1
     assert square3.is_zero
 
-    S2 = auslander.Algebra.dual_numbers().simple(F, 0)
+    S2 = auslander.Algebra.dual_numbers().simple(0, field=F)
     e2 = S2.ext_space(S2, 1).basis()[0]
     square2 = e2.then(e2)
     assert square2.degree == 2
@@ -165,7 +165,7 @@ def test_yoneda_square_vanishes_on_x3_and_survives_on_x2():
 def test_extension_round_trip_recovers_the_class():
     F = auslander.PrimeField(5)
     A = truncated(3)
-    S = A.simple(F, 0)
+    S = A.simple(0, field=F)
     space = S.ext_space(S, 1)
     _assert_truncated_extensions(space)
     _assert_linear_extension(F)
@@ -182,8 +182,8 @@ def _assert_truncated_extensions(space):
 
 def _assert_linear_extension(F):
     B = auslander.Algebra.linear_an(3)
-    S0 = B.simple(F, 0)
-    S1 = B.simple(F, 1)
+    S0 = B.simple(0, field=F)
+    S1 = B.simple(1, field=F)
     cls = S0.ext_space(S1, 1).basis()[0]
     seq = cls.extension()
     assert seq.sub.dims == [0, 1, 0]
@@ -196,7 +196,7 @@ def _assert_linear_extension(F):
 def test_split_and_non_split_carry_their_witnesses():
     F = auslander.PrimeField(5)
     A = truncated(3)
-    S = A.simple(F, 0)
+    S = A.simple(0, field=F)
     space = S.ext_space(S, 1)
 
     split = space.zero_class().extension()
@@ -234,7 +234,7 @@ def _assert_non_split_extension(non_split):
 def test_almost_split_of_the_simple_over_x3():
     F = auslander.PrimeField(5)
     A = truncated(3)
-    S = A.simple(F, 0)
+    S = A.simple(0, field=F)
     seq = S.almost_split()
     _assert_almost_split_sequence(seq)
     _assert_almost_split_summary(seq)
@@ -286,7 +286,7 @@ def test_almost_split_middle_term_over_x3_splits_into_the_neighbours():
     F = auslander.PrimeField(5)
     A = truncated(3)
     # The uniserial P/rad^2: its almost-split sequence has middle S + P.
-    M = A.module(F, [2], [[[0, 1], [0, 0]]])
+    M = A.module([2], [[[0, 1], [0, 0]]], field=F)
     seq = M.almost_split()
     assert seq.start.dims == [2] and seq.end.dims == [2]
     assert seq.middle.dims == [4]
@@ -297,7 +297,7 @@ def test_almost_split_middle_term_over_x3_splits_into_the_neighbours():
 
 def test_almost_split_of_a_projective_is_an_outcome_not_an_error():
     F = auslander.PrimeField(5)
-    P = truncated(3).projective(F, 0)
+    P = truncated(3).projective(0, field=F)
     outcome = P.almost_split()
     assert outcome is auslander.AlmostSplitOutcome.PROJECTIVE
     assert outcome is not None
@@ -308,7 +308,7 @@ def test_almost_split_of_a_projective_is_an_outcome_not_an_error():
 def test_almost_split_rejects_a_decomposable_module():
     F = auslander.PrimeField(5)
     A = truncated(3)
-    S_plus_S = A.module(F, [2], [[[0, 0], [0, 0]]])
+    S_plus_S = A.module([2], [[[0, 0], [0, 0]]], field=F)
     with pytest.raises(auslander.NotIndecomposableError) as caught:
         S_plus_S.almost_split()
     error = caught.value
@@ -317,7 +317,7 @@ def test_almost_split_rejects_a_decomposable_module():
     assert error.summands == 2
     assert error.attempts is None
 
-    zero = A.module(F, [0], [[]])
+    zero = A.module([0], [[]], field=F)
     with pytest.raises(auslander.NotIndecomposableError) as caught:
         zero.almost_split()
     assert caught.value.kind == "zero"
@@ -326,9 +326,9 @@ def test_almost_split_rejects_a_decomposable_module():
 def test_category_radical_on_linear_a3():
     F = auslander.PrimeField(5)
     A = auslander.Algebra.linear_an(3)
-    P0 = A.projective(F, 0)
-    P1 = A.projective(F, 1)
-    S0 = A.simple(F, 0)
+    P0 = A.projective(0, field=F)
+    P1 = A.projective(1, field=F)
+    S0 = A.simple(0, field=F)
     _assert_radical_dimensions(P0, P1, S0)
     _assert_radical_basis(P1, P0)
     _assert_radical_rejections(A, F, P0)
@@ -356,7 +356,7 @@ def _assert_radical_basis(P1, P0):
 
 
 def _assert_radical_rejections(A, F, P0):
-    decomposable = A.module(F, [2, 0, 0], [[[], []], []])
+    decomposable = A.module([2, 0, 0], [[[], []], []], field=F)
     with pytest.raises(auslander.NotIndecomposableError, match="source module"):
         decomposable.category_radical(P0)
     with pytest.raises(auslander.NotIndecomposableError, match="target module"):
@@ -508,7 +508,7 @@ def _assert_value_exceptions():
 def test_readme_ar_example():
     F = auslander.PrimeField(5)
     A = auslander.Algebra.truncated_poly(3)
-    S = A.simple(F, 0)
+    S = A.simple(0, field=F)
     _assert_readme_extension(S)
     _assert_readme_ar_quiver(A, F)
 

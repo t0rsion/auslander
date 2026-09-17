@@ -27,11 +27,11 @@ def _assert_ka3_algebra(A):
 
 
 def _assert_ka3_modules(A, F):
-    S0 = A.simple(F, 0)
-    S2 = A.simple(F, 2)
+    S0 = A.simple(0, field=F)
+    S2 = A.simple(2, field=F)
     _assert_ka3_simple_ext(S0, S2)
 
-    P0 = A.projective(F, 0)
+    P0 = A.projective(0, field=F)
     _assert_ka3_projective(P0)
     _assert_ka3_resolution(A, F, S0)
 
@@ -63,7 +63,7 @@ def _assert_ka3_resolution(A, F, S0):
 def test_dual_numbers_ext_table():
     D = auslander.Algebra.dual_numbers()
     F = auslander.PrimeField(5)
-    S = D.simple(F, 0)
+    S = D.simple(0, field=F)
     assert S.ext_table(S, 2) == [1, 1, 1]
 
     res = S.resolve(3)
@@ -89,8 +89,8 @@ def test_hom_basis_between_a2_projectives():
     # Hom(P_1, P_0) = k, spanned by e_1 -> a.
     A = auslander.Algebra.linear_an(2)
     F = auslander.PrimeField(5)
-    P0 = A.projective(F, 0)
-    P1 = A.projective(F, 1)
+    P0 = A.projective(0, field=F)
+    P1 = A.projective(1, field=F)
     assert P0.hom(P1) == []
     basis = P1.hom(P0)
     assert len(basis) == 1
@@ -108,7 +108,7 @@ def test_hom_basis_between_a2_projectives():
 def test_is_isomorphism_on_identity_and_zero():
     A = auslander.Algebra.linear_an(2)
     F = auslander.PrimeField(5)
-    P0 = A.projective(F, 0)
+    P0 = A.projective(0, field=F)
     identity = P0.morphism(P0, [[[1]], [[1]]])
     zero = P0.morphism(P0, [[[0]], [[0]]])
     assert identity.is_isomorphism()
@@ -118,8 +118,8 @@ def test_is_isomorphism_on_identity_and_zero():
 def test_morphism_construction_is_checked():
     A = auslander.Algebra.linear_an(2)
     F = auslander.PrimeField(5)
-    P0 = A.projective(F, 0)
-    P1 = A.projective(F, 1)
+    P0 = A.projective(0, field=F)
+    P1 = A.projective(1, field=F)
     # f_1 = [1] with the empty f_0 violates the commuting square at the arrow.
     with pytest.raises(ValueError):
         P0.morphism(P1, [[[]], [[1]]])
@@ -137,25 +137,25 @@ def test_invalid_module_raises():
     F = auslander.PrimeField(5)
     # x acting as the identity violates x^2 = 0.
     with pytest.raises(ValueError):
-        D.module(F, [1], [[[1]]])
+        D.module([1], [[[1]]], field=F)
     with pytest.raises(ValueError):
-        D.module(F, [1, 1], [[[0]]])
+        D.module([1, 1], [[[0]]], field=F)
 
 
 def test_sparse_module_matches_dense_input_and_checks_coordinates():
     A = auslander.Algebra.linear_an(2)
     F = auslander.PrimeField(5)
-    sparse = A.module_sparse(F, [2, 2], [[(0, 1, 1), (1, 0, -1)]])
-    dense = A.module(F, [2, 2], [[[0, 1], [4, 0]]])
+    sparse = A.module_sparse([2, 2], [[(0, 1, 1), (1, 0, -1)]], field=F)
+    dense = A.module([2, 2], [[[0, 1], [4, 0]]], field=F)
     assert sparse.dims == dense.dims
     assert sparse.maps == dense.maps == [[[0, 1], [4, 0]]]
     assert sparse.sparse_maps == [[(0, 1, 1), (1, 0, 4)]]
     assert sparse.is_isomorphic(dense).isomorphic is True
 
     with pytest.raises(ValueError, match="outside 2 x 2"):
-        A.module_sparse(F, [2, 2], [[(2, 0, 1)]])
+        A.module_sparse([2, 2], [[(2, 0, 1)]], field=F)
     with pytest.raises(ValueError, match="repeats coordinate"):
-        A.module_sparse(F, [2, 2], [[(0, 0, 1), (0, 0, 2)]])
+        A.module_sparse([2, 2], [[(0, 0, 1), (0, 0, 2)]], field=F)
 
 
 def test_module_construction_and_invariants():
@@ -163,19 +163,19 @@ def test_module_construction_and_invariants():
     F = auslander.PrimeField(5)
     # The projective P_0: k -> k -> 0 with the arrow a acting as the identity;
     # the map for b: 1 -> 2 is the 1x0 matrix, one empty row.
-    M = A.module(F, [1, 1, 0], [[[1]], [[]]])
+    M = A.module([1, 1, 0], [[[1]], [[]]], field=F)
     assert M.total_dim == 2
     assert M.top_dims() == [1, 0, 0]
     assert M.socle_dims() == [0, 1, 0]
     assert M.radical_series_dims() == [[1, 1, 0], [0, 1, 0], [0, 0, 0]]
     assert M.loewy_length() == 2
-    assert M.hom_dim(A.projective(F, 0)) == 1
+    assert M.hom_dim(A.projective(0, field=F)) == 1
 
 
 def test_is_isomorphic_itself_with_witness():
     A = auslander.Algebra.linear_an(3)
     F = auslander.PrimeField(5)
-    P0 = A.projective(F, 0)
+    P0 = A.projective(0, field=F)
     r = P0.is_isomorphic(P0)
     assert r.isomorphic is True
     assert r.obstruction is None
@@ -189,7 +189,7 @@ def test_is_isomorphic_itself_with_witness():
 def test_is_isomorphic_distinguishes_no_from_unknown():
     A = auslander.Algebra.linear_an(3)
     F = auslander.PrimeField(5)
-    r = A.simple(F, 0).is_isomorphic(A.simple(F, 1))
+    r = A.simple(0, field=F).is_isomorphic(A.simple(1, field=F))
     # False, not None: a proof-shaped obstruction.
     assert r.isomorphic is False
     assert r.witness is None
@@ -203,8 +203,8 @@ def test_is_isomorphic_kronecker_radical_criterion():
     # vector [1, 1]; only the radical criterion tells them apart.
     A = auslander.Algebra.kronecker(2)
     F = auslander.PrimeField(5)
-    M = A.module(F, [1, 1], [[[1]], [[0]]])
-    N = A.module(F, [1, 1], [[[0]], [[1]]])
+    M = A.module([1, 1], [[[1]], [[0]]], field=F)
+    N = A.module([1, 1], [[[0]], [[1]]], field=F)
     r = M.is_isomorphic(N)
     assert r.isomorphic is False
     assert r.obstruction.startswith("radical criterion")
@@ -217,7 +217,7 @@ def test_decompose_p0_plus_s1_with_certificates():
     # arrow landing in the P_0 column.
     A = auslander.Algebra.linear_an(2)
     F = auslander.PrimeField(5)
-    M = A.module(F, [1, 2], [[[1, 0]]])
+    M = A.module([1, 2], [[[1, 0]]], field=F)
     d = M.decompose()
     _assert_decomposition_parts(d, A, F)
     _assert_decomposition_maps(d)
@@ -235,10 +235,10 @@ def _assert_decomposition_certificates(d):
 
 def _assert_decomposition_summands(d, A, F):
     assert sorted(s.dims for s in d.summands) == [[0, 1], [1, 1]]
-    P0 = A.projective(F, 0)
+    P0 = A.projective(0, field=F)
     summand_dims = {tuple(s.dims): s for s in d.summands}
     assert summand_dims[(1, 1)].is_isomorphic(P0).isomorphic is True
-    assert summand_dims[(0, 1)].is_isomorphic(A.simple(F, 1)).isomorphic is True
+    assert summand_dims[(0, 1)].is_isomorphic(A.simple(1, field=F)).isomorphic is True
 
 
 def _assert_decomposition_maps(d):
@@ -261,7 +261,7 @@ def _identity(n):
 def test_decompose_indecomposable_is_a_single_summand():
     A = auslander.Algebra.linear_an(2)
     F = auslander.PrimeField(5)
-    d = A.projective(F, 0).decompose()
+    d = A.projective(0, field=F).decompose()
     assert len(d.summands) == 1
     assert [c.kind for c in d.certificates] == ["indecomposable"]
 
@@ -271,7 +271,7 @@ def test_krull_schmidt_multiplicities_on_s1_p0_s1():
     # middle (P_0) column.
     A = auslander.Algebra.linear_an(2)
     F = auslander.PrimeField(5)
-    M = A.module(F, [1, 3], [[[0, 1, 0]]])
+    M = A.module([1, 3], [[[0, 1, 0]]], field=F)
     r = M.krull_schmidt()
     assert r.reason is None
     classes = {tuple(rep.dims): mult for rep, mult in r.classes}
@@ -286,11 +286,11 @@ def test_tau_of_a_projective_is_zero_and_of_a_simple_is_a_module():
     A = auslander.Algebra.linear_an(3)
     F = auslander.PrimeField(5)
     for v in range(3):
-        assert all(d == 0 for d in A.projective(F, v).tau().dims)
-    t0 = A.simple(F, 0).tau()
+        assert all(d == 0 for d in A.projective(v, field=F).tau().dims)
+    t0 = A.simple(0, field=F).tau()
     assert t0.dims == [0, 1, 0]
-    assert t0.is_isomorphic(A.simple(F, 1)).isomorphic is True
-    assert A.simple(F, 1).tau().dims == [0, 0, 1]
+    assert t0.is_isomorphic(A.simple(1, field=F)).isomorphic is True
+    assert A.simple(1, field=F).tau().dims == [0, 0, 1]
 
 
 def test_nakayama_indecomposables_count_is_the_kupisch_sum():
@@ -317,7 +317,7 @@ def test_injective_coresolution_of_s2_over_ka3_mod_ab():
     # cokernel S_1, whose envelope is I_1 with cokernel S_0 = I_0.
     A = auslander.Algebra.an_with_relations(3, [(0, 2)])
     F = auslander.PrimeField(32003)
-    S2 = A.simple(F, 2)
+    S2 = A.simple(2, field=F)
     c = S2.coresolve(5)
     _assert_coresolution_terms(c)
     _assert_coresolution_embedding(A, F, S2, c)
@@ -344,15 +344,15 @@ def _assert_coresolution_status(c):
 
 def _assert_coresolution_embedding(A, F, S2, c):
     envelope, embedding = S2.injective_envelope()
-    assert envelope.dims == c.terms[0].dims == A.injective(F, 2).dims
+    assert envelope.dims == c.terms[0].dims == A.injective(2, field=F).dims
     assert c.coaugmentation.maps == embedding.maps
     assert c.terms[0].is_isomorphic(envelope).isomorphic is True
 
 
 def _assert_coresolution_dimensions(A, F, S2):
     assert S2.injective_dimension(5).exact == 2
-    assert A.simple(F, 1).injective_dimension(5).exact == 1
-    assert A.simple(F, 0).injective_dimension(5).exact == 0
+    assert A.simple(1, field=F).injective_dimension(5).exact == 1
+    assert A.simple(0, field=F).injective_dimension(5).exact == 0
 
 
 def test_projective_resolution_exposes_terms_maps_and_augmentation():
@@ -360,14 +360,14 @@ def test_projective_resolution_exposes_terms_maps_and_augmentation():
     # over kA_3/(ab) is 0 -> P_2 -> P_1 -> P_0 -> S_0 -> 0.
     A = auslander.Algebra.an_with_relations(3, [(0, 2)])
     F = auslander.PrimeField(32003)
-    S0 = A.simple(F, 0)
+    S0 = A.simple(0, field=F)
     res = S0.resolve(5)
     assert res.terms_dims == [[1, 1, 0], [0, 1, 1], [0, 0, 1]]
     assert [t.dims for t in res.terms] == res.terms_dims
     assert len(res.maps) == len(res.terms) - 1
     assert res.status.kind == auslander.ResolutionKind.FINITE
     cover, epi = S0.projective_cover()
-    assert cover.dims == res.terms[0].dims == A.projective(F, 0).dims
+    assert cover.dims == res.terms[0].dims == A.projective(0, field=F).dims
     assert res.augmentation.maps == epi.maps
     assert res.terms[0].is_isomorphic(cover).isomorphic is True
 
@@ -378,7 +378,7 @@ def test_injective_dimension_separates_exact_from_at_least():
     # is injective.
     D = auslander.Algebra.dual_numbers()
     F = auslander.PrimeField(32003)
-    S = D.simple(F, 0)
+    S = D.simple(0, field=F)
     c = S.coresolve(6)
     _assert_unbounded_coresolution(c)
     _assert_unbounded_dimension(D, F, S)
@@ -397,7 +397,7 @@ def _assert_unbounded_dimension(D, F, S):
     assert unbounded.at_least == 11
     assert repr(unbounded) == "AtLeast(11)"
 
-    exact = D.projective(F, 0).injective_dimension(10)
+    exact = D.projective(0, field=F).injective_dimension(10)
     assert exact.exact == 0
     assert exact.at_least is None
     assert repr(exact) == "Exact(0)"
@@ -408,12 +408,12 @@ def test_truncated_polynomial_algebras_are_self_injective():
     F = auslander.PrimeField(32003)
     for n in range(2, 6):
         T = auslander.Algebra.truncated_poly(n)
-        P = T.projective(F, 0)
+        P = T.projective(0, field=F)
         assert P.dims == [n]
         assert P.injective_dimension(6).exact == 0
         assert P.coresolve(6).terms_dims == [[n]]
         # The regular module is the unique indecomposable injective as well.
-        assert P.is_isomorphic(T.injective(F, 0)).isomorphic is True
+        assert P.is_isomorphic(T.injective(0, field=F)).isomorphic is True
 
 
 def test_dynkin_recognition_of_an_and_d4():
@@ -612,4 +612,4 @@ def test_is_isomorphic_needs_one_algebra_object():
     A = auslander.Algebra.linear_an(2)
     B = auslander.Algebra.linear_an(2)
     with pytest.raises(ValueError):
-        A.simple(F, 0).is_isomorphic(B.simple(F, 0))
+        A.simple(0, field=F).is_isomorphic(B.simple(0, field=F))

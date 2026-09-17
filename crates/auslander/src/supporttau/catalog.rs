@@ -108,16 +108,16 @@ impl CatalogWalk<'_> {
 ///
 /// Completeness comes from the catalog's classification theorem, and from
 /// nothing else. An [`IndecomposableCatalog`] holds every indecomposable of
-/// its algebra up to isomorphism, by the Nakayama classification or by
-/// Gabriel's theorem ([`CatalogProvenance`]). The module part of a basic pair
-/// is a direct sum of pairwise non-isomorphic indecomposables, so it is the
-/// sum of a subset of the catalog, and walking the subsets reaches every pair.
+/// its algebra up to isomorphism, by one of the classifications named by
+/// [`CatalogProvenance`]. The module part of a basic pair is a direct sum of
+/// pairwise non-isomorphic indecomposables, so it is the sum of a subset of
+/// the catalog, and walking the subsets reaches every pair.
 ///
 /// The limit is the same theorem. Only algebras with a catalog can be
 /// enumerated this way, so [`enumerate_over_catalog`] takes a catalog rather
 /// than an algebra, and there is no route from an arbitrary algebra to a
 /// value of this type. The Kronecker algebra is tau-tilting infinite and has
-/// no exhaustive catalog, so both catalog constructors reject it and no
+/// no exhaustive catalog, so every catalog constructor rejects it and no
 /// enumeration is attempted.
 ///
 /// This route is independent of the mutation-graph certificate. It uses no
@@ -272,4 +272,16 @@ pub fn enumerate_over_catalog(
         pairs: walk.pairs,
         nodes_visited: walk.nodes,
     })
+}
+
+/// Lists every support tau-tilting pair when one complete catalog applies.
+///
+/// Catalog selection tries Dynkin, Nakayama, and gentle tree in that order.
+/// The selected classification supplies the completeness proof used by
+/// [`enumerate_over_catalog`].
+pub fn enumerate_over_algebra(
+    algebra: &Arc<Algebra>,
+) -> Result<CatalogEnumeration, SupportTauError> {
+    let catalog = IndecomposableCatalog::complete(algebra)?;
+    enumerate_over_catalog(&catalog)
 }

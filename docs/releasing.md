@@ -38,10 +38,18 @@ validation. Keep each abstraction tied to a distinct contract. Do not compress
 statements or remove whitespace to lower line counts. Remove unnecessary code
 and record the measured change in production code lines.
 
-Inspect source archives and wheels for private paths, contact details, and
-unnecessary development references. Keep package and schema versions, toolchain
-pins, and license attribution. For a local wheel, remap the home and repository
-paths before compiling:
+Inspect the public Git tree, source archives, and wheels before publication:
+
+- Remove private paths, personal contact details, and session identifiers.
+- Keep internal plans and review transcripts outside the public tree.
+- Remove local-only commit references and links to private documents.
+- Check documentation links after removing development records.
+- Review author and committer metadata on new public commits.
+- Keep package and schema versions, dependency pins, measured records,
+  mathematical citations, and license attribution.
+
+Repeat the archive checks on the distributions built by release CI. For a
+local wheel, remap the home and repository paths before compiling:
 
 ```sh
 RUSTFLAGS="--remap-path-prefix=$HOME=/build-home --remap-path-prefix=$PWD=/source" \

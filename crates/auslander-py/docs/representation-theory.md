@@ -83,8 +83,7 @@ by multiplication alone. `verify()` rechecks exactness and the witness.
 Almost-split sequences: `M.almost_split()` returns an `AlmostSplitSequence`
 `0 -> start -> middle -> end -> 0` with `start` the AR translate of `end = M`,
 or the member `AlmostSplitOutcome.PROJECTIVE` when M is projective. That
-member is an outcome, not a failure and not `None`; the returned object is the
-member itself, so `is` decides the case. The module first passes the
+member is returned directly, so `is` decides the case. The module first passes the
 indecomposability gate. The zero module, a decomposable module, and a module
 the gate could not decide raise `NotIndecomposableError`, a `ValueError`
 subclass carrying `kind` ("zero", "decomposable", or "undetermined"),
@@ -105,7 +104,7 @@ radical `rad(M, N)` as an object with `dim` and a `basis()` of `Morphism`
 objects. Both endpoints must pass the indecomposability gate, so both can
 raise `NotIndecomposableError`.
 
-`algebra.ar_quiver(field)` builds the valued Auslander-Reiten quiver, and
+`algebra.ar_quiver(field=None)` builds the valued Auslander-Reiten quiver, and
 `len(quiver)` is its vertex count. `vertices()` gives `ArVertex` objects with
 `id`, `module`, `residue_degree`, `projective`, and `injective`. `arrows()`
 gives `ArArrow` objects with `source`, `target`, `base_field_dim`,
@@ -113,13 +112,13 @@ gives `ArArrow` objects with `source`, `target`, `base_field_dim`,
 `plain_multiplicity` is the arrow multiplicity of an unvalued AR quiver. It
 raises `ValuedArrowError` when a residue degree exceeds 1, where the three
 dimensions differ and no single integer is the multiplicity. The quiver is
-complete for its domain: it comes from a classification theorem (Nakayama or
-Gabriel) and no budget cuts it short, so there is no partial AR quiver. Any
-other algebra raises `UnsupportedDomainError` naming both failed routes. A
-monomial presentation is field-free, so it needs the `field` argument; a
-general-relation algebra carries its own. Both calls validate their endpoints
-before running, so a failed hom or hom-space computation inside them is a
-defect and raises `DefectError`, not `ValueError`.
+complete on Nakayama, zero-ideal Dynkin, and gentle-tree algebras. No budget
+cuts it short. Other algebras raise `UnsupportedDomainError` naming the failed
+classification checks. `catalog.ar_quiver()` reuses an existing catalog. A
+field-free monomial presentation needs a field for this call; a bound algebra
+may omit it. A general-relation algebra carries its own. Both calls validate
+their endpoints before running, so a failed hom or hom-space computation inside
+them is a defect and raises `DefectError`, not `ValueError`.
 
 An AR example over k[x]/(x^3):
 
@@ -127,8 +126,8 @@ An AR example over k[x]/(x^3):
 import auslander
 
 F = auslander.PrimeField(5)
-A = auslander.Algebra.truncated_poly(3)
-S = A.simple(F, 0)
+A = auslander.Algebra.truncated_poly(3).over(F)
+S = A.simple(0)
 assert S.ext_space(S, 1).dim == 1
 
 # The almost-split sequence 0 -> S -> P/rad^2 -> S -> 0.
@@ -140,7 +139,7 @@ assert sequence.verify()
 assert all(sequence.verification_summary().values())
 
 # Three indecomposables, four arrows, every arrow plain.
-quiver = A.ar_quiver(F)
+quiver = A.ar_quiver()
 assert len(quiver.vertices()) == 3
 assert [a.plain_multiplicity for a in quiver.arrows()] == [1, 1, 1, 1]
 ```
@@ -177,7 +176,7 @@ way. `is_tau_rigid` `True` comes with `vanishing`, a `TauRigidModule` holding
 checked zero. A vanishing claim has no element to exhibit, so nothing beyond
 those positions is stored. `False` comes with `morphism`, one nonzero
 `X_i -> tau X_j`, and `summand_pair`, the positions it runs between. Neither
-branch raises, because each is an answer rather than a failure. The decision
+branch raises. The decision
 runs summandwise, which is exact by additivity of tau and Hom. `verify()`
 recomputes every translate through the certified double route and rebuilds
 every Hom space.
@@ -250,8 +249,8 @@ indecomposables. It returns a `CatalogEnumeration` with `pairs()`,
 `provenance`, `catalog_len`, `nodes_visited`, `histogram()`, `verify()`, and
 `len()`. Completeness comes from the catalog's classification theorem and from
 nothing else, so the route runs on catalog domains only: Gabriel's theorem for
-a path algebra of Dynkin type, the Nakayama classification for a Nakayama
-algebra. Any other algebra raises `UnsupportedDomainError`. The route is
+a path algebra of Dynkin type, the Nakayama classification, or string
+classification for a gentle tree. Other algebras raise `UnsupportedDomainError`. The route is
 independent of the mutation-graph certificate, using no mutation, no
 approximation, and no theorem about the support tau-tilting quiver, so agreement
 between the two lists is evidence rather than a restatement.
@@ -268,21 +267,23 @@ An example over linearly oriented A_2:
 import auslander
 
 F = auslander.PrimeField(5)
-A = auslander.Algebra.linear_an(2)
+A = auslander.Algebra.linear_an(2).over(F)
 
-graph = A.support_tau_tilting_graph(F)
+graph = A.support_tau_tilting_graph()
 assert isinstance(graph, auslander.ClosedSupportTauTiltingGraph)
 assert len(graph) == 5  # the pentagon
 assert graph.histogram() == [1, 2, 2]
 assert graph.verify()
 
 # The catalog route agrees.
-assert len(A.enumerate_over_catalog(F)) == 5
+assert len(A.enumerate_over_catalog()) == 5
 
 # A budget stops the tau-tilting infinite Kronecker algebra, and the result
 # has no pairs() accessor to misread as a complete list.
 limits = auslander.MutationGraphLimits(max_vertices=6)
-partial = auslander.Algebra.kronecker(2).support_tau_tilting_graph(F, limits=limits)
+partial = auslander.Algebra.kronecker(2).support_tau_tilting_graph(
+    field=F, limits=limits
+)
 assert partial.reason == "budget_exhausted"
 assert not hasattr(partial, "pairs")
 assert partial.diagnostics.limit == "max_vertices"

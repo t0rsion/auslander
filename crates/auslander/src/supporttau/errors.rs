@@ -1,4 +1,5 @@
 use crate::ar::TauError;
+use crate::arquiver::CatalogError;
 use crate::basic::BasicError;
 use crate::hom::HomError;
 use crate::taurigid::{NonTauRigidWitness, TauRigidError, TauRigidModule};
@@ -10,6 +11,8 @@ use crate::taurigid::{NonTauRigidWitness, TauRigidError, TauRigidModule};
 /// a [`PairRejection`], never an error.
 #[derive(Clone, Debug)]
 pub enum SupportTauError {
+    /// No complete indecomposable catalog applies to the algebra.
+    Catalog(CatalogError),
     /// The basic layer rejected an input or could not certify a summand.
     Basic(BasicError),
     /// A tau-rigidity decision could not be reached.
@@ -34,6 +37,7 @@ pub enum SupportTauError {
 }
 
 display_error! { error SupportTauError {
+    Self::Catalog(error) => "the catalog route rejected the algebra: {error}";
     Self::Basic(error) => "the basic layer rejected an input: {error}";
     Self::TauRigid(error) => "tau-rigidity stayed undecided: {error}";
     Self::Hom(error) => "a Hom space failed: {error}";
@@ -42,6 +46,7 @@ display_error! { error SupportTauError {
 } }
 
 from_variants!(SupportTauError {
+    CatalogError => Catalog,
     BasicError => Basic,
     TauRigidError => TauRigid,
 });

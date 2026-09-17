@@ -4,6 +4,23 @@ Releases ship when their gates hold. A gate is a checkable condition: a
 test suite, a certificate, an oracle comparison. This file does not
 promise dates.
 
+## Public v0.9: reusable catalogs
+
+The [release checklist](docs/releasing.md) defines the current gates.
+Catalog Ext tables share source resolutions. Fixed-dimension queries enumerate
+catalog multiplicities and retain typed cuts. Portable artifacts replay the
+catalog, full enumeration or cut prefix, and generic Ext cells.
+
+The release adds checked gentle-tree catalogs, Python catalog and higher
+orthogonality APIs, per-algebra session fields, and explicit verification
+states. The teaching notebook and research example execute the same public
+API. Whole-workflow benchmarks report setup and replay costs alongside query
+costs.
+
+General string-algebra catalogs, bands, characteristic zero, and extension
+fields remain outside this release. The sections below record the preceding
+subsystems and their original scope.
+
 ## Certified general bound quiver algebras
 
 One theme: every operation the crate offers works over a general

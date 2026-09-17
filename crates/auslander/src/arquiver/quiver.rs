@@ -8,7 +8,7 @@ use crate::indec::IndecomposableModule;
 use crate::module::Module;
 
 use super::radical::{category_radical, quotient_or_defect, span_of_composites};
-use super::{ArQuiverError, IndecomposableCatalog};
+use super::{ArQuiverError, CatalogError, IndecomposableCatalog};
 
 /// One vertex of an [`ArQuiver`]: a certified indecomposable with the data
 /// the AR quiver labels it by.
@@ -255,21 +255,36 @@ fn quiver_of(catalog: IndecomposableCatalog) -> Result<ArQuiver, ArQuiverError> 
 
 /// The valued AR quiver of `algebra`.
 ///
-/// The dispatch is deterministic: a zero ideal over a quiver of Dynkin shape
-/// takes the Gabriel enumeration, any other Nakayama algebra takes the
-/// Nakayama enumeration, and anything else is rejected.
+/// The dispatch is deterministic: Dynkin, Nakayama, then gentle tree.
 ///
 /// # Errors
-/// [`ArQuiverError::UnsupportedDomain`], carrying both rejections, when
-/// neither enumeration applies. [`ArQuiverError::Injective`] when the
+/// [`ArQuiverError::UnsupportedDomain`], carrying all route rejections, when
+/// no complete enumeration applies. [`ArQuiverError::Injective`] when the
 /// opposite algebra needed for the injectivity flags fails to build.
 pub fn ar_quiver(algebra: &Arc<Algebra>) -> Result<ArQuiver, ArQuiverError> {
-    let catalog = match IndecomposableCatalog::dynkin(algebra) {
-        Ok(catalog) => catalog,
-        Err(dynkin) => match IndecomposableCatalog::nakayama(algebra) {
-            Ok(catalog) => catalog,
-            Err(nakayama) => return Err(ArQuiverError::UnsupportedDomain { dynkin, nakayama }),
-        },
-    };
+    let catalog = IndecomposableCatalog::complete(algebra).map_err(catalog_error)?;
     quiver_of(catalog)
+}
+
+/// Builds the valued AR quiver from an existing complete catalog.
+///
+/// The catalog is cloned, so the caller keeps ownership and classification is
+/// not run again. The quiver still computes all radicals and irreducible
+/// quotients from the certified entries.
+pub fn ar_quiver_from_catalog(catalog: &IndecomposableCatalog) -> Result<ArQuiver, ArQuiverError> {
+    quiver_of(catalog.clone())
+}
+
+fn catalog_error(error: CatalogError) -> ArQuiverError {
+    match error {
+        CatalogError::UnsupportedDomain {
+            dynkin,
+            nakayama,
+            gentle,
+        } => ArQuiverError::UnsupportedDomain {
+            dynkin,
+            nakayama,
+            gentle,
+        },
+    }
 }

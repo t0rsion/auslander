@@ -157,9 +157,7 @@ pub(crate) fn our_support_tau_tilting(
     algebra: &Arc<Algebra>,
     enumerate: bool,
 ) -> Result<OurStt, String> {
-    let catalog = IndecomposableCatalog::nakayama(algebra)
-        .ok()
-        .or_else(|| IndecomposableCatalog::dynkin(algebra).ok());
+    let catalog = IndecomposableCatalog::complete(algebra).ok();
     if let Some(catalog) = catalog {
         let enumeration = enumerate_over_catalog(&catalog)
             .map_err(|e| format!("the catalog enumeration failed: {e}"))?;

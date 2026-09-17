@@ -313,8 +313,8 @@ fn arrow_representatives_are_radical_maps_outside_the_radical_square() {
     }
 }
 
-// A positive-dimensional algebra has one simple module per vertex, and
-// both enumerations list all of them, so no catalog is ever empty.
+// Each vertex supplies a simple module, so the catalog has at least as many
+// entries as the quiver has vertices.
 #[test]
 fn every_catalog_has_at_least_one_entry_per_vertex() {
     for algebra in catalog_fixtures() {
@@ -354,10 +354,10 @@ fn the_catalog_constructors_reject_the_other_route() {
     );
 }
 
-// The commutative square has one relation, so Gabriel's theorem does not
-// apply, and vertex 0 has two outgoing arrows, so it is not Nakayama.
+// The commutative square has a nonmonomial reduced relation, so the gentle
+// tree route also rejects it.
 #[test]
-fn an_unsupported_domain_carries_both_rejections() {
+fn an_unsupported_domain_carries_all_rejections() {
     let algebra = commutative_square(f5());
     assert_eq!(
         ar_quiver(&algebra).unwrap_err(),
@@ -367,6 +367,10 @@ fn an_unsupported_domain_carries_both_rejections() {
                 vertex: 0,
                 incoming: 0,
                 outgoing: 2,
+            },
+            gentle: GentleError::NonMonomial {
+                relation: 0,
+                terms: 2,
             },
         }
     );

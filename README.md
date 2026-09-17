@@ -25,55 +25,56 @@ Install the Python package from PyPI:
 python -m pip install auslander
 ```
 
-## Research runs and theorem artifacts
+## Complete catalog queries
 
-The current release compiles repeated finite-field families, limits the live
-state of homological surveys, and writes portable checkpoints. A fresh process
-verifies the algebra, census, completed rows, cursor, counters, and checksum
-before it resumes a run. A cut remains typed and retains every exact completed
-row.
+Version 0.9 adds reusable Ext tables and complete fixed-dimension module
+searches over certified indecomposable catalogs. Catalogs cover Nakayama
+algebras, zero-ideal Dynkin path algebras, and gentle algebras whose underlying
+undirected quiver is a tree.
 
-The fixed-interface Hom plan eliminates unchanged equations once. Each fiber
-solves `ker(D_J K_J^T) K`, then checks its global morphisms. For a
-finite-dimensional path algebra, the same two ranks give exact `Ext^1` and all
-higher Ext groups vanish. The generic Hom and Ext paths remain available for
-the same fibers.
+Build a field-bound algebra, choose its complete catalog, and cache the
+ordered Ext dimensions:
 
-`auslander-theorem-v1` records a finite self-Ext locus. Verification rebuilds
-the complete census, replays its homological checkpoint, and recomputes the
-locus through `ExtSpace::new`. That constructor is the crate's generic Ext
-path. The locus check can stop at the first mismatch.
+```python
+import auslander as au
 
-```sh
-auslander theorem self-ext-locus homology.aus.json 1 4 locus.aus.json
-auslander theorem inspect locus.aus.json
-auslander theorem verify locus.aus.json
+F = au.PrimeField(5)
+Q = au.Quiver(4, [(0, 1), (1, 2), (3, 2)])
+A = au.Algebra(Q, [[0, 1]], field=F)
+catalog = A.catalog()
+atlas = catalog.atlas(max_degree=3)
+result = atlas.enumerate([1, 1, 1, 1])
+print(catalog.provenance)
+print(result)
 ```
 
-The flagship study covers the commutative square over `F_2` at dimension
-vector `[2,1,1,2]`. It checks all 256 raw tuples, accepts 58 modules, and
-retains 12 representatives. Degree 1 vanishes at indices `[5,10,11]`. Degrees
-1 through 3 vanish at `[5,10]`. Representative 11 has Ext dimensions
-`[5,0,1,0]` and is isomorphic to `P_0 + S_0 + S_3`. A finite hand count of
-accepted modules is `58 = 7^2 + 9`. This is a checked finite computation on
-that raw matrix domain, not a classification theorem.
+For catalog entries `X_i`, the atlas stores
+`E_k[i,j] = dim Ext^k(X_i,X_j)`. A multiplicity vector `m` describes
+`⊕ m_i X_i`. The query enumerates every vector satisfying
+`Σ m_i dim X_i = d`, or returns a typed Cut with its exact retained prefix.
+Cached scores use `m^T E_k n`. Direct-sum materialization requires no
+isomorphism search.
 
-The starter census at dimension `[1,1,1,1]` remains: 16 raw tuples, 10
-classes, and representative 9 as the unique vanishing class in degrees 1
-through 3. That all-one representation is `P_0`, also `I_3`, so its vanishing
-is a projective check. Run the construction and separate replay path:
+A portable atlas artifact records its certificate, field, catalog order,
+dimension vector, degree bound, limits, status, and rows. Replay rebuilds the
+catalog, repeats the enumeration, and checks every Ext cell through the generic
+Ext path. It rejects omitted and duplicate rows. A replayed Cut remains a Cut.
+Replay shares library algorithms; the GAP/QPA fixtures provide separate
+comparisons on the tested inputs.
 
-```sh
-cargo run -p auslander --example self_ext_workflow
-cargo test -p auslander --test self_ext_artifact
-```
+Start with the [executed catalog workflow](crates/auslander-py/docs/catalog-workflow.md)
+and its [teaching notebook](crates/auslander-py/examples/catalog_workflow.ipynb).
+The [artifact contract](docs/catalog-artifacts.md) explains replay and limits.
+The [benchmark](docs/catalog-benchmarks.md) measures setup, queries,
+materialization, and verification. Existing Python users should read the
+[v0.9 migration guide](docs/migration-v09.md).
 
-See the [application study](docs/commutative-square-study.md),
-[computation results](docs/checked-computation-results.md),
-[compiled-family performance](docs/compiled-family-performance.md),
-[theorem artifact guide](docs/theorem-artifacts.md), and
-[Python workbench guide](crates/auslander-py/README.md). The derived workbench
-remains documented in its [release contract](docs/derived-equivalence-workbench.md).
+General algebras retain the finite raw-census workflow introduced in v0.8.
+The [commutative-square study](docs/commutative-square-study.md) records a
+finite self-Ext locus, including a degree-two obstruction missed by a
+degree-one check. See the [theorem artifact guide](docs/theorem-artifacts.md),
+[compiled-family measurements](docs/compiled-family-performance.md), and
+[derived workbench contract](docs/derived-equivalence-workbench.md).
 
 ## First result
 
@@ -321,11 +322,11 @@ Ext classes and the witnessed Auslander-Reiten layer:
   The AR-duality route stores the socle construction of the chosen class;
   `almost_split_via_catalog` instead stores factorization data against every
   entry of an exhaustive catalog. A projective input is
-  `AlmostSplitOutcome::Projective`, an outcome rather than an error.
+  `AlmostSplitOutcome::Projective`.
 - `category_radical`, `IndecomposableCatalog`,
   `radical_square_through_catalog`, `irreducible_quotient`, and `ar_quiver`:
   the exact category radical between certified indecomposables, catalogs that
-  wrap the two complete enumerations (Nakayama, zero-ideal Dynkin),
+  wrap complete enumerations for Nakayama, zero-ideal Dynkin, and gentle-tree algebras,
   catalog-exact rad^2, irreducible morphism spaces, and the valued AR quiver,
   whose arrows state dimensions over both residue fields instead of a bare
   multiplicity.
@@ -396,11 +397,15 @@ so.
 | `is_isomorphic` | `Isomorphic` with a witness, `NotIsomorphic` with an obstruction | no | yes: `IsoOutcome::Unknown` |
 | `nakayama_indecomposables` | yes, every certificate is `Indecomposable` | no | no |
 | `dynkin_indecomposables` | one module per positive root, each with the certificate `decompose` produced | no | yes, through that certificate |
+| `IndecomposableCatalog::gentle_tree` | one string module per inverse pair on a checked gentle tree | no | no; unsupported inputs carry the failed check |
+| `CatalogAtlas` | ordered Ext dimensions through the stated degree | setup ceilings reject before table construction | no |
+| `enumerate_multiplicities` | every catalog multiplicity vector at the stated dimension | `Cut` retains an exact prefix | no |
+| `catalog_coordinates` | multiplicities and checked isomorphisms | matching limits return `Cut` | yes: decomposition or isomorphism may remain unknown |
 | `HomSpace`, `ExtSpace`, `stable_hom`, `category_radical`, Yoneda `then` | yes | no | no |
 | `ShortExactSequence::from_ext1`, `ext1_class`, `split_status` | yes; splitting carries a witness either way | no | no |
 | `IndecomposableModule::new` | yes on acceptance; a split is rejected with its summand count | no | yes: `IndecError::Undetermined` |
 | `almost_split`, `almost_split_via_catalog` | `Projective`, or a sequence with its witness | no | yes: an undecided `tau` cross-check or gate surfaces as a typed error |
-| `ar_quiver` | yes, complete for its domain | no | no; any other algebra is `UnsupportedDomain` with both rejections |
+| `ar_quiver` | yes, complete for its domain | no | no; any other algebra is `UnsupportedDomain` with the failed domain checks |
 | `is_tau_rigid`, `is_tau_rigid_summandwise` | `TauRigid` with a certified module, `NotTauRigid` with a nonzero morphism | no | yes, through the `tau` cross-check |
 | `SupportTauTiltingPair::classify`, `AlmostCompletePair::classify` | the pair, or a rejection naming the condition that failed | no | yes, through decomposition and `tau` |
 | `left_approximation` | the minimal left approximation with its minimality witness | no | no |
@@ -414,7 +419,7 @@ they inherit the same failure modes.
 
 ## Not included
 
-- Exhaustive catalogs beyond Nakayama algebras and zero-ideal Dynkin path
+- Exhaustive catalogs beyond Nakayama, zero-ideal Dynkin, and gentle-tree
   algebras. The AR quiver, catalog-exact rad^2, and irreducible morphism
   spaces exist only behind an `IndecomposableCatalog`, and a catalog wraps a
   classification theorem; a plain module list never becomes one. Almost-split

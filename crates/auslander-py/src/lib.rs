@@ -154,10 +154,13 @@ use auslander::verify;
 mod algebra_bindings;
 mod ar_bindings;
 mod artifact_bindings;
+mod atlas_bindings;
 mod batch_bindings;
+mod catalog_bindings;
 mod census_bindings;
 mod complex_bindings;
 mod complex_maps_bindings;
+mod coordinate_bindings;
 mod decomposition_bindings;
 mod derived_complex_bindings;
 mod derived_hom_bindings;
@@ -186,10 +189,13 @@ mod tilting_bindings;
 pub(crate) use algebra_bindings::*;
 pub(crate) use ar_bindings::*;
 pub(crate) use artifact_bindings::*;
+pub(crate) use atlas_bindings::*;
 pub(crate) use batch_bindings::*;
+pub(crate) use catalog_bindings::*;
 pub(crate) use census_bindings::*;
 pub(crate) use complex_bindings::*;
 pub(crate) use complex_maps_bindings::*;
+pub(crate) use coordinate_bindings::*;
 pub(crate) use decomposition_bindings::*;
 pub(crate) use derived_complex_bindings::*;
 pub(crate) use derived_hom_bindings::*;
@@ -244,6 +250,36 @@ fn auslander_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
         PyPrimeField,
         PyQuiver,
         PyAlgebra,
+        PyIndecomposableCatalog,
+        PyHigherOrthogonalityLimits,
+        PyHigherExtPair,
+        PyHigherOrthogonalityWork,
+        PyHigherOrthogonality,
+        PyCatalogAtlas,
+        PyCatalogAtlasLimits,
+        PyCatalogAtlasWork,
+        PyCatalogExtRow,
+        PyCatalogExtTable,
+        PyMultiplicityLimits,
+        PyMultiplicityCutReason,
+        PyMultiplicityComplete,
+        PyMultiplicityCut,
+        PyMultiplicityResult,
+        PyCatalogAtlasArtifactParseLimits,
+        PyCatalogAtlasArtifactVerifyLimits,
+        PyCatalogAtlasArtifactExtRow,
+        PyCatalogAtlasArtifactResultRow,
+        PyCatalogAtlasArtifactStatus,
+        PyCatalogAtlasArtifact,
+        PyVerifiedCatalogAtlasArtifact,
+        PyCatalogCoordinateLimits,
+        PyCatalogCoordinateMatch,
+        PyCatalogCoordinateProgress,
+        PyCatalogCoordinates,
+        PyCatalogCoordinateUnknownReason,
+        PyCatalogCoordinateUnknown,
+        PyCatalogCoordinateCutReason,
+        PyCatalogCoordinateCut,
         PyRightModule,
         PyMorphism,
         PyStableHomSpace,
@@ -379,6 +415,9 @@ fn auslander_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
         NotDynkinError,
     );
     add_functions!(m;
+        catalog,
+        higher_orthogonality,
+        verify_catalog_atlas_artifact,
         global_dimension,
         nakayama_indecomposables,
         dynkin_type,

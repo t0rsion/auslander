@@ -1,6 +1,7 @@
 use auslander::arquiver::{ArQuiverError, ArrowValuation, ar_quiver};
 use auslander::dynkin::DynkinError;
 use auslander::enumerate::EnumerateError;
+use auslander::gentle::GentleError;
 
 use crate::common::{
     catalog_sequence, catalog_witness, duality_sequence, duality_witness, preprojective_a3,
@@ -143,7 +144,11 @@ fn every_arrow_valuation_on_the_catalog_domains_is_plain() {
 fn preprojective_a3_runs_tier_1_only_and_ar_quiver_carries_both_rejections() {
     let algebra = preprojective_a3();
     match ar_quiver(&algebra).unwrap_err() {
-        ArQuiverError::UnsupportedDomain { dynkin, nakayama } => {
+        ArQuiverError::UnsupportedDomain {
+            dynkin,
+            nakayama,
+            gentle,
+        } => {
             // The completed reduced Groebner basis has five elements: the
             // three input relations plus the two productive completions
             // a.b.bbar and b.bbar.abar of acceptance_nonmonomial.rs.
@@ -155,6 +160,13 @@ fn preprojective_a3_runs_tier_1_only_and_ar_quiver_carries_both_rejections() {
                     vertex: 1,
                     incoming: 2,
                     outgoing: 2,
+                }
+            );
+            assert_eq!(
+                gentle,
+                GentleError::NonMonomial {
+                    relation: 1,
+                    terms: 2,
                 }
             );
         }

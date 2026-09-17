@@ -1,9 +1,7 @@
 """Display adapters for complete and incomplete public values."""
 
-import pytest
-
 import auslander
-
+import pytest
 
 FIELD = auslander.PrimeField(5)
 
@@ -23,6 +21,24 @@ def test_ar_quiver_renderers_use_method_accessors():
     assert len(graph) == len(ar_quiver.vertices())
     assert graph.number_of_edges() == len(ar_quiver.arrows())
     assert nx.MultiDiGraph is type(graph)
+
+
+def test_catalog_atlas_renderers_show_scope_and_multiplicity_status():
+    quiver = auslander.Quiver(4, [(0, 1), (1, 2), (3, 2)])
+    catalog = auslander.Algebra(quiver, [[0, 1]], FIELD).catalog()
+    atlas = catalog.atlas(3)
+    result = atlas.enumerate([1, 1, 1, 1])
+    orthogonality = catalog.higher_orthogonality([0], 2)
+
+    catalog_text = str(auslander.show(catalog))
+    atlas_text = str(auslander.show(atlas))
+    result_text = str(auslander.show(result))
+    orthogonality_text = str(auslander.show(orthogonality))
+
+    assert "provenance gentle_tree" in catalog_text
+    assert "degree bound 3" in atlas_text
+    assert "status=complete, verification=computed" in result_text
+    assert "HigherOrthogonality:" in orthogonality_text
 
 
 def test_support_tau_tilting_renderers_use_closed_graph_apis():
@@ -62,8 +78,8 @@ def test_support_tau_tilting_renderers_use_incomplete_graph_apis():
 
 def test_explain_incomplete_derived_values_uses_typed_cuts():
     algebra = auslander.Algebra.an_with_relations(3, [(0, 2)])
-    source = auslander.BoundedComplex(0, [algebra.simple(FIELD, 0)], [])
-    target = auslander.BoundedComplex(0, [algebra.simple(FIELD, 2)], [])
+    source = auslander.BoundedComplex(0, [algebra.simple(0, field=FIELD)], [])
+    target = auslander.BoundedComplex(0, [algebra.simple(2, field=FIELD)], [])
 
     replacement = source.perfect_replacement(
         auslander.ReplacementLimits(max_resolution_steps=0)
@@ -80,8 +96,8 @@ def test_explain_incomplete_derived_values_uses_typed_cuts():
 
 def test_explain_cancellation_does_not_suggest_raising_limits():
     algebra = auslander.Algebra.an_with_relations(3, [(0, 2)])
-    source = auslander.BoundedComplex(0, [algebra.simple(FIELD, 0)], [])
-    target = auslander.BoundedComplex(0, [algebra.simple(FIELD, 2)], [])
+    source = auslander.BoundedComplex(0, [algebra.simple(0, field=FIELD)], [])
+    target = auslander.BoundedComplex(0, [algebra.simple(2, field=FIELD)], [])
 
     replacement_control = auslander.ComputationControl()
     replacement_control.cancel()

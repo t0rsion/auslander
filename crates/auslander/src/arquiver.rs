@@ -56,9 +56,9 @@ mod errors;
 mod quiver;
 mod radical;
 
-pub use catalog::{CatalogProvenance, IndecomposableCatalog};
+pub use catalog::{CatalogError, CatalogProvenance, IndecomposableCatalog};
 pub use errors::ArQuiverError;
-pub use quiver::{ArArrow, ArQuiver, ArVertex, ArrowValuation, ar_quiver};
+pub use quiver::{ArArrow, ArQuiver, ArVertex, ArrowValuation, ar_quiver, ar_quiver_from_catalog};
 pub use radical::{category_radical, irreducible_quotient, radical_square_through_catalog};
 
 #[cfg(test)]

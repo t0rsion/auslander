@@ -418,12 +418,10 @@ impl PyIncompleteSupportTauTiltingGraph {
 /// Every support tau-tilting pair of one algebra, listed from the definition
 /// over an exhaustive catalog of its indecomposables.
 ///
-/// Completeness comes from the catalog's classification theorem and from
-/// nothing else, so this route runs on catalog domains only: `provenance` is
-/// "dynkin_zero_ideal" for Gabriel's theorem or "nakayama" for the Nakayama
-/// classification. `verify()` rechecks the list, pair by pair and for pairwise
-/// distinctness. It does not recheck completeness, which is the theorem and not
-/// a computation.
+/// Completeness comes from the catalog's classification theorem. `provenance`
+/// is "dynkin_zero_ideal", "nakayama", or "gentle_tree". `verify()` checks each
+/// pair and pairwise distinctness. It does not recheck the classification
+/// theorem.
 ///
 /// This route is independent of the mutation-graph certificate: no mutation, no
 /// approximation, no theorem about the support tau-tilting quiver, only Hom,
@@ -448,13 +446,13 @@ impl PyCatalogEnumeration {
             .collect()
     }
 
-    /// The classification theorem the completeness of the list rests on:
-    /// "nakayama" or "dynkin_zero_ideal".
+    /// The catalog provenance: `nakayama`, `dynkin_zero_ideal`, or `gentle_tree`.
     #[getter]
     fn provenance(&self) -> &'static str {
         match self.inner.provenance() {
             CatalogProvenance::Nakayama => "nakayama",
             CatalogProvenance::DynkinZeroIdeal => "dynkin_zero_ideal",
+            CatalogProvenance::GentleTree => "gentle_tree",
         }
     }
 

@@ -38,31 +38,31 @@ def test_monomial_algebra_is_field_free():
     # One monomial algebra object is usable over every prime.
     M = auslander.Algebra.linear_an(2)
     assert M.field is None
-    assert M.simple(auslander.PrimeField(5), 0).dims == [1, 0]
-    assert M.simple(auslander.PrimeField(7), 0).dims == [1, 0]
+    assert M.simple(0, field=auslander.PrimeField(5)).dims == [1, 0]
+    assert M.simple(0, field=auslander.PrimeField(7)).dims == [1, 0]
 
 
 def test_duplicate_python_names_are_absent():
     assert not hasattr(auslander, "MonomialAlgebra")
-    module = auslander.Algebra.linear_an(2).simple(auslander.PrimeField(5), 0)
+    module = auslander.Algebra.linear_an(2).simple(0, field=auslander.PrimeField(5))
     assert not hasattr(module, "dim_vector")
 
 
 def test_general_algebra_refuses_other_fields():
     A = square(auslander.PrimeField(5))
     F7 = auslander.PrimeField(7)
-    with pytest.raises(ValueError, match="field-dependent"):
-        A.simple(F7, 0)
-    with pytest.raises(ValueError, match="field-dependent"):
+    with pytest.raises(ValueError, match="built over F_5"):
+        A.simple(0, field=F7)
+    with pytest.raises(ValueError, match="built over F_5"):
         A.certificate_json(F7)
-    assert A.simple(auslander.PrimeField(5), 0).dims == [1, 0, 0, 0]
+    assert A.simple(0, field=auslander.PrimeField(5)).dims == [1, 0, 0, 0]
 
 
 def test_decompose_p0_s1_s1_with_multiplicities():
     # P_0 ⊕ S_1 ⊕ S_1, block diagonal: vertex-1 coordinate 0 carries P_0.
     F = auslander.PrimeField(5)
     A = square(F)
-    M = A.module(F, [1, 3, 1, 1], [[[1, 0, 0]], [[1], [0], [0]], [[1]], [[1]]])
+    M = A.module([1, 3, 1, 1], [[[1, 0, 0]], [[1], [0], [0]], [[1]], [[1]]], field=F)
     d = M.decompose()
     _assert_square_decomposition(M, d, A, F)
 
@@ -87,8 +87,8 @@ def _assert_square_krull_schmidt(M, A, F):
     classes = {tuple(rep.dims): mult for rep, mult in ks.classes}
     assert classes == {(1, 1, 1, 1): 1, (0, 1, 0, 0): 2}
     reps = {tuple(rep.dims): rep for rep, _ in ks.classes}
-    assert reps[(1, 1, 1, 1)].is_isomorphic(A.projective(F, 0)).isomorphic is True
-    assert reps[(0, 1, 0, 0)].is_isomorphic(A.simple(F, 1)).isomorphic is True
+    assert reps[(1, 1, 1, 1)].is_isomorphic(A.projective(0, field=F)).isomorphic is True
+    assert reps[(0, 1, 0, 0)].is_isomorphic(A.simple(1, field=F)).isomorphic is True
 
 
 def test_tau_over_the_square_matches_the_oracle():
@@ -97,17 +97,17 @@ def test_tau_over_the_square_matches_the_oracle():
     # tau S_3 is the zero module.
     F = auslander.PrimeField(5)
     A = square(F)
-    assert A.simple(F, 0).tau().dims == [1, 1, 1, 0]
-    assert A.simple(F, 1).tau().dims == [0, 0, 1, 1]
-    assert A.simple(F, 2).tau().dims == [0, 1, 0, 1]
-    assert A.simple(F, 3).tau().dims == [0, 0, 0, 0]
+    assert A.simple(0, field=F).tau().dims == [1, 1, 1, 0]
+    assert A.simple(1, field=F).tau().dims == [0, 0, 1, 1]
+    assert A.simple(2, field=F).tau().dims == [0, 1, 0, 1]
+    assert A.simple(3, field=F).tau().dims == [0, 0, 0, 0]
 
 
 def test_projective_resolution_of_s0_over_the_square():
     # 0 -> P_3 -> P_1 ⊕ P_2 -> P_0 -> S_0 -> 0; pd S_0 = 2 per the oracle.
     F = auslander.PrimeField(5)
     A = square(F)
-    res = A.simple(F, 0).resolve(5)
+    res = A.simple(0, field=F).resolve(5)
     assert res.terms_dims == [[1, 1, 1, 1], [0, 1, 1, 2], [0, 0, 0, 1]]
     assert res.status.kind == auslander.ResolutionKind.FINITE
     assert res.pd(5).exact == 2
@@ -118,34 +118,34 @@ def test_homological_surface_over_the_square():
     # and I_3 has dimension vector [1, 1, 1, 1].
     F = auslander.PrimeField(5)
     A = square(F)
-    S0 = A.simple(F, 0)
+    S0 = A.simple(0, field=F)
     _assert_square_ext(S0, A, F)
     _assert_square_projective(A, F)
     _assert_square_injective(A, F)
 
 
 def _assert_square_ext(S0, A, F):
-    assert S0.ext_table(A.simple(F, 1), 2) == [0, 1, 0]
-    assert S0.ext_dim(A.simple(F, 3), 2) == 1
-    assert A.injective(F, 3).dims == [1, 1, 1, 1]
-    assert A.simple(F, 3).injective_dimension(5).exact == 2
+    assert S0.ext_table(A.simple(1, field=F), 2) == [0, 1, 0]
+    assert S0.ext_dim(A.simple(3, field=F), 2) == 1
+    assert A.injective(3, field=F).dims == [1, 1, 1, 1]
+    assert A.simple(3, field=F).injective_dimension(5).exact == 2
     assert auslander.global_dimension(A, F, 5).exact == 2
 
 
 def _assert_square_projective(A, F):
-    P0 = A.projective(F, 0)
+    P0 = A.projective(0, field=F)
     assert P0.radical_series_dims() == [[1, 1, 1, 1], [0, 1, 1, 1], [0, 0, 0, 1], [0, 0, 0, 0]]
     assert P0.top_dims() == [1, 0, 0, 0]
     assert P0.socle_dims() == [0, 0, 0, 1]
 
 
 def _assert_square_injective(A, F):
-    cover, epi = A.simple(F, 1).projective_cover()
+    cover, epi = A.simple(1, field=F).projective_cover()
     assert cover.dims == [0, 1, 0, 1]
     assert epi.maps[1] == [[1]]
-    envelope, _ = A.simple(F, 1).injective_envelope()
+    envelope, _ = A.simple(1, field=F).injective_envelope()
     assert envelope.dims == [1, 1, 0, 0]
-    c = A.simple(F, 3).coresolve(5)
+    c = A.simple(3, field=F).coresolve(5)
     assert c.status.kind == auslander.ResolutionKind.FINITE
 
 
@@ -160,7 +160,7 @@ def test_certificate_round_trip():
     assert B.field.p == 5
     # The bytes are canonical, so dumping the reloaded algebra reproduces them.
     assert B.certificate_json() == js
-    assert B.simple(F, 1).tau().dims == [0, 0, 1, 1]
+    assert B.simple(1, field=F).tau().dims == [0, 0, 1, 1]
 
 
 def test_tampered_certificate_raises_value_error():
@@ -276,7 +276,7 @@ def test_nested_truncation_raises_truncation_error_with_diagnostics():
     F = auslander.PrimeField(5)
     js = auslander.Algebra.truncated_poly(3).certificate_json(F)
     B = auslander.Algebra.from_certificate(js, max_word_len=3)
-    S = B.simple(F, 0)
+    S = B.simple(0, field=F)
     for fail in [
         S.tau,
         S.injective_envelope,
@@ -321,15 +321,15 @@ def test_readme_example():
     A = auslander.Algebra.from_relations(Q, [[(1, [0, 1]), (-1, [2, 3])]], F)
     assert A.dim == 9
 
-    res = A.simple(F, 0).resolve(5)
+    res = A.simple(0, field=F).resolve(5)
     assert res.terms_dims == [[1, 1, 1, 1], [0, 1, 1, 2], [0, 0, 0, 1]]
     assert res.pd(5).exact == 2
 
-    M = A.module(F, [1, 3, 1, 1], [[[1, 0, 0]], [[1], [0], [0]], [[1]], [[1]]])
+    M = A.module([1, 3, 1, 1], [[[1, 0, 0]], [[1], [0], [0]], [[1]], [[1]]], field=F)
     classes = {tuple(rep.dims): mult for rep, mult in M.krull_schmidt().classes}
     assert classes == {(1, 1, 1, 1): 1, (0, 1, 0, 0): 2}
 
-    assert A.simple(F, 1).tau().dims == [0, 0, 1, 1]
+    assert A.simple(1, field=F).tau().dims == [0, 0, 1, 1]
 
     B = auslander.Algebra.from_certificate(A.certificate_json())
     assert B.dim == 9

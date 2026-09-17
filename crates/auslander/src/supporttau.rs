@@ -42,7 +42,7 @@ mod errors;
 mod pair;
 
 pub use almost::{AlmostCompleteClassification, AlmostCompletePair};
-pub use catalog::{CatalogEnumeration, enumerate_over_catalog};
+pub use catalog::{CatalogEnumeration, enumerate_over_algebra, enumerate_over_catalog};
 pub use errors::{PairRejection, SupportTauError};
 pub use pair::{SupportTauTiltingClassification, SupportTauTiltingPair};
 

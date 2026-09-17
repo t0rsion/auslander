@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 const SELF: &str = "crates/auslander/tests/production_line_budget.rs";
 
 /// The production code-line ceiling.
-const PRODUCTION_CODE_CEILING: usize = 38374;
+const PRODUCTION_CODE_CEILING: usize = 42336;
 
 /// The column-zero marker that ends a production region.
 const MARKER: &str = "#[cfg(test)]";

@@ -6,8 +6,8 @@ endpoints, so a witness handed back on its own still says what it maps
 between, and composition is checked against those endpoints.
 """
 
+import sys
 import threading
-import time
 
 import pytest
 
@@ -22,7 +22,7 @@ def a3():
 
 def test_resolution_status_and_bounded_hash_by_value():
     field = auslander.PrimeField(5)
-    resolution = a3().simple(field, 0).resolve(4)
+    resolution = a3().simple(0, field=field).resolve(4)
     status = resolution.status
     same = auslander.ResolutionStatus(status.kind, status.at)
     cut = auslander.ResolutionStatus(auslander.ResolutionKind.CUT, 2)
@@ -33,8 +33,8 @@ def test_resolution_status_and_bounded_hash_by_value():
     assert len({status, same, cut}) == 2
 
     exact = resolution.pd(4)
-    assert {exact: "pd"}[a3().simple(field, 0).resolve(4).pd(4)] == "pd"
-    assert hash(exact) != hash(auslander.Algebra.kronecker(2).simple(field, 0).resolve(0).pd(0))
+    assert {exact: "pd"}[a3().simple(0, field=field).resolve(4).pd(4)] == "pd"
+    assert hash(exact) != hash(auslander.Algebra.kronecker(2).simple(0, field=field).resolve(0).pd(0))
 
 
 def test_diagram_types_hash_by_value():
@@ -81,8 +81,8 @@ def test_rejected_input_of_the_ar_layer_stays_value_error():
     algebra = a3()
     # The endpoints are validated before the call, so both rejections are the
     # ValueError subclass of the failed precondition, not a defect.
-    projective = algebra.projective(field, 0)
-    doubled = algebra.module(field, [2, 2, 2], [[[1, 0], [0, 1]], [[1, 0], [0, 1]]])
+    projective = algebra.projective(0, field=field)
+    doubled = algebra.module([2, 2, 2], [[[1, 0], [0, 1]], [[1, 0], [0, 1]]], field=field)
     with pytest.raises(auslander.NotIndecomposableError) as rejected:
         doubled.category_radical(projective)
     assert rejected.value.kind == "decomposable"
@@ -100,7 +100,7 @@ def test_rejected_input_of_the_ar_layer_stays_value_error():
 def test_morphism_carries_its_endpoints():
     field = auslander.PrimeField(5)
     algebra = a3()
-    p0 = algebra.projective(field, 0)
+    p0 = algebra.projective(0, field=field)
     identity = p0.morphism(p0, [[[1]], [[1]], [[1]]])
 
     assert identity.source.dims == p0.dims
@@ -117,8 +117,8 @@ def test_morphism_carries_its_endpoints():
 def test_morphism_composition_checks_the_endpoints():
     field = auslander.PrimeField(5)
     algebra = a3()
-    p0 = algebra.projective(field, 0)
-    s2 = algebra.simple(field, 2)
+    p0 = algebra.projective(0, field=field)
+    s2 = algebra.simple(2, field=field)
     zero = p0.morphism(s2, [[[]], [[]], [[0]]])
 
     assert zero.is_zero
@@ -131,7 +131,7 @@ def test_morphism_composition_checks_the_endpoints():
 def test_map_at_reads_one_vertex_matrix():
     field = auslander.PrimeField(5)
     algebra = a3()
-    p0 = algebra.projective(field, 0)
+    p0 = algebra.projective(0, field=field)
     identity = p0.morphism(p0, [[[1]], [[1]], [[1]]])
 
     assert [identity.map_at(v) for v in range(3)] == identity.maps
@@ -146,34 +146,53 @@ def test_len_of_ar_quiver_and_decomposition():
     assert len(quiver) == 3
     assert len(quiver) == len(quiver.vertices())
 
-    simple = algebra.simple(field, 0)
+    simple = algebra.simple(0, field=field)
     assert len(simple.decompose()) == 1
-    doubled = algebra.module(field, [2], [[[0, 0], [0, 0]]])
+    doubled = algebra.module([2], [[[0, 0], [0, 0]]], field=field)
     decomposition = doubled.decompose()
     assert len(decomposition) == 2
     assert len(decomposition) == len(decomposition.summands)
 
 
 def test_computations_release_the_gil():
-    # Four AR quivers of linearly oriented A_14 run at once. Serialized they
-    # would take four times one run, so the 2.5x threshold below fails when the
-    # GIL is held across the computation.
     field = auslander.PrimeField(5)
-    algebra = auslander.Algebra.linear_an(14)
+    algebra = auslander.Algebra.linear_an(14, field=field)
+    ready = threading.Event()
+    start_native = threading.Event()
+    native_active = False
+    worker_observations = []
+    worker_errors = []
 
-    start = time.perf_counter()
-    assert len(algebra.ar_quiver(field)) == 105
-    one = time.perf_counter() - start
+    def worker():
+        try:
+            ready.set()
+            if not start_native.wait(timeout=10):
+                raise AssertionError("worker did not receive the native start signal")
+            worker_observations.append(native_active)
+        except BaseException as error:
+            worker_errors.append(error)
 
-    def run():
-        algebra.ar_quiver(field)
-
-    threads = [threading.Thread(target=run) for _ in range(4)]
-    start = time.perf_counter()
-    for thread in threads:
+    thread = threading.Thread(target=worker)
+    previous_interval = sys.getswitchinterval()
+    # Suppress interpreter-driven switches so the observation depends on the
+    # native call releasing the GIL.
+    sys.setswitchinterval(60.0)
+    try:
         thread.start()
-    for thread in threads:
-        thread.join()
-    four = time.perf_counter() - start
+        if not ready.wait(timeout=10):
+            raise AssertionError("worker did not become ready")
+        native_active = True
+        start_native.set()
+        quiver = algebra.ar_quiver()
+    finally:
+        native_active = False
+        start_native.set()
+        sys.setswitchinterval(previous_interval)
+        thread.join(timeout=10)
 
-    assert four < 2.5 * one
+    if thread.is_alive():
+        raise AssertionError("worker did not finish")
+    if worker_errors:
+        raise worker_errors[0]
+    assert worker_observations == [True]
+    assert len(quiver) == 105

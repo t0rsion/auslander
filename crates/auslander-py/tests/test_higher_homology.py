@@ -22,7 +22,7 @@ def generous_bar_limits(**changes):
 def test_checked_complex_reports_exactness_and_first_homology():
     field = auslander.PrimeField(5)
     algebra = auslander.Algebra.linear_an(2)
-    simple = algebra.simple(field, 0)
+    simple = algebra.simple(0, field=field)
     resolution = simple.resolve(2)
     complex_ = auslander.CheckedComplex(
         [resolution.terms[1], resolution.terms[0], simple],
@@ -75,7 +75,7 @@ def _assert_nonexact_shape(nonexact):
 def test_checked_complex_rejects_bad_shapes_endpoints_and_composites():
     field = auslander.PrimeField(5)
     algebra = auslander.Algebra.linear_an(2)
-    simple = algebra.simple(field, 0)
+    simple = algebra.simple(0, field=field)
     identity = simple.morphism(simple, [[[1]], []])
 
     with pytest.raises(ValueError, match="at least one term"):
@@ -83,7 +83,7 @@ def test_checked_complex_rejects_bad_shapes_endpoints_and_composites():
     with pytest.raises(ValueError, match="expected 0"):
         auslander.CheckedComplex([simple], [identity])
     with pytest.raises(ValueError, match="adjacent terms"):
-        auslander.CheckedComplex([simple, algebra.simple(field, 1)], [identity])
+        auslander.CheckedComplex([simple, algebra.simple(1, field=field)], [identity])
     with pytest.raises(ValueError, match="nonzero composite"):
         auslander.CheckedComplex([simple, simple, simple], [identity, identity])
 
@@ -93,12 +93,12 @@ def dual_of_a3_mod_ab(field):
     # D(A) = I_0 + I_1 + I_2. The two arrow maps are block diagonal in that
     # summand order.
     module = algebra.module(
-        field,
         [2, 2, 1],
         [
             [[0, 0], [1, 0]],
             [[0], [1]],
         ],
+        field=field,
     )
     return algebra, module
 
@@ -164,14 +164,14 @@ def test_classical_tilting_keeps_negative_and_undetermined_distinct():
     field = auslander.PrimeField(5)
 
     dual_numbers = auslander.Algebra.dual_numbers()
-    periodic = dual_numbers.simple(field, 0)
+    periodic = dual_numbers.simple(0, field=field)
     cut = auslander.ClassicalTiltingModule.classify(
         periodic, auslander.TiltingLimits(2, 3)
     )
     _assert_tilting_cut(cut)
 
     kronecker = auslander.Algebra.kronecker(2)
-    self_extending = kronecker.module(field, [1, 1], [[[1]], [[0]]])
+    self_extending = kronecker.module([1, 1], [[[1]], [[0]]], field=field)
     rejected = auslander.ClassicalTiltingModule.classify(
         self_extending, auslander.TiltingLimits(4, 5)
     )
@@ -234,7 +234,7 @@ def test_classical_tilting_generation_cut_keeps_its_partial_complex():
 def test_relative_bar_pins_the_dual_number_sign(prime, dimensions):
     field = auslander.PrimeField(prime)
     algebra = auslander.Algebra.dual_numbers()
-    result = algebra.hochschild_cohomology(field, 2, generous_bar_limits())
+    result = algebra.hochschild_cohomology(2, generous_bar_limits(), field=field)
 
     assert isinstance(result, auslander.HochschildCohomology)
     assert result.requested_degree == 2
@@ -251,7 +251,7 @@ def test_relative_bar_pins_the_dual_number_sign(prime, dimensions):
 def test_relative_bar_decodes_inputs_and_evaluates_classes():
     field = auslander.PrimeField(5)
     algebra = auslander.Algebra.truncated_poly(3)
-    result = algebra.hochschild_cohomology(field, 2, generous_bar_limits())
+    result = algebra.hochschild_cohomology(2, generous_bar_limits(), field=field)
     assert result.dimensions == [3, 2, 2]
     _assert_degree_two_inputs(result)
 
@@ -282,7 +282,7 @@ def _assert_degree_two_words(degree_two):
 
 def _assert_degree_one_classes(field):
     dual = auslander.Algebra.dual_numbers().hochschild_cohomology(
-        field, 1, generous_bar_limits()
+        1, generous_bar_limits(), field=field
     )
     degree_one = dual.degree(1)
     cls = degree_one.class_from_coordinates([1])
@@ -317,7 +317,7 @@ def _assert_degree_one_errors(cls):
 def test_relative_bar_cuts_are_typed_values(change, reason):
     field = auslander.PrimeField(5)
     result = auslander.Algebra.dual_numbers().hochschild_cohomology(
-        field, 1, generous_bar_limits(**change)
+        1, generous_bar_limits(**change), field=field
     )
     assert isinstance(result, auslander.IncompleteHochschildCohomology)
     assert not hasattr(result, "degree")
@@ -332,7 +332,7 @@ def test_relative_bar_cuts_are_typed_values(change, reason):
 def test_higher_homology_acceptance_path():
     field = auslander.PrimeField(5)
     algebra, dual = dual_of_a3_mod_ab(field)
-    simple = algebra.simple(field, 0)
+    simple = algebra.simple(0, field=field)
     resolution = simple.resolve(2)
     exact = auslander.CheckedComplex(
         [resolution.terms[2], resolution.terms[1], resolution.terms[0], simple],
@@ -351,10 +351,12 @@ def _assert_higher_homology_exactness(exact):
 
 
 def _assert_higher_homology_cohomology(x_cubed, field):
-    cohomology = x_cubed.hochschild_cohomology(field, 2, generous_bar_limits())
+    cohomology = x_cubed.hochschild_cohomology(
+        2, generous_bar_limits(), field=field
+    )
     assert cohomology.dimensions == [3, 2, 2]
     cut = x_cubed.hochschild_cohomology(
-        field, 2, generous_bar_limits(max_work_units=0)
+        2, generous_bar_limits(max_work_units=0), field=field
     )
     assert isinstance(cut, auslander.IncompleteHochschildCohomology)
     assert cut.completed_degrees == []
@@ -393,7 +395,9 @@ def test_higher_homology_long_calls_release_gil():
         algebra = auslander.Algebra.truncated_poly(3)
         before_bar = ticks[0]
         for _ in range(3):
-            result = algebra.hochschild_cohomology(field, 3, generous_bar_limits())
+            result = algebra.hochschild_cohomology(
+                3, generous_bar_limits(), field=field
+            )
             assert isinstance(result, auslander.HochschildCohomology)
         after_bar = ticks[0]
 

@@ -49,7 +49,7 @@ fn assert_kronecker_truncation(partial: &IncompleteSupportTauTiltingGraph, max_v
 ///
 /// The budget is 8 vertices rather than the 16 of design section 11. The
 /// preprojective ray grows, so vertex 16 carries much larger modules than
-/// vertex 8. Measured on this branch over two fields: this test runs in 0.04 s
+/// vertex 8. Measured over two fields: this test runs in 0.04 s
 /// to 0.05 s, while `the_kronecker_walk_at_sixteen_vertices_truncates` runs
 /// the design's case at 1.18 s, which does not fit the always-on block.
 #[test]
@@ -100,7 +100,7 @@ fn both_catalog_constructors_reject_the_kronecker_algebra() {
 
 /// Work-unit ceilings, which are deterministic and profile-independent.
 ///
-/// The ceilings are snapshots, not derivations. Measured on this branch: A_2
+/// The ceilings are snapshots, not derivations. Measured: A_2
 /// 6668 units, A_3 145712, D_4 3951020. Each ceiling is the next power of two
 /// at or above twice the measurement. The assertion is that the count is
 /// reproducible, so a change in the call sequence of the walk shows up here
@@ -138,7 +138,7 @@ fn the_walk_stays_under_its_work_unit_ceilings() {
 /// The walk and its closure recheck together cost more than the always-on
 /// budget, so that block keeps only the D_4 catalog route. This adds the walk,
 /// the closure recheck, the cross-route agreement over all 50 pairs, and the
-/// work-unit ceiling. Measured on this branch at 0.42 s to 0.64 s over two
+/// work-unit ceiling. Measured at 0.42 s to 0.64 s over two
 /// fields, with the recheck the slower half.
 #[test]
 #[ignore = "exhaustive tier: the D_4 walk, closure recheck, and 50-pair cross-route"]
@@ -175,7 +175,7 @@ fn every_catalog_list_rechecks() {
 /// Exhaustive tier: the Kronecker budget of design section 11.
 ///
 /// The always-on version stops at 8 vertices. This one stops at the 16 the
-/// design names. Measured on this branch at 1.18 s over two fields, against
+/// design names. Measured at 1.18 s over two fields, against
 /// 0.04 s to 0.05 s for the 8-vertex version.
 #[test]
 #[ignore = "exhaustive tier: the 16-vertex Kronecker truncation of design section 11"]

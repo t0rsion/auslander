@@ -32,6 +32,16 @@ which the `.gitignore` here covers. The name is deliberately not the oracle's,
 so a run started in this directory cannot overwrite `qpa_expected.json`;
 promoting a run is a separate copy.
 
+The gentle-tree oracle uses `generate_catalog_fixtures.g` and
+`catalog_qpa_expected.json`. The always-on test
+`catalog::catalog_qpa_oracle_matches_the_gentle_catalog` parses this independent
+document and compares both F_2 and F_5 modules, Hom, Ext, AR sequences, and
+irreducible maps with the gentle catalog. The live test
+`catalog::catalog_live_gap_run_agrees_with_committed_truth` runs when
+`QPA_ORACLE=1`; it requires the generator sentinel, then compares its values
+with the committed document and the Rust catalog. The generator writes
+`catalog_qpa_generated.json`, never `catalog_qpa_expected.json`.
+
 ## Test modes (`crates/auslander/tests/qpa_oracle.rs`)
 
 | Mode | Trigger | Behavior |
@@ -40,6 +50,8 @@ promoting a run is a separate copy.
 | Snapshot self-consistency | always on | library output vs `native_snapshot.json`, byte for byte |
 | Snapshot rewrite | `QPA_ORACLE_WRITE=1` | rewrites `native_snapshot.json` only, never `qpa_expected.json` |
 | Live GAP run | `QPA_ORACLE=1` | runs `generate_fixtures.g` under GAP+QPA in a temp dir, requires the sentinel and the output file, then compares the fresh output against the library (values) and against `qpa_expected.json` (values, then byte for byte); fails hard when GAP is missing, QPA does not load, no output appears, or anything mismatches |
+| Catalog oracle comparison | always on | gentle catalog values vs `catalog_qpa_expected.json` for F_2 and F_5 |
+| Catalog live GAP run | `QPA_ORACLE=1` | runs `generate_catalog_fixtures.g`, requires its sentinel and output, then compares fresh values with the committed catalog document |
 
 The harness computes every v6 field from the library and compares it entry by
 entry. Designated modules are built by construction from their kind and index,
@@ -118,6 +130,21 @@ Then run the test suite and record the new provenance in
 `QPA_ORACLE_WRITE=1 cargo +1.92 test --test qpa_oracle` regenerates
 `native_snapshot.json` after an intentional library change. It never touches
 `qpa_expected.json`.
+
+Regenerate the gentle-tree document through the same GAP+QPA path:
+
+```sh
+cd "$(mktemp -d)"
+/usr/bin/gap -q -T -m 1g \
+   /path/to/crates/auslander/tests/qpa-oracle/generate_catalog_fixtures.g | tail -1
+cp catalog_qpa_generated.json \
+   /path/to/crates/auslander/tests/qpa-oracle/catalog_qpa_expected.json
+```
+
+Run the generator twice in fresh directories and compare the two
+`catalog_qpa_generated.json` files before promotion. The final line must be
+`qpa-catalog-oracle-generator-ok`. The Rust tests never write the committed
+catalog document.
 
 ## Regenerating the census oracle
 

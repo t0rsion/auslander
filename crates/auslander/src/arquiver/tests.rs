@@ -10,6 +10,7 @@ pub(super) use crate::decompose::inverse_morphism;
 pub(super) use crate::dynkin::{DynkinError, DynkinType, dynkin_quiver};
 pub(super) use crate::enumerate::EnumerateError;
 pub(super) use crate::field::PrimeField;
+pub(super) use crate::gentle::GentleError;
 pub(super) use crate::hom::{HomError, hom};
 pub(super) use crate::homspace::HomSpace;
 pub(super) use crate::indec::IndecomposableModule;
