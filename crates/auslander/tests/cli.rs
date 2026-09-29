@@ -68,7 +68,8 @@ fn every_command_prints_its_help() {
 #[test]
 fn a_usage_error_prints_one_message_and_a_help_hint() {
     let missing = "/nonexistent/auslander-cli.json";
-    let read = format!("cannot read {missing:?}: No such file or directory (os error 2)");
+    let error = std::fs::read(missing).unwrap_err();
+    let read = format!("cannot read {missing:?}: {error}");
     let classify = ["classify", "gentle"];
     assert_usage(&[], "missing command", "");
     assert_usage(&["check"], "unknown command \"check\"", "");

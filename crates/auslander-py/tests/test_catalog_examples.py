@@ -68,13 +68,19 @@ def _current_kernel(tmp_path: Path, monkeypatch) -> str:
 
 
 def _notebook_output(notebook) -> str:
-    """Collect text output from all executed notebook cells."""
+    """Collect text output from all executed notebook cells.
+
+    A kernel may split one cell's stream into several outputs, so the chunks
+    of a cell are concatenated and only cells are joined.
+    """
     return "\n".join(
-        output.get("text", "")
+        "".join(
+            output.get("text", "")
+            for output in cell.get("outputs", [])
+            if output.output_type == "stream"
+        )
         for cell in notebook.cells
         if cell.cell_type == "code"
-        for output in cell.get("outputs", [])
-        if output.output_type == "stream"
     )
 
 
