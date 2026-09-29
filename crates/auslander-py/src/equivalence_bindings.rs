@@ -1,6 +1,10 @@
 use super::*;
 
 /// Resource ceilings for deterministic tilting-complex discovery.
+///
+/// With `through_silting=True`, a walk also stores silting complexes that are
+/// not tilting and mutates them further. Targets come from tilting vertices
+/// only. Off by default.
 
 #[pyclass(name = "EquivalenceDiscoveryLimits", module = "auslander", frozen)]
 pub(crate) struct PyEquivalenceDiscoveryLimits {
@@ -15,16 +19,16 @@ impl PyEquivalenceDiscoveryLimits {
         max_directed_mutations=16384,
         max_total_terms=65536,
         max_matrix_entries=16777216,
-        max_work_units=16384,
-        max_hom_spaces=4096
+        max_hom_spaces=4096,
+        through_silting=false
     ))]
     fn new(
-        max_vertices: usize,
-        max_directed_mutations: usize,
-        max_total_terms: usize,
-        max_matrix_entries: usize,
-        max_work_units: usize,
-        max_hom_spaces: usize,
+        max_vertices: u64,
+        max_directed_mutations: u64,
+        max_total_terms: u64,
+        max_matrix_entries: u64,
+        max_hom_spaces: u64,
+        through_silting: bool,
     ) -> PyEquivalenceDiscoveryLimits {
         PyEquivalenceDiscoveryLimits {
             inner: DiscoveryLimits {
@@ -32,10 +36,69 @@ impl PyEquivalenceDiscoveryLimits {
                 max_directed_mutations,
                 max_total_terms,
                 max_matrix_entries,
-                max_work_units,
                 tilting: TiltingComplexLimits { max_hom_spaces },
+                through_silting,
             },
         }
+    }
+
+    #[getter]
+    fn max_vertices(&self) -> u64 {
+        self.inner.max_vertices
+    }
+
+    #[getter]
+    fn max_directed_mutations(&self) -> u64 {
+        self.inner.max_directed_mutations
+    }
+
+    #[getter]
+    fn max_total_terms(&self) -> u64 {
+        self.inner.max_total_terms
+    }
+
+    #[getter]
+    fn max_matrix_entries(&self) -> u64 {
+        self.inner.max_matrix_entries
+    }
+
+    #[getter]
+    fn max_hom_spaces(&self) -> u64 {
+        self.inner.tilting.max_hom_spaces
+    }
+
+    #[getter]
+    fn through_silting(&self) -> bool {
+        self.inner.through_silting
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        let limits = &self.inner;
+        format!(
+            "EquivalenceDiscoveryLimits(max_vertices={}, max_directed_mutations={}, \
+             max_total_terms={}, max_matrix_entries={}, max_hom_spaces={}, through_silting={})",
+            limits.max_vertices,
+            limits.max_directed_mutations,
+            limits.max_total_terms,
+            limits.max_matrix_entries,
+            limits.tilting.max_hom_spaces,
+            if limits.through_silting {
+                "True"
+            } else {
+                "False"
+            }
+        )
+    }
+}
+
+/// The ceiling that stopped a walk, or None when no ceiling did.
+pub(crate) fn discovery_stop_limit(stop: &DiscoveryStop) -> Option<u64> {
+    match *stop {
+        DiscoveryStop::MutationLimit { limit, .. }
+        | DiscoveryStop::VertexLimit { limit, .. }
+        | DiscoveryStop::TermLimit { limit, .. }
+        | DiscoveryStop::MatrixLimit { limit, .. } => Some(limit),
+        DiscoveryStop::ExhaustedFrontier | DiscoveryStop::Cancelled { .. } => None,
     }
 }
 
@@ -110,16 +173,8 @@ impl PyIncompleteEquivalenceGraph {
 
     /// The exact reason discovery stopped.
     #[getter]
-    fn stop(&self) -> &'static str {
-        match self.inner.stop() {
-            DiscoveryStop::ExhaustedFrontier => "exhausted_frontier",
-            DiscoveryStop::Cancelled { .. } => "cancelled",
-            DiscoveryStop::MutationLimit { .. } => "mutation_limit",
-            DiscoveryStop::WorkLimit { .. } => "work_limit",
-            DiscoveryStop::VertexLimit { .. } => "vertex_limit",
-            DiscoveryStop::TermLimit { .. } => "term_limit",
-            DiscoveryStop::MatrixLimit { .. } => "matrix_limit",
-        }
+    fn stop(&self) -> String {
+        variant_name(self.inner.stop())
     }
 
     #[getter]

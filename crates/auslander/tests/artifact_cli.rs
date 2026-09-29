@@ -1,8 +1,13 @@
-//! Fresh-process tests for the portable command-line program.
+//! Fresh-process tests for the `auslander` command.
 
 use std::process::Command;
 
-use auslander::algebra::linear_an;
+use std::sync::Arc;
+
+use auslander::algebra::{linear_an, path_algebra};
+use auslander::arquiver::IndecomposableCatalog;
+use auslander::atlas::{CatalogAtlas, CatalogAtlasLimits, MultiplicityLimits};
+use auslander::atlas_artifact::CatalogAtlasArtifact;
 use auslander::batch_stream::{
     HomologicalBatchStreamLimits, HomologicalStreamBudget, HomologicalStreamConfig,
     HomologicalStreamPortable, HomologicalStreamStep, homological_stream_from_census,
@@ -11,6 +16,7 @@ use auslander::census::{Census, CensusLimits, CensusOutcome, CensusPortable, Cen
 use auslander::derived_artifact::DerivedArtifact;
 use auslander::equivalence_edge::{DerivedEquivalenceEdge, DerivedEquivalenceEdgeOutcome};
 use auslander::field::PrimeField;
+use auslander::quiver::Quiver;
 use auslander::target::TargetLimits;
 use auslander::tilting_complex::{
     TiltingComplexLimits, TiltingComplexResult, TiltingMutationOutcome, left_tilting_mutation,
@@ -111,11 +117,14 @@ fn command(binary: &str, command: &str, path: &std::path::Path) -> std::process:
     output
 }
 
-fn check_commands(path: &std::path::Path, text: &str, fingerprint: &str) {
+fn check_commands(path: &std::path::Path, text: &str, fingerprint: &str, kind: &str) {
     let binary = env!("CARGO_BIN_EXE_auslander");
-    for name in ["inspect", "verify", "canonicalize", "fingerprint"] {
-        command(binary, name, path);
-    }
+    let inspect = command(binary, "inspect", path);
+    let inspect = String::from_utf8(inspect.stdout).unwrap();
+    let verify = String::from_utf8(command(binary, "verify", path).stdout).unwrap();
+    let (first, summary) = verify.split_once('\n').unwrap();
+    assert_eq!(first, format!("verified {kind} {fingerprint}"));
+    assert!(inspect.ends_with(&format!("{summary}fingerprint {fingerprint}\n")));
     let canonical = command(binary, "canonicalize", path);
     assert_eq!(String::from_utf8(canonical.stdout).unwrap().trim(), text);
     let actual_fingerprint = command(binary, "fingerprint", path);
@@ -134,7 +143,7 @@ fn every_artifact_command_runs_in_a_fresh_process() {
         std::process::id()
     ));
     std::fs::write(&path, &text).unwrap();
-    check_commands(&path, &text, artifact.fingerprint());
+    check_commands(&path, &text, artifact.fingerprint(), "auslander-derived-v2");
     std::fs::remove_file(path).unwrap();
 }
 
@@ -145,7 +154,7 @@ fn every_census_command_replays_in_a_fresh_process() {
     let path =
         std::env::temp_dir().join(format!("auslander-census-cli-{}.json", std::process::id()));
     std::fs::write(&path, &text).unwrap();
-    check_commands(&path, &text, census.fingerprint());
+    check_commands(&path, &text, census.fingerprint(), "census-v1");
     std::fs::remove_file(path).unwrap();
 }
 
@@ -158,7 +167,7 @@ fn every_compact_census_command_replays_in_a_fresh_process() {
         std::process::id()
     ));
     std::fs::write(&path, &text).unwrap();
-    check_commands(&path, &text, census.fingerprint());
+    check_commands(&path, &text, census.fingerprint(), "census-v1");
     std::fs::remove_file(path).unwrap();
 }
 
@@ -171,6 +180,65 @@ fn every_homological_stream_command_replays_in_a_fresh_process() {
         std::process::id()
     ));
     std::fs::write(&path, &text).unwrap();
-    check_commands(&path, &text, stream.fingerprint());
+    check_commands(
+        &path,
+        &text,
+        stream.fingerprint(),
+        "homological-self-pair-stream-v2",
+    );
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn every_catalog_atlas_command_replays_in_a_fresh_process() {
+    let algebra = path_algebra(Quiver::new(1, &[]).unwrap(), PrimeField::new(5).unwrap()).unwrap();
+    let catalog = Arc::new(IndecomposableCatalog::dynkin(&algebra).unwrap());
+    let atlas = CatalogAtlas::compute(catalog, 0, CatalogAtlasLimits::default()).unwrap();
+    let artifact =
+        CatalogAtlasArtifact::from_verified(&atlas, &[1], MultiplicityLimits::default()).unwrap();
+    let text = artifact.to_canonical_json();
+    let path =
+        std::env::temp_dir().join(format!("auslander-atlas-cli-{}.json", std::process::id()));
+    std::fs::write(&path, &text).unwrap();
+    check_commands(&path, &text, artifact.fingerprint(), "catalog-atlas-v1");
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn every_committed_theorem_command_replays_in_a_fresh_process() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("artifacts/research/commutative-square-f2-d2112-self-ext-1-3.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let fingerprint = &text[text.len() - 18..text.len() - 2];
+    let kind = "fixed-dimension-self-ext-locus-v1";
+    check_commands(&path, &text, fingerprint, kind);
+}
+
+#[test]
+fn every_committed_atlas_command_replays_in_a_fresh_process() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("artifacts/research/derived-atlas-f2-n3.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let fingerprint = &text[text.len() - 18..text.len() - 2];
+    check_commands(&path, &text, fingerprint, "derived-atlas-v1");
+}
+
+#[test]
+fn an_unknown_schema_fails_with_the_found_value() {
+    let path = std::env::temp_dir().join(format!(
+        "auslander-unknown-schema-cli-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(&path, r#"{"schema":"auslander-computation-v0"}"#).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_auslander"))
+        .arg("verify")
+        .arg(&path)
+        .output()
+        .unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap().trim(),
+        "auslander: unsupported portable value schema \"auslander-computation-v0\""
+    );
 }

@@ -18,7 +18,7 @@ use crate::perfect::{
 pub struct DerivedHomLimits {
     /// Limits for the source replacement.
     pub replacement: ReplacementLimits,
-    /// The greatest number of completed shift degrees.
+    /// The maximum number of completed shift degrees.
     pub max_degrees: usize,
     /// The greatest deterministic Hom work count.
     pub max_work_units: usize,

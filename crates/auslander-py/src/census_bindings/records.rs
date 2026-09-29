@@ -89,7 +89,7 @@ impl PyCensusCutReason {
 
     /// The limit attached to a bounded cut, when present.
     #[getter]
-    fn limit(&self) -> Option<usize> {
+    fn limit(&self) -> Option<u64> {
         match self.inner {
             CensusCutReason::CandidateLimit { limit }
             | CensusCutReason::RepresentativeLimit { limit }
@@ -163,7 +163,7 @@ pub(crate) fn census_reason(status: &CensusPortableStatus) -> Option<PyCensusCut
     }
 }
 
-pub(crate) fn census_counts(portable: &CensusPortable) -> BTreeMap<&'static str, usize> {
+pub(crate) fn census_counts(portable: &CensusPortable) -> BTreeMap<&'static str, u64> {
     BTreeMap::from([
         ("candidates", portable.candidates()),
         ("accepted_modules", portable.accepted_modules()),

@@ -4,9 +4,13 @@ from ._core import (
     BarLimits,
     CatalogEnumeration,
     ClosedSupportTauTiltingGraph,
+    ComputationControl,
+    DerivedInvariants,
+    GentlePresentation,
     HochschildCohomology,
     IncompleteHochschildCohomology,
     IncompleteSupportTauTiltingGraph,
+    InvariantLimits,
     Module,
     MutationGraphLimits,
     PrimeField,
@@ -114,6 +118,14 @@ class Algebra(_CoreValue):
         limits: BarLimits,
         field: PrimeField | None = ...,
     ) -> HochschildCohomology | IncompleteHochschildCohomology: ...
+
+    def derived_invariants(
+        self,
+        limits: InvariantLimits | None = ...,
+        control: ComputationControl | None = ...,
+        field: PrimeField | None = ...,
+    ) -> DerivedInvariants: ...
+    def gentle(self, field: PrimeField | None = ...) -> GentlePresentation: ...
 
     @property
     def field(self) -> PrimeField | None: ...

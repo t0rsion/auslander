@@ -115,9 +115,9 @@ impl Ledger {
         stage: BarStage,
         kind: BarLimit,
         proposed: usize,
-        ceiling: usize,
+        ceiling: u64,
     ) -> BuildResult<()> {
-        self.limit(kind, stage, degree, 0, proposed as u128, ceiling as u128)
+        self.limit(kind, stage, degree, 0, proposed as u128, ceiling.into())
     }
 
     pub(crate) fn shape(
@@ -157,7 +157,7 @@ impl Ledger {
             degree,
             self.matrix_entries as u128,
             proposed as u128,
-            self.limits.max_matrix_entries as u128,
+            self.limits.max_matrix_entries.into(),
         )
     }
 

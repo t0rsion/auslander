@@ -19,8 +19,10 @@ from .checkpoint import (
     write_checkpoint,
 )
 from .compute import compute_json, compute_request
+from .derived_atlas import verify_derived_atlas
 from .display import Explanation, Rendered, explain, show, to_dot, to_latex, to_networkx
 from .parser import ParsedPresentation, PresentationSyntaxError, parse_presentation
+from .presentation import presentation_text
 from .session import Session, verify_file
 from .theorem import (
     SelfExtLocusArtifactValue,
@@ -48,7 +50,7 @@ from .workflow import (
     write_definition,
 )
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 __all__ = [
     *[name for name in dir(_core) if not name.startswith("_")],
@@ -78,6 +80,7 @@ __all__ = [
     "inspect",
     "load_definition",
     "parse_presentation",
+    "presentation_text",
     "build_self_ext_locus_artifact_file",
     "load_checkpoint",
     "load_homological_checkpoint",
@@ -91,6 +94,7 @@ __all__ = [
     "resume",
     "verify",
     "verify_checkpoint",
+    "verify_derived_atlas",
     "verify_homological_checkpoint_file",
     "verify_self_ext_locus_artifact_file",
     "verify_file",

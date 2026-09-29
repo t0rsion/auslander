@@ -3,13 +3,15 @@ use crate::completion::CompletionLimits;
 use crate::equivalence_edge::DerivedEquivalenceEdge;
 use crate::target::{TargetLimits, TargetWork};
 use crate::tilting_complex::{
-    ApproximationDirection, CertifiedTiltingComplex, ThickGenerationWitness, TiltingComplexLimits,
+    ApproximationDirection, CertifiedSiltingComplex, ThickGenerationWitness, TiltingComplexLimits,
 };
 
 use super::DERIVED_ARTIFACT_SCHEMA;
 use super::errors::ArtifactError;
 use super::model::{ArtifactMutation, ArtifactParseLimits, DerivedArtifact};
 use super::parser::RawArtifact;
+pub(super) use crate::portable::fingerprint;
+use crate::portable::{push_list, push_numbers, seal};
 
 impl DerivedArtifact {
     /// Builds an artifact from one verified equivalence edge.
@@ -54,24 +56,12 @@ impl DerivedArtifact {
         output.push_str("{\"schema\":\"");
         output.push_str(DERIVED_ARTIFACT_SCHEMA);
         output.push_str("\",\"source\":");
-        push_bytes(&mut output, self.source.to_canonical_json().as_bytes());
-        output.push_str(",\"mutations\":[");
-        for (index, mutation) in self.mutations.iter().enumerate() {
-            if index != 0 {
-                output.push(',');
-            }
-            output.push('[');
-            output.push(match mutation.direction {
-                ApproximationDirection::Left => '0',
-                ApproximationDirection::Right => '1',
-            });
-            output.push(',');
-            output.push_str(&mutation.summand.to_string());
-            output.push(']');
-        }
-        output.push_str("],\"target\":");
-        push_bytes(&mut output, self.target.to_canonical_json().as_bytes());
-        output.push_str(",\"limits\":[");
+        push_numbers(&mut output, self.source.to_canonical_json().as_bytes());
+        output.push_str(",\"mutations\":");
+        push_list(&mut output, &self.mutations, push_mutation);
+        output.push_str(",\"target\":");
+        push_numbers(&mut output, self.target.to_canonical_json().as_bytes());
+        output.push_str(",\"limits\":");
         push_numbers(
             &mut output,
             &[
@@ -87,7 +77,7 @@ impl DerivedArtifact {
                 self.target_limits.completion.max_ambiguities,
             ],
         );
-        output.push_str("],\"work\":[");
+        output.push_str(",\"work\":");
         push_numbers(
             &mut output,
             &[
@@ -97,17 +87,12 @@ impl DerivedArtifact {
                 self.work.relation_terms,
             ],
         );
-        output.push(']');
         output
     }
 
     /// Serializes the artifact to byte-exact canonical JSON.
     pub fn to_canonical_json(&self) -> String {
-        let mut output = self.canonical_without_fingerprint();
-        output.push_str(",\"fingerprint\":\"");
-        output.push_str(&self.fingerprint);
-        output.push_str("\"}");
-        output
+        seal(self.canonical_without_fingerprint(), &self.fingerprint)
     }
 
     /// Parses the bounded artifact envelope and both strict certificates.
@@ -115,13 +100,6 @@ impl DerivedArtifact {
         text: &str,
         limits: ArtifactParseLimits,
     ) -> Result<DerivedArtifact, ArtifactError> {
-        if text.len() > limits.max_input_bytes {
-            return Err(ArtifactError::ParseLimit {
-                path: "$".to_string(),
-                used: text.len(),
-                limit: limits.max_input_bytes,
-            });
-        }
         let raw = RawArtifact::parse(text, limits)?;
         let source_text = String::from_utf8(raw.source).map_err(|_| ArtifactError::Syntax {
             byte: 0,
@@ -179,11 +157,23 @@ impl DerivedArtifact {
     }
 }
 
+/// Writes one recipe step as [`super::parser::read_mutation`] reads it.
+pub(crate) fn push_mutation(output: &mut String, mutation: &ArtifactMutation) {
+    output.push('[');
+    output.push(match mutation.direction {
+        ApproximationDirection::Left => '0',
+        ApproximationDirection::Right => '1',
+    });
+    output.push(',');
+    output.push_str(&mutation.summand.to_string());
+    output.push(']');
+}
+
 fn collect_mutations(
-    tilting: &CertifiedTiltingComplex,
+    complex: &CertifiedSiltingComplex,
     output: &mut Vec<ArtifactMutation>,
 ) -> Result<(), ArtifactError> {
-    match tilting.generation() {
+    match complex.generation() {
         ThickGenerationWitness::Regular => Ok(()),
         ThickGenerationWitness::Mutation {
             parent,
@@ -197,33 +187,4 @@ fn collect_mutations(
             Ok(())
         }
     }
-}
-
-fn push_bytes(output: &mut String, bytes: &[u8]) {
-    output.push('[');
-    for (index, byte) in bytes.iter().enumerate() {
-        if index != 0 {
-            output.push(',');
-        }
-        output.push_str(&byte.to_string());
-    }
-    output.push(']');
-}
-
-fn push_numbers(output: &mut String, values: &[usize]) {
-    for (index, value) in values.iter().enumerate() {
-        if index != 0 {
-            output.push(',');
-        }
-        output.push_str(&value.to_string());
-    }
-}
-
-pub(super) fn fingerprint(text: &str) -> String {
-    let mut value = 0xcbf29ce484222325u64;
-    for byte in text.bytes() {
-        value ^= u64::from(byte);
-        value = value.wrapping_mul(0x100000001b3);
-    }
-    format!("{value:016x}")
 }

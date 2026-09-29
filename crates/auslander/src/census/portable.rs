@@ -1,5 +1,9 @@
 use crate::algebra::AlgebraBuildError;
 use crate::certificate::{CertParseError, Certificate};
+use crate::portable::{
+    Cursor, CursorLimits, fingerprint, is_fingerprint, open_header, push_ascii, push_escaped, push_list,
+    push_numbers, push_number_object, seal,
+};
 use crate::verify::verify;
 
 /// The versioned schema shared by portable computation values.
@@ -18,27 +22,27 @@ pub struct CensusParseLimits {
     pub max_input_bytes: usize,
     /// The greatest byte count of the embedded completion certificate.
     pub max_certificate_bytes: usize,
-    /// The greatest number of dimension entries.
+    /// The maximum number of dimension entries.
     pub max_dimensions: usize,
     /// The greatest dimension at one vertex.
     pub max_dimension: usize,
-    /// The greatest number of retained representatives.
+    /// The maximum number of retained representatives.
     pub max_representatives: usize,
-    /// The greatest number of retained assignments.
+    /// The maximum number of retained assignments.
     pub max_assignments: usize,
     /// The greatest coordinate count in one module.
     pub max_coordinate_values: usize,
-    /// The greatest number of witness matrices.
+    /// The maximum number of witness matrices.
     pub max_witness_matrices: usize,
-    /// The greatest number of rows in one witness matrix.
+    /// The maximum number of rows in one witness matrix.
     pub max_witness_rows: usize,
-    /// The greatest number of columns in one witness row.
+    /// The maximum number of columns in one witness row.
     pub max_witness_columns: usize,
-    /// The greatest number of scalar witness entries.
+    /// The maximum number of scalar witness entries.
     pub max_witness_entries: usize,
-    /// The greatest number of numeric values in the whole document.
+    /// The maximum number of numeric values in the whole document.
     pub max_numeric_values: usize,
-    /// The greatest number of elements across all parsed arrays.
+    /// The maximum number of elements across all parsed arrays.
     pub max_array_elements: usize,
     /// The greatest digit count in one unsigned integer.
     pub max_integer_digits: usize,
@@ -73,22 +77,22 @@ impl Default for CensusParseLimits {
 pub struct CensusVerifyLimits {
     /// Limits applied by the portable parser.
     pub parse: CensusParseLimits,
-    /// The greatest number of algebra vertices to reconstruct.
+    /// The maximum number of algebra vertices to reconstruct.
     pub max_vertices: usize,
     /// The greatest coordinate count in the reconstructed domain.
     pub max_coordinates: usize,
     /// The greatest candidate dimension at one vertex.
     pub max_dimension: usize,
-    /// The greatest number of candidates replayed.
-    pub max_candidates: usize,
-    /// The greatest number of retained representatives during replay.
-    pub max_representatives: usize,
-    /// The greatest number of retained assignments during replay.
-    pub max_assignments: usize,
-    /// The greatest number of isomorphism checks during replay.
-    pub max_isomorphism_checks: usize,
+    /// The maximum number of candidates replayed.
+    pub max_candidates: u64,
+    /// The maximum number of retained representatives during replay.
+    pub max_representatives: u64,
+    /// The maximum number of retained assignments during replay.
+    pub max_assignments: u64,
+    /// The maximum number of isomorphism checks during replay.
+    pub max_isomorphism_checks: u64,
     /// The greatest work count during replay.
-    pub max_work_units: usize,
+    pub max_work_units: u64,
 }
 
 impl Default for CensusVerifyLimits {
@@ -164,11 +168,11 @@ pub struct CensusPortable {
     coordinate_count: usize,
     cursor: u128,
     limits: CensusLimits,
-    candidates: usize,
-    accepted_modules: usize,
-    rejected_candidates: usize,
-    isomorphism_checks: usize,
-    work_units: usize,
+    candidates: u64,
+    accepted_modules: u64,
+    rejected_candidates: u64,
+    isomorphism_checks: u64,
+    work_units: u64,
     representatives: Vec<CensusPortableRepresentative>,
     assignments: Vec<CensusPortableAssignment>,
     status: CensusPortableStatus,
@@ -257,15 +261,15 @@ impl CensusPortable {
         /// The retention policy used for duplicate records.
         pub retention() -> CensusRetention = |this| this.limits.retention;
         /// The number of fully processed raw candidates.
-        pub candidates() -> usize = |this| this.candidates;
+        pub candidates() -> u64 = |this| this.candidates;
         /// The number of relation-valid candidates classified into a class.
-        pub accepted_modules() -> usize = |this| this.accepted_modules;
+        pub accepted_modules() -> u64 = |this| this.accepted_modules;
         /// The number of relation-invalid candidates.
-        pub rejected_candidates() -> usize = |this| this.rejected_candidates;
+        pub rejected_candidates() -> u64 = |this| this.rejected_candidates;
         /// The number of completed isomorphism checks.
-        pub isomorphism_checks() -> usize = |this| this.isomorphism_checks;
+        pub isomorphism_checks() -> u64 = |this| this.isomorphism_checks;
         /// The exact candidate and comparison work count.
-        pub work_units() -> usize = |this| this.work_units;
+        pub work_units() -> u64 = |this| this.work_units;
         /// The retained representatives in first-seen order.
         pub representatives() -> &[CensusPortableRepresentative] = |this| &this.representatives;
         /// The retained duplicate assignments in candidate order.
@@ -278,73 +282,69 @@ impl CensusPortable {
 
     /// Serializes this value to byte-exact canonical JSON.
     pub fn to_canonical_json(&self) -> String {
-        let mut output = self.canonical_without_fingerprint();
-        output.push_str(",\"fingerprint\":\"");
-        output.push_str(&self.fingerprint);
-        output.push_str("\"}");
-        output
+        seal(self.canonical_without_fingerprint(), &self.fingerprint)
     }
 
     fn canonical_without_fingerprint(&self) -> String {
-        let mut output = String::new();
-        output.push_str("{\"schema\":\"");
-        output.push_str(CENSUS_PORTABLE_SCHEMA);
-        output.push_str("\",\"kind\":\"");
-        output.push_str(CENSUS_PORTABLE_KIND);
-        output.push_str("\",\"engine\":\"");
-        output.push_str(CENSUS_ENGINE_ID);
-        output.push_str("\",\"retention\":\"");
+        let mut output = open_header([CENSUS_PORTABLE_SCHEMA, CENSUS_PORTABLE_KIND, CENSUS_ENGINE_ID]);
+        output.push_str(",\"retention\":\"");
         output.push_str(self.limits.retention.as_str());
-        output.push_str("\",\"certificate\":\"");
-        push_escaped_string(&mut output, self.certificate.to_canonical_json().as_bytes());
-        output.push('"');
+        output.push_str("\",\"certificate\":");
+        push_escaped(&mut output, self.certificate.to_canonical_json().as_bytes());
         output.push_str(",\"dimensions\":");
-        push_usizes(&mut output, &self.dimensions);
+        push_numbers(&mut output, &self.dimensions);
         output.push_str(",\"raw_space_size\":");
-        push_decimal_string(&mut output, self.raw_space_size);
+        push_ascii(&mut output, &self.raw_space_size.to_string());
         output.push_str(",\"coordinate_count\":");
         output.push_str(&self.coordinate_count.to_string());
         output.push_str(",\"cursor\":");
-        push_decimal_string(&mut output, self.cursor);
+        push_ascii(&mut output, &self.cursor.to_string());
         output.push_str(",\"limits\":");
-        push_limits(&mut output, self.limits);
-        output.push_str(",\"counts\":");
-        push_counts(
+        push_number_object(
             &mut output,
-            self.candidates,
-            self.accepted_modules,
-            self.rejected_candidates,
-            self.isomorphism_checks,
+            &[
+                ("max_candidates", self.limits.max_candidates),
+                ("max_representatives", self.limits.max_representatives),
+                ("max_assignments", self.limits.max_assignments),
+                ("max_isomorphism_checks", self.limits.max_isomorphism_checks),
+                ("max_work_units", self.limits.max_work_units),
+            ],
+        );
+        output.push_str(",\"counts\":");
+        push_number_object(
+            &mut output,
+            &[
+                ("candidates", self.candidates),
+                ("accepted_modules", self.accepted_modules),
+                ("rejected_candidates", self.rejected_candidates),
+                ("isomorphism_checks", self.isomorphism_checks),
+            ],
         );
         output.push_str(",\"work_units\":");
         output.push_str(&self.work_units.to_string());
-        output.push_str(",\"representatives\":[");
-        for (index, representative) in self.representatives.iter().enumerate() {
-            if index != 0 {
-                output.push(',');
-            }
+        output.push_str(",\"representatives\":");
+        push_list(&mut output, &self.representatives, |output, representative| {
             output.push_str("{\"cursor\":");
-            push_decimal_string(&mut output, representative.cursor);
+            push_ascii(output, &representative.cursor.to_string());
             output.push_str(",\"coordinates\":");
-            push_usizes(&mut output, &representative.coordinates);
+            push_numbers(output, &representative.coordinates);
             output.push('}');
-        }
-        output.push_str("],\"assignments\":[");
-        for (index, assignment) in self.assignments.iter().enumerate() {
-            if index != 0 {
-                output.push(',');
-            }
+        });
+        output.push_str(",\"assignments\":");
+        push_list(&mut output, &self.assignments, |output, assignment| {
             output.push_str("{\"cursor\":");
-            push_decimal_string(&mut output, assignment.cursor);
+            push_ascii(output, &assignment.cursor.to_string());
             output.push_str(",\"coordinates\":");
-            push_usizes(&mut output, &assignment.coordinates);
+            push_numbers(output, &assignment.coordinates);
             output.push_str(",\"representative\":");
             output.push_str(&assignment.representative.to_string());
             output.push_str(",\"witness\":");
-            push_witness(&mut output, &assignment.witness);
+            push_list(output, &assignment.witness, |output, rows| {
+                push_list(output, rows, |output, row| push_numbers(output, row));
+            });
             output.push('}');
-        }
-        output.push_str("],\"status\":");
+        });
+        output.push_str(",\"status\":");
         push_status(&mut output, &self.status);
         output
     }
@@ -352,50 +352,29 @@ impl CensusPortable {
     /// Parses one canonical portable JSON value under explicit limits.
     pub fn from_json(text: &str, limits: CensusParseLimits) -> Result<Self, CensusPortableError> {
         let raw = CensusRawPortable::parse(text, limits)?;
-        let certificate_text =
-            String::from_utf8(raw.certificate).map_err(|_| CensusPortableError::Syntax {
-                byte: 0,
-                message: "embedded certificate bytes are not UTF-8".to_string(),
-            })?;
         let certificate =
-            Certificate::from_json(&certificate_text).map_err(CensusPortableError::Certificate)?;
-        if raw.retention == CensusRetention::RepresentativesOnly && !raw.assignments.is_empty() {
+            Certificate::from_json(&raw.certificate).map_err(CensusPortableError::Certificate)?;
+        if raw.limits.retention == CensusRetention::RepresentativesOnly
+            && !raw.assignments.is_empty()
+        {
             return Err(CensusPortableError::CountMismatch {
                 field: "assignments for representatives_only retention".to_string(),
             });
         }
-        let mut limits = raw.limits;
-        limits.retention = raw.retention;
         let portable = Self {
             certificate,
             dimensions: raw.dimensions,
             raw_space_size: raw.raw_space_size,
             coordinate_count: raw.coordinate_count,
             cursor: raw.cursor,
-            limits,
+            limits: raw.limits,
             candidates: raw.counts[0],
             accepted_modules: raw.counts[1],
             rejected_candidates: raw.counts[2],
             isomorphism_checks: raw.counts[3],
             work_units: raw.work_units,
-            representatives: raw
-                .representatives
-                .into_iter()
-                .map(|representative| CensusPortableRepresentative {
-                    cursor: representative.cursor,
-                    coordinates: representative.coordinates,
-                })
-                .collect(),
-            assignments: raw
-                .assignments
-                .into_iter()
-                .map(|assignment| CensusPortableAssignment {
-                    cursor: assignment.cursor,
-                    coordinates: assignment.coordinates,
-                    representative: assignment.representative,
-                    witness: assignment.witness,
-                })
-                .collect(),
+            representatives: raw.representatives,
+            assignments: raw.assignments,
             status: raw.status,
             fingerprint: raw.fingerprint,
         };
@@ -475,13 +454,13 @@ impl CensusPortable {
         let certificate_bytes = self.certificate.to_canonical_json().len();
         check_limit(
             "certificate_bytes",
-            certificate_bytes,
-            limits.parse.max_certificate_bytes,
+            certificate_bytes as u64,
+            limits.parse.max_certificate_bytes as u64,
         )?;
         check_limit(
             "vertices",
-            self.certificate.quiver.vertices as usize,
-            limits.max_vertices,
+            u64::from(self.certificate.quiver.vertices),
+            limits.max_vertices as u64,
         )
     }
 
@@ -495,18 +474,18 @@ impl CensusPortable {
         }
         check_limit(
             "representative_count",
-            self.representatives.len(),
+            self.representatives.len() as u64,
             limits.max_representatives,
         )?;
         check_limit(
             "assignment_count",
-            self.assignments.len(),
+            self.assignments.len() as u64,
             limits.max_assignments,
         )?;
         check_limit(
             "coordinate_count",
-            self.coordinate_count,
-            limits.max_coordinates,
+            self.coordinate_count as u64,
+            limits.max_coordinates as u64,
         )
     }
 
@@ -519,7 +498,7 @@ impl CensusPortable {
         &self,
         limits: &CensusVerifyLimits,
     ) -> Result<(), CensusPortableError> {
-        let cursor = usize::try_from(self.cursor)
+        let cursor = u64::try_from(self.cursor)
             .map_err(|_| CensusPortableError::CounterOverflow { field: "cursor" })?;
         check_limit("cursor", cursor, limits.max_candidates)?;
         check_limit("candidates", self.candidates, limits.max_candidates)?;

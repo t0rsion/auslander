@@ -17,11 +17,11 @@ impl PyCatalogAtlasLimits {
     #[new]
     #[pyo3(signature = (max_pairs=None, max_ext_cells=None, max_resolution_terms=None, max_materialized_summands=None, max_materialized_cells=None))]
     fn new(
-        max_pairs: Option<usize>,
-        max_ext_cells: Option<usize>,
-        max_resolution_terms: Option<usize>,
-        max_materialized_summands: Option<usize>,
-        max_materialized_cells: Option<usize>,
+        max_pairs: Option<u64>,
+        max_ext_cells: Option<u64>,
+        max_resolution_terms: Option<u64>,
+        max_materialized_summands: Option<u64>,
+        max_materialized_cells: Option<u64>,
     ) -> Self {
         let defaults = CatalogAtlasLimits::default();
         Self {
@@ -38,27 +38,27 @@ impl PyCatalogAtlasLimits {
     }
 
     #[getter]
-    fn max_pairs(&self) -> usize {
+    fn max_pairs(&self) -> u64 {
         self.inner.max_pairs
     }
 
     #[getter]
-    fn max_ext_cells(&self) -> usize {
+    fn max_ext_cells(&self) -> u64 {
         self.inner.max_ext_cells
     }
 
     #[getter]
-    fn max_resolution_terms(&self) -> usize {
+    fn max_resolution_terms(&self) -> u64 {
         self.inner.max_resolution_terms
     }
 
     #[getter]
-    fn max_materialized_summands(&self) -> usize {
+    fn max_materialized_summands(&self) -> u64 {
         self.inner.max_materialized_summands
     }
 
     #[getter]
-    fn max_materialized_cells(&self) -> usize {
+    fn max_materialized_cells(&self) -> u64 {
         self.inner.max_materialized_cells
     }
 
@@ -86,7 +86,7 @@ impl PyMultiplicityLimits {
     /// `MultiplicityLimits` accepts optional solution and search-node ceilings.
     #[new]
     #[pyo3(signature = (max_solutions=None, max_nodes=None))]
-    fn new(max_solutions: Option<usize>, max_nodes: Option<usize>) -> Self {
+    fn new(max_solutions: Option<u64>, max_nodes: Option<u64>) -> Self {
         let defaults = MultiplicityLimits::default();
         Self {
             inner: MultiplicityLimits {
@@ -97,12 +97,12 @@ impl PyMultiplicityLimits {
     }
 
     #[getter]
-    fn max_solutions(&self) -> usize {
+    fn max_solutions(&self) -> u64 {
         self.inner.max_solutions
     }
 
     #[getter]
-    fn max_nodes(&self) -> usize {
+    fn max_nodes(&self) -> u64 {
         self.inner.max_nodes
     }
 
@@ -125,27 +125,27 @@ pub(crate) struct PyCatalogAtlasWork {
 #[pymethods]
 impl PyCatalogAtlasWork {
     #[getter]
-    fn pairs(&self) -> usize {
+    fn pairs(&self) -> u64 {
         self.inner.pairs
     }
 
     #[getter]
-    fn ext_cells(&self) -> usize {
+    fn ext_cells(&self) -> u64 {
         self.inner.ext_cells
     }
 
     #[getter]
-    fn resolutions(&self) -> usize {
+    fn resolutions(&self) -> u64 {
         self.inner.resolutions
     }
 
     #[getter]
-    fn resolution_terms(&self) -> usize {
+    fn resolution_terms(&self) -> u64 {
         self.inner.resolution_terms
     }
 
     #[getter]
-    fn ext_tables(&self) -> usize {
+    fn ext_tables(&self) -> u64 {
         self.inner.ext_tables
     }
 
@@ -344,16 +344,16 @@ impl PyCatalogAtlasArtifactVerifyLimits {
         max_catalog_entries: Option<usize>,
         max_dimension: Option<usize>,
         max_degree: Option<usize>,
-        max_pairs: Option<usize>,
-        max_ext_cells: Option<usize>,
-        max_resolution_terms: Option<usize>,
+        max_pairs: Option<u64>,
+        max_ext_cells: Option<u64>,
+        max_resolution_terms: Option<u64>,
         max_result_rows: Option<usize>,
         max_multiplicity: Option<usize>,
-        max_nodes: Option<usize>,
-        max_materialized_summands: Option<usize>,
-        max_materialized_cells: Option<usize>,
+        max_nodes: Option<u64>,
+        max_materialized_summands: Option<u64>,
+        max_materialized_cells: Option<u64>,
         max_entry_total_dimension: Option<usize>,
-        max_generic_ext_cells: Option<usize>,
+        max_generic_ext_cells: Option<u64>,
     ) -> Self {
         let defaults = CatalogAtlasArtifactVerifyLimits::default();
         Self {
@@ -472,17 +472,17 @@ impl PyCatalogAtlasArtifactVerifyLimits {
     }
 
     #[getter]
-    fn max_pairs(&self) -> usize {
+    fn max_pairs(&self) -> u64 {
         self.inner.max_pairs
     }
 
     #[getter]
-    fn max_ext_cells(&self) -> usize {
+    fn max_ext_cells(&self) -> u64 {
         self.inner.max_ext_cells
     }
 
     #[getter]
-    fn max_resolution_terms(&self) -> usize {
+    fn max_resolution_terms(&self) -> u64 {
         self.inner.max_resolution_terms
     }
 
@@ -497,17 +497,17 @@ impl PyCatalogAtlasArtifactVerifyLimits {
     }
 
     #[getter]
-    fn max_nodes(&self) -> usize {
+    fn max_nodes(&self) -> u64 {
         self.inner.max_nodes
     }
 
     #[getter]
-    fn max_materialized_summands(&self) -> usize {
+    fn max_materialized_summands(&self) -> u64 {
         self.inner.max_materialized_summands
     }
 
     #[getter]
-    fn max_materialized_cells(&self) -> usize {
+    fn max_materialized_cells(&self) -> u64 {
         self.inner.max_materialized_cells
     }
 
@@ -517,7 +517,7 @@ impl PyCatalogAtlasArtifactVerifyLimits {
     }
 
     #[getter]
-    fn max_generic_ext_cells(&self) -> usize {
+    fn max_generic_ext_cells(&self) -> u64 {
         self.inner.max_generic_ext_cells
     }
 

@@ -5,673 +5,165 @@
 [![docs.rs](https://img.shields.io/docsrs/auslander)](https://docs.rs/auslander)
 [![PyPI](https://img.shields.io/pypi/v/auslander.svg)](https://pypi.org/project/auslander/)
 
-Computational representation theory of finite-dimensional bound quiver algebras.
+auslander is a Rust library, with Python bindings, for exact computation
+with finite-dimensional algebras `kQ/I` over a prime field and their right
+modules. The ideal `I` may be any admissible ideal, given by relations such
+as `ab - cd`.
 
-Scope: finite-dimensional basic algebras kQ/I over a checked prime field, where
-I is a general admissible ideal, and finite-dimensional right modules. Correct
-before general.
+Every answer is either exact or says in its type how it is partial. A
+projective dimension is `Exact(n)` or `AtLeast(n)`, and a resolution ends
+`Finite` or `Cut`. Nothing truncates silently. Most results also carry a
+witness that a separate verifier rechecks, so a claim does not depend on
+trusting the code that found it.
+
+## What it computes
+
+An algebra is built by Gröbner completion of its relations. The completion
+emits a certificate, and an independent verifier checks it before an
+`Algebra` value exists. Dimension, the Cartan matrix, and all structure
+constants are then exact.
+
+Modules come with the standard homological toolkit: Hom spaces, kernels and
+cokernels, minimal projective and injective resolutions, Ext in every
+degree, and projective, injective, and global dimension. Hochschild
+cohomology is computed from the bar construction under explicit limits.
+
+The Auslander-Reiten layer computes the translate `τ` by two independent
+routes, almost split sequences with recheckable witnesses, and AR quivers
+for Nakayama, zero-ideal Dynkin, and gentle-tree algebras. Support
+τ-tilting pairs are classified and mutated, and a complete mutation graph is
+certified by a closure witness.
+
+The derived layer works with bounded complexes of projectives. It certifies
+classical tilting modules and tilting complexes, recovers `End(T)^op`, and
+finds derived equivalences by tilting mutation. Version 0.10 classifies a
+finite family of algebras up to derived equivalence: two members share a
+class only through a replayable equivalence, and two classes are separated
+only by a recomputed invariant. For the 894 connected gentle algebras with 4
+vertices over `F_2` this gives 103 classes with one pair left unresolved.
+
+Results can be saved as portable JSON artifacts. Replay rebuilds every
+algebra and rechecks every claim. The same verifier runs in the browser as
+WebAssembly.
 
 ## Install
 
-Install the Rust crate from crates.io:
-
 ```sh
 cargo add auslander
-```
-
-Install the Python package from PyPI:
-
-```sh
 python -m pip install auslander
 ```
 
-## Complete catalog queries
+The crate needs Rust 1.88 or later. The Python package needs CPython 3.10
+or later.
 
-Version 0.9 adds reusable Ext tables and complete fixed-dimension module
-searches over certified indecomposable catalogs. Catalogs cover Nakayama
-algebras, zero-ideal Dynkin path algebras, and gentle algebras whose underlying
-undirected quiver is a tree.
+## Example: modules over the commutative square
 
-Build a field-bound algebra, choose its complete catalog, and cache the
-ordered Ext dimensions:
+The algebra `kQ/(ab - cd)` on the square quiver `0 → 1 → 3`, `0 → 2 → 3`:
+
+```rust
+use auslander::algebra::commutative_square;
+use auslander::ar::tau;
+use auslander::ext::ext_table;
+use auslander::field::PrimeField;
+use auslander::module::Module;
+use auslander::resolution::{Bounded, projective_dimension};
+
+let algebra = commutative_square(PrimeField::new(5).unwrap());
+assert_eq!(algebra.dim(), 9);
+
+let s0 = Module::simple(&algebra, 0);
+let s3 = Module::simple(&algebra, 3);
+assert_eq!(projective_dimension(&s0, 5), Bounded::Exact(2));
+// dim Ext^k(S_0, S_3) for k = 0..3: the relation ab - cd sits in degree 2.
+assert_eq!(ext_table(&s0, &s3, 3).unwrap(), vec![0, 0, 1, 0]);
+// The Auslander-Reiten translate, checked by two independent routes.
+assert_eq!(tau(&s0).unwrap().dim_vector(), [1, 1, 1, 0]);
+```
+
+## Example: derived classification
+
+Rust. The 77 connected gentle algebras with 3 vertices over `F_2` fall into
+30 derived equivalence classes, and every pair is decided:
+
+```rust
+use auslander::control::ComputationControl;
+use auslander::derived_classification::{ClassificationLimits, classify_derived};
+use auslander::field::PrimeField;
+use auslander::gentle::connected_gentle_algebras;
+
+let family = connected_gentle_algebras(3, PrimeField::new(2).unwrap()).unwrap();
+let limits = ClassificationLimits::with_walk_vertices(8);
+let result = classify_derived(&family, &limits, &ComputationControl::new()).unwrap();
+assert_eq!((family.len(), result.classes().len()), (77, 30));
+assert!(result.unresolved().is_empty());
+```
+
+Python. Classify all connected gentle algebras with at most 3 vertices,
+export the result, and replay the file from scratch:
 
 ```python
 import auslander as au
 
-F = au.PrimeField(5)
-Q = au.Quiver(4, [(0, 1), (1, 2), (3, 2)])
-A = au.Algebra(Q, [[0, 1]], field=F)
-catalog = A.catalog()
-atlas = catalog.atlas(max_degree=3)
-result = atlas.enumerate([1, 1, 1, 1])
-print(catalog.provenance)
-print(result)
+F = au.PrimeField(2)
+family = [A for n in (1, 2, 3) for A in au.connected_gentle_algebras(n, field=F)]
+result = au.classify_derived(family)
+print(result.status, len(family), len(result.classes), len(result.unresolved))
+replayed = au.verify_derived_atlas(result.export("atlas.json"))
+print(replayed.verification, replayed.fingerprint)
 ```
 
-For catalog entries `X_i`, the atlas stores
-`E_k[i,j] = dim Ext^k(X_i,X_j)`. A multiplicity vector `m` describes
-`⊕ m_i X_i`. The query enumerates every vector satisfying
-`Σ m_i dim X_i = d`, or returns a typed Cut with its exact retained prefix.
-Cached scores use `m^T E_k n`. Direct-sum materialization requires no
-isomorphism search.
-
-A portable atlas artifact records its certificate, field, catalog order,
-dimension vector, degree bound, limits, status, and rows. Replay rebuilds the
-catalog, repeats the enumeration, and checks every Ext cell through the generic
-Ext path. It rejects omitted and duplicate rows. A replayed Cut remains a Cut.
-Replay shares library algorithms; the GAP/QPA fixtures provide separate
-comparisons on the tested inputs.
-
-Start with the [executed catalog workflow](crates/auslander-py/docs/catalog-workflow.md)
-and its [teaching notebook](crates/auslander-py/examples/catalog_workflow.ipynb).
-The [artifact contract](docs/catalog-artifacts.md) explains replay and limits.
-The [benchmark](docs/catalog-benchmarks.md) measures setup, queries,
-materialization, and verification. Existing Python users should read the
-[v0.9 migration guide](docs/migration-v09.md).
-
-General algebras retain the finite raw-census workflow introduced in v0.8.
-The [commutative-square study](docs/commutative-square-study.md) records a
-finite self-Ext locus, including a degree-two obstruction missed by a
-degree-one check. See the [theorem artifact guide](docs/theorem-artifacts.md),
-[compiled-family measurements](docs/compiled-family-performance.md), and
-[derived workbench contract](docs/derived-equivalence-workbench.md).
-
-## First result
-
-Named constructors build common algebras. This example computes the dimension
-and Cartan matrix of the three-arrow Kronecker algebra over F_5:
-
-```rust
-use auslander::algebra::kronecker;
-use auslander::field::PrimeField;
-
-let algebra = kronecker(3, PrimeField::new(5).unwrap());
-assert_eq!(algebra.dim(), 5);
-assert_eq!(algebra.cartan_matrix(), vec![vec![1, 3], vec![0, 1]]);
+```text
+complete 88 40 0
+replayed 2e101da54286279b
 ```
 
-A relation is a k-combination of paths of length at least 2 that all share one
-source and one target. `ab - cd` is a relation, and so is the inhomogeneous
-`ab - cde`. A monomial ideal is the case where every relation has one term.
-Non-uniform input is rejected, not decomposed.
+`result.explain()` states for each pair why it is merged, separated, or
+unresolved, and `au.to_latex(result)` writes the class table.
 
-Every algebra comes from one pipeline. Completion turns the relations into the
-reduced Groebner basis of the ideal and emits a serializable certificate. The
-verifier reads that certificate back from bytes and rechecks the whole claim.
+The command line runs the same classification and verifies any artifact:
 
-The verifier checks both ideal inclusions: each basis element expands to a
-two-sided combination of the input relations, and each input relation reduces to
-zero over the basis. It re-enumerates every overlap and inclusion ambiguity
-itself, and rejects a missing entry and an extra one. Every reduction
-trace replays to zero in strict order descent. The verifier rebuilds the
-normal-word automaton from the leading words with its own construction and
-requires the certificate's automaton to match. It decides finiteness by
-acyclicity, and the certificate's claim must agree; an infinite claim needs a
-`(prefix, cycle)` witness the verifier replays in full.
-
-The verifier shares no completion, ambiguity enumeration, or reduction code with
-the engine. An `Algebra` value exists only after typed verification accepts a
-completion certificate. The byte-input verifier also checks certificates loaded
-from JSON. Dimension, the Cartan matrix, and every multiplication table
-are therefore exact. Nothing in the crate truncates silently.
-
-Two types split the work. `Algebra` is the runtime algebra and owns its prime
-field. The dimension and the structure constants of a general quotient depend on
-the field: the ideal generated by `ab - 2cd` on the square quiver is the
-monomial ideal `(ab)` over F_2 and a non-monomial ideal over F_3, and the two
-sides differ in `tau` and in how `rad P_0` decomposes. `MonomialIdeal` and
-`MonomialPresentation`, in the `monomial` module, stay field-free and carry the
-combinatorics that needs no field: forbidden words, the standard-path
-automaton, the exact finiteness decision, dimension, and Cartan data. They
-analyze and never construct; `monomial_presentation` turns a `MonomialIdeal`
-into a `Presentation` over a field, which then takes the one pipeline every
-algebra takes.
-
-Rejected input and exhausted budgets are typed and carry evidence.
-`AlgebraBuildError::Truncated` names the budget that ran out and reports the
-basis size, the pending ambiguity count, and the steps consumed.
-`InfiniteDimensional` carries the certificate and a `(prefix, cycle)` word
-witness, so no infinite-dimensional algebra value ever exists. `RelationError`
-names the offending term and what is wrong with it. `Verification` reports a
-verifier rejection of the engine's own certificate: an engine defect that stays
-a typed value rather than a panic.
-
-Partial computations say so in their types: `projective_dimension` returns
-`Bounded::Exact(n)` or `Bounded::AtLeast(n)`, a resolution prefix ends with
-`ResolutionEnd::Finite` or `ResolutionEnd::Cut { at }`, and no
-`None`-means-infinite convention exists anywhere.
-
-Decomposition, isomorphism, and indecomposability each return a
-machine-checkable witness or an explicit statement that no witness was found.
-None of them returns a bare yes.
-
-Every Auslander-Reiten object holds a recheckable witness. A short exact
-sequence exists only after per-vertex exactness checks. Split status comes
-with a retraction and a section, or with a dual vector proving the
-retraction system unsolvable. A Yoneda product can return the chain lifts
-that computed it. Almost-split status is never a bare flag:
-`almost_split` gates its result behind an explicit `AlmostSplitWitness`,
-and `verify` rechecks every gate from the stored data and the live modules.
-
-Enumeration carries a certificate rather than an assertion. A support
-tau-tilting pair is verified against the four conditions on any algebra the
-crate can build. A complete list of them exists only as a
-`ClosedSupportTauTiltingGraph`, built past a closure witness that rechecks
-every vertex and every slot. A walk that stops early keeps its certified part
-and claims nothing about completeness.
-
-Higher homological claims pass through checked finite complexes.
-`CheckedComplex` rejects a bad endpoint or nonzero consecutive composite, then
-returns either `ExactComplex` or the first `NonExactWitness`. The relative
-normalized bar construction computes Hochschild cohomology under four explicit
-ceilings. A cut retains only finished degrees and names its first rejected
-reservation. Classical tilting classification uses the same exact complex for
-the generation condition. It distinguishes a positive self-extension from a
-projective-dimension or generation bound that leaves the question open.
-
-A verified classical tilting module can recover its split target algebra.
-`present_target` constructs `End_A(T)^op` for the crate's right-module
-convention. It stores a deterministic quiver, relations, the map into
-`End_A(T)`, its inverse, and exact work counts. A non-split residue field and a
-resource cut are separate typed outcomes. No partial target algebra escapes a
-cut.
-
-The non-split outcome states a domain boundary. It is unreachable for a
-certified tilting module over the supported prime fields: every summand is
-tau-rigid, and the finite-field obstruction forces residue degree one.
-
-The derived layer checks more than the target ring. `BoundedComplex` uses
-integer homological degrees and provides chain maps, shifts, direct sums,
-cones, homotopies, and Hom modulo null-homotopy. `StrictTransport` applies
-`Hom_A(T, -)` to bounded complexes whose terms carry `add(T)` witnesses. Its
-inverse accepts bounded complexes of projective target modules. A
-`DerivedEquivalenceCertificate` checks the tilting resolution, graded
-homotopy self-Hom, the degree-zero endomorphism algebra, and generation.
-
-`ExtAlgebraOutcome` records deterministic self-Ext spaces and every Yoneda
-product tensor through one bound. A finite resolution returns `Complete`.
-Otherwise `Cut` names the first omitted degree and keeps the exact bounded
-layer. The bound alone never makes a claim about higher Ext groups.
-
-## Contents
-
-Algebras and modules:
-
-- Prime fields `F_p` for `p < 2^31`, with primality checked at construction.
-  Dense and sparse exact linear algebra over them.
-- `Relation` and `Presentation`: validated uniform relations over a quiver and a
-  field. `Algebra`: the certificate-verified runtime algebra, with the
-  normal-word basis, the reduced Groebner basis (`relations`), normal forms of
-  arbitrary paths (`nf_word`), sparse multiplication rows (`right_mul`,
-  `left_mul`, `mul_basis`), and radical powers by row-space iteration.
-- The `monomial` module for monomial ideals: `MonomialIdeal` holds the quiver
-  and the minimal forbidden words, and `MonomialPresentation` adds the
-  certified finite standard-path basis and the Cartan matrix, both field-free.
-  Named constructors, each taking a field: `path_algebra`, `linear_an`,
-  `kronecker`, `dual_numbers`, `truncated_poly`, `linear_nakayama` and
-  `cyclic_nakayama` (validated Kupisch series), `radical_square_zero_cycle`,
-  `an_with_relations`, and `commutative_square` (the relation `ab - cd`). Each
-  monomial family also has an `_ideal` form in `monomial` that stops at the
-  field-free data.
-- Validated right modules; simples, indecomposable projectives and injectives;
-  direct sums with inclusions and projections. `Module::new` verifies that every
-  element of the reduced Groebner basis acts as zero.
-- Morphisms with checked commuting squares, `hom` bases, kernels, images,
-  cokernels; radical, top, socle, and Loewy series.
-
-Homological algebra:
-
-- Minimal projective resolutions via projective covers, projective dimension,
-  `ext_dim` and `ext_table` (exact in every degree, even when the projective
-  dimension is unknown), and global dimension.
-- Minimal injective coresolutions via injective envelopes, and injective
-  dimension. These are the k-duals of the projective constructions over `A^op`
-  and carry the same typed partiality.
-- `CheckedComplex`: nonempty finite complexes in display order, with checked
-  endpoints and zero composites. `exactness` returns `ExactComplex` or the
-  first `NonExactWitness`, whose homology dimension vector rechecks from the
-  stored maps. A finite `ProjectiveResolution` converts to an exact complex;
-  a cut stays typed.
-- `bar_hochschild`: relative normalized bar Hochschild cohomology through a
-  requested degree. `BarLimits` bounds tensor tuples, cochain dimensions,
-  retained matrix entries plus scratch, and deterministic work. A complete
-  result stores deterministic cocycle, coboundary, and complement bases. An
-  incomplete result stores only the exact prefix and `BarBudgetDiagnostics`.
-- `ClassicalTiltingModule::classify`: classical tilting in any finite
-  projective dimension reached by the caller's bound. Success stores the
-  complete minimal resolution, zero positive self-Ext spaces, an exact
-  `A -> T^0 -> ... -> T^n` generation complex, and one `AddClosureWitness` per
-  generated term. A positive self-extension is `NotTilting`. A bound or
-  blocked bounded generation route is `Undetermined`.
-- `ExtAlgebraOutcome`: deterministic self-Ext grades, basis classes, the
-  degree-zero unit, and witnessed Yoneda tensors through a caller bound.
-- `BoundedComplex`, `ChainMap`, `ChainHomotopy`, and `HomotopyHom`: bounded
-  homological complexes and their deterministic Hom spaces modulo
-  null-homotopy.
-- `present_target`, `StrictTransport`, and `DerivedEquivalenceCertificate`:
-  the split target `End_A(T)^op`, strict transport on witnessed finite models,
-  and the checked tilting-derived equivalence.
-
-Duality and the Auslander-Reiten translate:
-
-- The opposite algebra, the k-dual `D`, and the Nakayama functor
-  `ν = D ∘ Hom(−, A)` applied to presentation maps, with matrices over the
-  algebra rather than over the field (`ElementMatrix`). `ν` is exposed on maps
-  between projective sums, which is what the translate needs, not as a functor
-  on arbitrary modules. The opposite algebra reverses every relation word and
-  then runs the pipeline again, so it is verified in its own right.
-- `tau` computes the translate two ways on every call: the Nakayama kernel
-  `ker ν(d_1)` and the transpose-then-dual `D(Tr M)` over `A^op`. The results
-  are cross-checked. The two routes share the minimal presentation and the
-  element-matrix encoding; their back ends are independent, so agreement checks
-  everything downstream of the shared encoding. A certified disagreement and an
-  undecided cross-check are distinct typed errors.
-
-Decomposition and isomorphism:
-
-- `EndoAlgebra`: `End(M)` as a structure-constant algebra with an exact Jacobson
-  radical over `F_p` in every characteristic. The radical computation uses the
-  Friedl-Rónyai chain, which never trusts the trace form in small
-  characteristic.
-- `decompose` and `krull_schmidt`: verified splittings. Each summand carries a
-  `Certificate`: `Indecomposable` means its endomorphism algebra was proved
-  local; `Undetermined` means no splitting route succeeded, and the summand may
-  or may not be indecomposable.
-- `is_isomorphic` returns one of three outcomes: an isomorphism verified by a
-  checked two-sided inverse; a proof of non-isomorphism as one of five
-  `Obstruction` kinds (differing dimension vectors, differing Loewy series,
-  Hom-dimension asymmetry, the radical criterion, or an unmatched Krull-Schmidt
-  summand); or `Unknown`, which means undetermined rather than "no".
-
-Classification and enumeration:
-
-- Exact recognition of Dynkin and Euclidean type from the underlying graph, the
-  generalized Cartan matrix, and the positive roots. Recognition is
-  combinatorial; nothing in the crate decides a type numerically.
-- `dynkin_indecomposables`: every indecomposable of a hereditary path algebra of
-  Dynkin type, one per positive root, constructed through BGP reflection
-  functors (Gabriel's theorem) rather than enumerated and filtered.
-  Preconditions are typed errors: a nonzero ideal or a non-Dynkin graph is
-  reported as such, and a Euclidean quiver is named as Euclidean rather than
-  merely rejected.
-- `nakayama_indecomposables`: every indecomposable of a Nakayama algebra, each
-  with its certificate.
-
-Ext classes and the witnessed Auslander-Reiten layer:
-
-- `HomSpace`, `HomSubspace`, `HomQuotient`: `Hom_A(M, N)` as an explicit vector
-  space with flat coordinates, RREF subspace bases, and one crate-wide
-  deterministic complement rule, so quotient representatives never depend on
-  the run.
-- `IndecomposableModule`: a checked wrapper that exists only together with the
-  locality proof of its endomorphism algebra. `residue_degree` gives the degree
-  `d` of the residue field `F_{p^d}`.
-- `ExtSpace` and `ExtClass`: Ext groups as explicit vector spaces with
-  representative cocycles that recheck by composition. Degree 0 is `Hom(M, N)`
-  and carries the Yoneda unit. `then` is the Yoneda product through stored
-  chain lifts; `then_with_witness` also returns the lifts as a
-  `ProductWitness` whose `verify` rechecks the lift identities and the
-  reduction.
-- `ShortExactSequence`: exact per vertex by construction. `from_ext1` realizes
-  a degree-1 class as an extension, `ext1_class` recovers the class, and
-  `split_status` proves its answer either way: a retraction and section, or a
-  dual vector showing the retraction system inconsistent by multiplication
-  alone.
-- `stable_hom` and `almost_split`: Hom modulo the maps that factor through a
-  projective, and almost-split sequences gated behind an `AlmostSplitWitness`.
-  The AR-duality route stores the socle construction of the chosen class;
-  `almost_split_via_catalog` instead stores factorization data against every
-  entry of an exhaustive catalog. A projective input is
-  `AlmostSplitOutcome::Projective`.
-- `category_radical`, `IndecomposableCatalog`,
-  `radical_square_through_catalog`, `irreducible_quotient`, and `ar_quiver`:
-  the exact category radical between certified indecomposables, catalogs that
-  wrap complete enumerations for Nakayama, zero-ideal Dynkin, and gentle-tree algebras,
-  catalog-exact rad^2, irreducible morphism spaces, and the valued AR quiver,
-  whose arrows state dimensions over both residue fields instead of a bare
-  multiplicity.
-
-Support tau-tilting:
-
-- `is_tau_rigid` and `TauRigidModule`: `Hom(M, tau M) = 0` decided over the
-  ordered pairs of summands, with `tau` computed once per summand through a
-  `TauCache` keyed by nominal module identity. A vanishing claim has no element
-  to exhibit, so `TauRigidModule` stores no positive witness and its `verify`
-  recomputes every translate. The negative answer does have an element:
-  `NonTauRigidWitness` carries one nonzero `X_i -> tau X_j`.
-- `SupportTauTiltingPair` and `AlmostCompletePair`: a candidate `(M, P)`
-  classified against the four conditions, with `|M| + |P| = n` for the first
-  and `n - 1` for the second. A failed condition is a `PairRejection` value
-  that names the condition, never an error. The four conditions force the
-  projective part, so it is derived rather than searched.
-- `mutate_at`: left mutation at a module-summand slot. It returns a `Mutation`
-  with its witness, or a `FacWitness` proving that `X_j` lies in `Fac(M/X_j)`,
-  where the slot admits no left mutation.
-- `support_tau_tilting_graph`: a breadth-first walk from `(A, 0)` under left
-  mutation, under four budgets. A `ClosedSupportTauTiltingGraph` exists only
-  past `ClosureWitness::verify`, and its vertex list is every basic support
-  tau-tilting pair of the algebra up to isomorphism. A walk that stops early is
-  an `IncompleteSupportTauTiltingGraph`, which keeps the certified part and
-  makes no completeness claim.
-- `enumerate_over_catalog`: the same pairs from the definition alone over an
-  exhaustive `IndecomposableCatalog`, with no mutation and no theorem about the
-  support tau-tilting quiver. Completeness there is the catalog's
-  classification theorem, so the route runs on catalog domains only.
-
-Certificates:
-
-- `Algebra::certificate` returns the verified certificate, and
-  `Certificate::to_canonical_json` serializes it. The encoding is canonical and
-  carries no timestamps and no machine data, so identical input and identical
-  limits produce identical bytes; the decoder rejects duplicate keys, unknown
-  keys, missing keys, and non-canonical numbers.
-- `verify` takes untrusted bytes and returns a `VerifiedCompletion`, the only
-  way to reach `Algebra::from_verified`. Dump, reload, verify, rebuild is a
-  supported workflow.
-
-## Capability matrix
-
-Each row says what an operation can return, read off its signature. "Bounded"
-means the result may be a lower bound tied to a caller-supplied bound.
-"Undetermined possible" means the operation can end without deciding, and says
-so.
-
-| Operation | Exact | Bounded | Undetermined possible |
-| --- | --- | --- | --- |
-| construction (`Algebra::new`, `monomial_algebra`, `from_verified`) | yes, after verification | no | no; rejection is `AlgebraBuildError` |
-| `dim`, `cartan_matrix`, `nf_word`, `radical_power_matrix` | yes | no | no |
-| `resolve`, `coresolve` | the prefix, exact and minimal | `ResolutionEnd::Cut { at }` | no |
-| `projective_dimension`, `global_dimension`, `injective_dimension` | `Bounded::Exact` | `Bounded::AtLeast` | no |
-| `hom_dim`, `ext_dim`, `ext_table` | yes, Ext in every degree | no | no |
-| `CheckedComplex::exactness` | `ExactComplex`, or the first `NonExactWitness` with exact homology dimensions | no | no |
-| `bar_hochschild` | `Complete` through the requested degree | `Cut` with the exact completed prefix and first rejected reservation | no |
-| `ClassicalTiltingModule::classify` | `Tilting` with all three conditions, or `NotTilting` with a positive self-extension | projective dimension and generation have independent caller bounds | yes: `Undetermined` carries the bound or generation blocker |
-| `present_target` | `Presented` with `End_A(T)^op`, or `Unsupported` with the first non-split residue degree | `Cut` with the first rejected reservation | no |
-| `ExtAlgebraOutcome::compute` | every stored grade and product tensor | `Cut` names the first omitted degree | no |
-| `HomotopyHom::quotient` | the deterministic chain Hom quotient | no | no |
-| `DerivedEquivalenceCertificate::new` | the tilting-derived equivalence and strict finite transport | no | no; failed checks are typed errors |
-| `injective_envelope`, `injective` | yes | no | no |
-| `opposite`, `dual`, `nu_of_presentation_map` | yes | no | no |
-| `tau` | the translate, zero exactly on projectives, both routes cross-checked | no | yes: `TauError::AgreementUnknown` |
-| `decompose`, `krull_schmidt` | `Certificate::Indecomposable`, `KrullSchmidtOutcome::Classes` | no | yes: `Certificate::Undetermined`, `KrullSchmidtOutcome::Unknown` |
-| `is_isomorphic` | `Isomorphic` with a witness, `NotIsomorphic` with an obstruction | no | yes: `IsoOutcome::Unknown` |
-| `nakayama_indecomposables` | yes, every certificate is `Indecomposable` | no | no |
-| `dynkin_indecomposables` | one module per positive root, each with the certificate `decompose` produced | no | yes, through that certificate |
-| `IndecomposableCatalog::gentle_tree` | one string module per inverse pair on a checked gentle tree | no | no; unsupported inputs carry the failed check |
-| `CatalogAtlas` | ordered Ext dimensions through the stated degree | setup ceilings reject before table construction | no |
-| `enumerate_multiplicities` | every catalog multiplicity vector at the stated dimension | `Cut` retains an exact prefix | no |
-| `catalog_coordinates` | multiplicities and checked isomorphisms | matching limits return `Cut` | yes: decomposition or isomorphism may remain unknown |
-| `HomSpace`, `ExtSpace`, `stable_hom`, `category_radical`, Yoneda `then` | yes | no | no |
-| `ShortExactSequence::from_ext1`, `ext1_class`, `split_status` | yes; splitting carries a witness either way | no | no |
-| `IndecomposableModule::new` | yes on acceptance; a split is rejected with its summand count | no | yes: `IndecError::Undetermined` |
-| `almost_split`, `almost_split_via_catalog` | `Projective`, or a sequence with its witness | no | yes: an undecided `tau` cross-check or gate surfaces as a typed error |
-| `ar_quiver` | yes, complete for its domain | no | no; any other algebra is `UnsupportedDomain` with the failed domain checks |
-| `is_tau_rigid`, `is_tau_rigid_summandwise` | `TauRigid` with a certified module, `NotTauRigid` with a nonzero morphism | no | yes, through the `tau` cross-check |
-| `SupportTauTiltingPair::classify`, `AlmostCompletePair::classify` | the pair, or a rejection naming the condition that failed | no | yes, through decomposition and `tau` |
-| `left_approximation` | the minimal left approximation with its minimality witness | no | no |
-| `mutate_at` | the left mutation with its witness, or a `FacWitness` proving no left mutation exists | no | yes, through decomposition and `tau` |
-| `support_tau_tilting_graph` | `Closed`, built only past `ClosureWitness::verify()`, so the pair list is complete | `Incomplete` with the limit that fired and its diagnostics | yes: `CertificationBlocked` |
-
-`tau`, the injective constructions, and `opposite` build the opposite algebra,
-so each can also fail with an `AlgebraBuildError` from that build.
-`almost_split` and `ar_quiver` run `tau` and the injective constructions, so
-they inherit the same failure modes.
-
-## Not included
-
-- Exhaustive catalogs beyond Nakayama, zero-ideal Dynkin, and gentle-tree
-  algebras. The AR quiver, catalog-exact rad^2, and irreducible morphism
-  spaces exist only behind an `IndecomposableCatalog`, and a catalog wraps a
-  classification theorem; a plain module list never becomes one. Almost-split
-  sequences through the AR-duality route run on any supported algebra.
-- Infinite complexes, derived categories, Hochschild cup products,
-  Gerstenhaber brackets, and arbitrary coefficient bimodules.
-- User-defined admissible orders and one-sided Groebner bases. The order is
-  sealed.
-- Characteristic 0.
-- Infinite-dimensional quotients. These are rejected with a proof, not
-  supported: the verifier finds a cycle in the normal-word automaton and returns
-  the cyclic word witness.
+```sh
+auslander classify gentle --vertices 3 --field 2 --output atlas.json
+auslander verify atlas.json
+```
 
 ## Conventions
 
-Fixed crate-wide, and documented on the types:
+Modules are right modules, and paths compose left to right: `a·b` means
+first `a`, then `b`, and `M(a·b) = M(a) M(b)`. Row `i` of the Cartan matrix
+is the dimension vector of the projective `P_i`. The
+[guide](docs/guide.md#conventions) states every convention in full.
 
-- Paths compose left to right: the word `a·b` means "first `a`, then `b`" and
-  requires `target(a) == source(b)`.
-- The admissible order is sealed: degree-lexicographic over the arrow order,
-  identified in every certificate as `deglex-arrowid-v1`. The longer word is the
-  larger word; equal-length words compare lexicographically by arrow id. There
-  are no user-supplied comparators.
-- Modules are right modules. A module assigns to each vertex `v` the row-vector
-  space `k^{dims[v]}`, and to each arrow `a` a
-  `dims[source(a)] × dims[target(a)]` matrix. A path acts by the product of its
-  arrow matrices in word order, so `M(p·q) = M(p) M(q)`.
-- A morphism `f: M → N` stores one `dim M_v × dim N_v` matrix per vertex, acting
-  on row vectors (`x ↦ x f_v`). A-linearity is the commuting square
-  `f_{s(a)} · N(a) = M(a) · f_{t(a)}` for every arrow `a`.
-- Composition is `f.then(g)`, "first `f`, then `g`": at each vertex the matrix
-  is `f_v · g_v`.
-- Cartan matrix: `c[i][j] = dim e_i A e_j`. Row `i` is the dimension vector of
-  the projective `P_i = e_i A`; column `j` is the dimension vector of the
-  injective `I_j = D(A e_j)`.
-- The basis of `Algebra` is the normal words: `basis[v]` is the trivial path
-  `e_v` for `v < num_vertices`, and the rest are sorted by length, then source,
-  then lexicographic arrow word.
-- A path that is not a normal word is not zero in general. `path_index` returns
-  `Ok(None)` for it, and `nf_word` gives its normal form as a combination of
-  normal words. Over a monomial ideal the two notions agree and `Ok(None)` does
-  mean zero.
-- Radical powers are computed as iterated row spaces, never by word length:
-  `J^1` is the span of the non-trivial basis words and `J^{k+1}` is the span of
-  `x·a` over `x` spanning `J^k`. An inhomogeneous relation puts short normal
-  words into deep radical powers.
-- The opposite algebra reverses path words, so a right A-module dualizes to a
-  right `A^op`-module. `D` is applied through `OppositeMap`, which carries the
-  arrow and word translation in both directions. The reversal of a normal word
-  need not be normal on the other side, so every reversed word is expanded to
-  its normal form there.
+## Scope
 
-## Quick start
+Fields are prime fields `F_p` with `p < 2^31`. Characteristic zero and
+extension fields are not supported. Algebras and modules are finite
+dimensional; an infinite-dimensional quotient is rejected with a word
+witness. Complete lists of indecomposable modules exist only for Nakayama,
+zero-ideal Dynkin, and gentle-tree algebras. The
+[guide](docs/guide.md#not-included) lists the remaining limits.
 
-The commutative square `kQ/(ab - cd)`: build it from a relation, resolve a
-simple module, and compute the translate.
+Correctness is checked against exact fixtures, deterministic artifact bytes,
+and a differential run against GAP with QPA. See the
+[correctness protocol](docs/correctness-protocol.md).
 
-```rust
-use auslander::algebra::Algebra;
-use auslander::ar::tau;
-use auslander::completion::CompletionLimits;
-use auslander::field::PrimeField;
-use auslander::module::Module;
-use auslander::quiver::{ArrowId, Quiver};
-use auslander::relation::{Presentation, Relation};
-use auslander::resolution::{Bounded, projective_dimension, resolve};
+## Documentation
 
-let field = PrimeField::new(5).unwrap();
-// Arrows a: 0 → 1, b: 1 → 3, c: 0 → 2, d: 2 → 3.
-let quiver = Quiver::new(4, &[(0, 1), (1, 3), (0, 2), (2, 3)]).unwrap();
-// The relation ab - cd. Terms may be listed in any order.
-let relation = Relation::new(
-    &quiver,
-    field,
-    vec![
-        (field.one(), vec![ArrowId(0), ArrowId(1)]),
-        (field.elem(-1), vec![ArrowId(2), ArrowId(3)]),
-    ],
-)
-.unwrap();
-let presentation = Presentation::new(quiver, field, vec![relation]).unwrap();
-// Completion, certificate emission, and verification of the bytes.
-let algebra = Algebra::new(presentation, &CompletionLimits::default()).unwrap();
-assert_eq!(algebra.dim(), 9);
+- [Library guide](docs/guide.md): the certified pipeline, capabilities,
+  return types, and longer examples.
+- [API reference](https://docs.rs/auslander) on docs.rs.
+- [Python package](crates/auslander-py/README.md) and its guides.
+- [Derived classification contract](docs/derived-classification.md) and the
+  [complete gentle invariant](docs/gentle-derived-invariant.md).
+- [Browser verifier](docs/browser-verifier.md).
+- [Catalog artifacts](docs/catalog-artifacts.md) and
+  [theorem artifacts](docs/theorem-artifacts.md).
+- [Changelog](CHANGELOG.md) and [roadmap](ROADMAP.md).
 
-let s0 = Module::simple(&algebra, 0);
-let resolution = resolve(&s0, 5);
-let terms: Vec<&[usize]> = resolution.terms.iter().map(Module::dim_vector).collect();
-// 0 → P_3 → P_1 ⊕ P_2 → P_0 → S_0 → 0.
-assert_eq!(terms, vec![[1, 1, 1, 1], [0, 1, 1, 2], [0, 0, 0, 1]]);
-assert_eq!(projective_dimension(&s0, 5), Bounded::Exact(2));
-
-// τ S_0, computed by two independent routes and cross-checked. The result is
-// the zero module exactly when the input is projective.
-assert_eq!(tau(&s0).unwrap().dim_vector(), [1, 1, 1, 0]);
-```
-
-The same algebra is available as `commutative_square(field)`.
-
-The Ext table of the simples of kA_3/(ab), the algebra of the linearly oriented
-quiver `0 → 1 → 2` with the composite path set to zero:
-
-```rust
-use auslander::algebra::an_with_relations;
-use auslander::ext::ext_table;
-use auslander::field::PrimeField;
-use auslander::module::Module;
-
-let field = PrimeField::new(5).unwrap();
-let algebra = an_with_relations(3, &[(0, 2)], field).unwrap();
-let s0 = Module::simple(&algebra, 0);
-let s2 = Module::simple(&algebra, 2);
-// [dim Ext^0, ..., dim Ext^4]: the relation from 0 to 2 sits in Ext^2.
-assert_eq!(ext_table(&s0, &s2, 4).unwrap(), vec![0, 0, 1, 0, 0]);
-```
-
-The checked example converts the projective resolution of `S_0` over
-`kA_3/(ab)` into an `ExactComplex`, computes
-`HH^0..HH^2(k[x]/(x^3)) = (3, 2, 2)`, checks a zero-work bar cut, and certifies
-`D(A)` as a classical tilting module of projective dimension two over F_2 and
-F_5:
-
-```sh
-cargo run -p auslander --example tilting_and_hochschild
-```
-
-The tilting certificate stores this exact generation complex:
-
-```text
-[1, 2, 2] -> [1, 3, 2] -> [1, 1, 0] -> [1, 0, 0]
-```
-
-The complete Rust example and its Python acceptance path are part of the
-repository test suite.
-
-The `classical_tilting` example continues from the same
-projective-dimension-two tilting module. It recovers `End_A(T)^op`, checks the
-derived-equivalence certificate, transports a two-term `add(T)` complex in
-both directions, and compares its graded homotopy Hom dimensions:
-
-```sh
-cargo run -p auslander --example classical_tilting
-```
-
-The example prints:
-
-```text
-target dimension: 5; resolution width: 2; graded Hom dimensions: [(-2, 0), (-1, 3), (0, 6), (1, 3), (2, 0)]
-```
-
-Both strict round-trip chain isomorphisms pass verification. The derived
-workbench example adds ordinary-complex
-replacement, derived Hom, automatic transport, tilting-complex discovery,
-target recovery, and a verified portable artifact.
-
-Decomposing a module and reading the certificates:
-
-```rust
-use auslander::algebra::truncated_poly;
-use auslander::decompose::{Certificate, decompose};
-use auslander::field::PrimeField;
-use auslander::module::{Module, direct_sum};
-
-let field = PrimeField::new(32003).unwrap();
-let algebra = truncated_poly(3, field).unwrap();
-let p = Module::projective(&algebra, 0);
-let s = Module::simple(&algebra, 0);
-let (m, _, _) = direct_sum(&[&p, &p, &s]);
-let d = decompose(&m);
-assert_eq!(d.summands().len(), 3);
-// Every summand was proved indecomposable, not merely left unsplit.
-assert!(d.certificates().iter().all(|c| *c == Certificate::Indecomposable));
-```
-
-The witnessed AR layer over `k[x]/(x^3)`: certify the simple module
-indecomposable, build its almost-split sequence, recheck the witness, and read
-the valued AR quiver.
-
-```rust
-use auslander::algebra::truncated_poly;
-use auslander::almost_split::{AlmostSplitOutcome, AlmostSplitWitness, almost_split};
-use auslander::arquiver::ar_quiver;
-use auslander::field::PrimeField;
-use auslander::indec::IndecomposableModule;
-use auslander::module::Module;
-
-let field = PrimeField::new(5).unwrap();
-let algebra = truncated_poly(3, field).unwrap();
-let s = IndecomposableModule::new(&Module::simple(&algebra, 0)).unwrap();
-
-// 0 → S → rad P → S → 0: the middle term is the uniserial module of dimension 2.
-let AlmostSplitOutcome::Sequence(sequence) = almost_split(&s).unwrap() else {
-    panic!("S is not projective");
-};
-println!("middle: {:?}", sequence.sequence().middle().dim_vector());
-assert_eq!(sequence.sequence().middle().dim_vector(), &[2]);
-
-// The witness rechecks every gate of the construction against the live modules.
-let AlmostSplitWitness::ArDuality(witness) = sequence.witness() else {
-    panic!("almost_split certifies through AR duality");
-};
-assert!(witness.verify(&s, sequence.sequence(), sequence.chosen_ar_class()));
-
-// Three uniserial indecomposables, four irreducible arrows.
-let quiver = ar_quiver(&algebra).unwrap();
-assert_eq!(quiver.vertices().len(), 3);
-assert_eq!(quiver.arrows().len(), 4);
-```
-
-The examples run as acceptance tests. Their displayed values are pinned by
-the test suite.
-
-## Python
-
-Bindings live in `crates/auslander-py`; the PyPI package is `auslander`.
-For a source build, install [maturin](https://www.maturin.rs/) and run:
-
-```sh
-cd crates/auslander-py
-maturin develop --release   # install into the active virtualenv
-maturin build --release     # or build an abi3 wheel for CPython >= 3.10
-```
-
-The Python surface covers general relations
-(`Algebra.from_relations(quiver, relations, field)`), the certificate workflow
-(`algebra.certificate_json()` and `Algebra.from_certificate(json)`), the
-witnessed AR layer (`ext_space`, `extension`, `almost_split`,
-`category_radical`, `ar_quiver`), checked finite complexes, budgeted Hochschild
-cohomology, classical tilting, target recovery, bounded Ext algebras, homotopy,
-and strict derived transport. Python uses the same typed outcomes and checked
-round trips as Rust.
-See `crates/auslander-py/README.md`.
-
-## Building and testing
-
-MSRV 1.88; development is pinned to Rust 1.92 via `rust-toolchain.toml`:
-
-```sh
-cargo test
-```
-
-Release workflows configure non-publish `workflow_dispatch` rehearsal and
-hosted ARM and macOS architecture checks. Those jobs are GitHub-hosted runner
-configuration. They are not a local execution record.
-
-## Correctness protocol
-
-The test suite checks exact fixtures, typed cuts, witness replay, deterministic
-bytes, characteristic-sensitive cases, and a committed GAP+QPA oracle. See
-[the correctness protocol](docs/correctness-protocol.md) for the full matrix.
+To cite the library, use [`CITATION.cff`](CITATION.cff).
 
 ## License
 
-Licensed under either of the MIT license (`LICENSE-MIT`) or the Apache License,
-Version 2.0 (`LICENSE-APACHE`), at your option.
+Licensed under either of the MIT license ([`LICENSE-MIT`](LICENSE-MIT)) or
+the Apache License, Version 2.0 ([`LICENSE-APACHE`](LICENSE-APACHE)), at
+your option.

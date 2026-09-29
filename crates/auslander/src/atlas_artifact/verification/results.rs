@@ -52,7 +52,7 @@ fn check_cut_outcome(
     atlas: &CatalogAtlas,
     reason: MultiplicityCutReason,
     coverage: usize,
-    nodes_visited: usize,
+    nodes_visited: u64,
     cut: &MultiplicityCut,
     limits: CatalogAtlasArtifactVerifyLimits,
 ) -> Result<(), CatalogAtlasArtifactError> {

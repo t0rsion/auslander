@@ -18,21 +18,10 @@ pub(super) fn check_square(
         right.cols() as u128,
     ])?;
     ledger.work(degree, BarStage::Square, work)?;
-    for row in 0..left.rows() {
-        for column in 0..right.cols() {
-            let mut sum = field.zero();
-            for middle in 0..left.cols() {
-                sum = field.add(
-                    sum,
-                    field.mul(left.get(row, middle), right.get(middle, column)),
-                );
-            }
-            if !sum.is_zero() {
-                return Err(BuildFailure::Defect(HochschildError::DifferentialSquare {
-                    degree,
-                }));
-            }
-        }
+    if !left.product_is_zero(right, field) {
+        return Err(BuildFailure::Defect(HochschildError::DifferentialSquare {
+            degree,
+        }));
     }
     Ok(())
 }

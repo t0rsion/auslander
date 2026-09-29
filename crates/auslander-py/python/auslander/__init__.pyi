@@ -12,8 +12,10 @@ from .checkpoint import (
     write_checkpoint,
 )
 from .compute import compute_json, compute_request
+from .derived_atlas import verify_derived_atlas
 from .display import Explanation, Rendered, explain, show, to_dot, to_latex, to_networkx
 from .parser import ParsedPresentation, PresentationSyntaxError, parse_presentation
+from .presentation import presentation_text
 from .session import Session, verify_file
 from .workflow import (
     DEFINITION_KIND,

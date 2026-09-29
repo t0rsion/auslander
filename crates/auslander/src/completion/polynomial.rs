@@ -72,7 +72,7 @@ pub(super) fn add_scaled(
 /// Stops at the first insertion that puts `target` past `max` terms.
 pub(super) fn origin_add_scaled(
     field: PrimeField,
-    max: usize,
+    max: u64,
     target: &mut Origin,
     c: Fp,
     left: &[ArrowId],
@@ -87,7 +87,7 @@ pub(super) fn origin_add_scaled(
             target.remove(&key);
         } else {
             target.insert(key, sum);
-            if target.len() > max {
+            if target.len() as u64 > max {
                 return Err(Exhausted::Origin);
             }
         }

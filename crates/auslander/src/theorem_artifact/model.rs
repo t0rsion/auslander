@@ -4,6 +4,8 @@ use crate::batch_stream::{
 };
 
 use super::errors::SelfExtLocusArtifactError;
+pub(super) use crate::portable::fingerprint;
+use crate::portable::{push_numbers, seal};
 
 /// The schema for portable finite computation claims.
 pub const SELF_EXT_LOCUS_ARTIFACT_SCHEMA: &str = "auslander-theorem-v1";
@@ -18,7 +20,7 @@ pub struct SelfExtLocusParseLimits {
     pub max_input_bytes: usize,
     /// Limits applied to the embedded homological checkpoint.
     pub checkpoint: HomologicalStreamParseLimits,
-    /// The greatest number of claimed representative indices.
+    /// The maximum number of claimed representative indices.
     pub max_vanishing_indices: usize,
     /// The greatest digit count in one unsigned integer.
     pub max_integer_digits: usize,
@@ -45,12 +47,12 @@ pub struct SelfExtLocusVerifyLimits {
     pub parse: SelfExtLocusParseLimits,
     /// Limits applied while replaying the embedded checkpoint.
     pub checkpoint: HomologicalStreamVerifyLimits,
-    /// The greatest number of representatives checked independently.
+    /// The maximum number of representatives checked independently.
     pub max_representatives: usize,
-    /// The greatest number of Ext degrees checked per representative.
+    /// The maximum number of Ext degrees checked per representative.
     pub max_degree_span: usize,
-    /// The greatest number of generic Ext spaces constructed.
-    pub max_ext_spaces: usize,
+    /// The maximum number of generic Ext spaces constructed.
+    pub max_ext_spaces: u64,
 }
 
 impl Default for SelfExtLocusVerifyLimits {
@@ -127,11 +129,7 @@ impl SelfExtLocusArtifact {
 
     /// Serializes the artifact to byte-exact canonical JSON.
     pub fn to_canonical_json(&self) -> String {
-        let mut output = self.canonical_without_fingerprint();
-        output.push_str(",\"fingerprint\":\"");
-        output.push_str(&self.fingerprint);
-        output.push_str("\"}");
-        output
+        seal(self.canonical_without_fingerprint(), &self.fingerprint)
     }
 
     /// Parses one canonical theorem artifact under explicit limits.
@@ -174,14 +172,8 @@ impl SelfExtLocusArtifact {
         output.push_str(&self.first_degree.to_string());
         output.push_str(",\"last_degree\":");
         output.push_str(&self.last_degree.to_string());
-        output.push_str(",\"vanishing_indices\":[");
-        for (position, index) in self.vanishing_indices.iter().enumerate() {
-            if position != 0 {
-                output.push(',');
-            }
-            output.push_str(&index.to_string());
-        }
-        output.push(']');
+        output.push_str(",\"vanishing_indices\":");
+        push_numbers(&mut output, &self.vanishing_indices);
         output
     }
 }
@@ -201,13 +193,4 @@ pub(super) fn check_degree_range(
         });
     }
     Ok(())
-}
-
-pub(super) fn fingerprint(text: &str) -> String {
-    let mut value = 0xcbf29ce484222325u64;
-    for byte in text.bytes() {
-        value ^= u64::from(byte);
-        value = value.wrapping_mul(0x100000001b3);
-    }
-    format!("{value:016x}")
 }

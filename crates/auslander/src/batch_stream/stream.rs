@@ -66,8 +66,7 @@ where
         let degree_steps = max_degree
             .checked_add(1)
             .ok_or(HomologicalBatchStreamError::DegreeOverflow { degree: max_degree })?;
-        if limits.max_pairs == 0 || limits.max_ext_cells.checked_div(degree_steps).unwrap_or(0) == 0
-        {
+        if limits.capacity(degree_steps) == 0 {
             return Err(HomologicalBatchStreamError::NoPairCapacity {
                 max_pairs: limits.max_pairs,
                 max_ext_cells: limits.max_ext_cells,
@@ -173,15 +172,14 @@ where
         Ok(())
     }
 
+    /// A capacity above `usize::MAX` saturates. No `Vec` holds that many
+    /// modules, so saturation never changes a chunk.
     fn chunk_capacity(&self) -> usize {
         let degree_steps = self
             .max_degree
             .checked_add(1)
             .expect("stream constructor checks degree overflow");
-        self.limits
-            .max_live_sources
-            .min(self.limits.max_pairs)
-            .min(self.limits.max_ext_cells / degree_steps)
+        usize::try_from(self.limits.capacity(degree_steps)).unwrap_or(usize::MAX)
     }
 
     fn failed(

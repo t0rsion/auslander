@@ -7,17 +7,24 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ._core import (
+    DerivedClassification,
     ResolutionKind,
     VerifiedCensusCheckpoint,
     VerifiedDerivedArtifact,
     VerifiedHomologicalCheckpoint,
     VerifiedSelfExtLocusArtifact,
 )
+from .derived_display import classification_explanation
 
 
 @dataclass(frozen=True)
 class Explanation:
-    """Describe computation status separately from replay verification."""
+    """A structured explanation of a typed computation result, with status
+    separate from replay verification.
+
+    `details` holds one line per open item when a result has several, such
+    as the unresolved pairs of a `DerivedClassification`.
+    """
 
     variant: str
     status: str
@@ -25,6 +32,19 @@ class Explanation:
     completed: str
     unfinished: str | None = None
     next_action: str | None = None
+    details: tuple[str, ...] = ()
+
+    def __str__(self) -> str:
+        """Write one labeled line per field that has a value, then the details."""
+        fields = [
+            ("completed", self.completed),
+            ("unfinished", self.unfinished),
+            ("next action", self.next_action),
+        ]
+        lines = [f"{self.variant}: status {self.status}, verification {self.verification}"]
+        lines.extend(f"  {label}: {text}" for label, text in fields if text is not None)
+        lines.extend(f"  - {line}" for line in self.details)
+        return "\n".join(lines)
 
 
 _MISSING = object()
@@ -85,6 +105,13 @@ _REPLAYED_VALUES = (
     VerifiedHomologicalCheckpoint,
     VerifiedSelfExtLocusArtifact,
 )
+
+
+def _classification_rule(value: Any, variant: str) -> Explanation | None:
+    if not isinstance(value, DerivedClassification):
+        return None
+    fields = classification_explanation(value)
+    return Explanation(variant=variant, verification="unverified", **fields)
 
 
 def _status_rule(value: Any, variant: str) -> Explanation | None:
@@ -433,6 +460,7 @@ _CUT_RULES = (
 
 
 _COMPUTATION_RULES = (
+    _classification_rule,
     _status_rule,
     _typed_status_rule,
     _resolution_rule,

@@ -57,7 +57,7 @@ def _parse_line(number: int, raw: str) -> tuple[str, str] | None:
     if not line:
         return None
     key, separator, value = line.partition(" ")
-    if not separator:
+    if not separator and key not in {"arrows", "relations"}:
         raise PresentationSyntaxError(f"line {number}: expected a keyword and value")
     if key not in {"field", "vertices", "arrows", "relations"}:
         raise PresentationSyntaxError(f"line {number}: unknown keyword {key!r}")

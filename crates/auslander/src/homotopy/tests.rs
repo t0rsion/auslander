@@ -270,3 +270,39 @@ fn direct_sum_pads_support_and_rechecks_each_block() {
     assert_eq!(sum.term(0).unwrap().dim_at(0), 2);
     assert!(sum.verify());
 }
+
+#[test]
+fn composite_through_a_wider_middle_reduces_in_the_narrower_hom_space() {
+    let algebra = linear_an(1, f5());
+    let simple = Module::simple(&algebra, 0);
+    let zero = Module::zero(&algebra);
+    let stalk = BoundedComplex::new(0, vec![simple.clone()], Vec::new()).unwrap();
+    let wide = BoundedComplex::new(
+        0,
+        vec![simple.clone(), zero.clone()],
+        vec![zero_between(&zero, &simple)],
+    )
+    .unwrap();
+    let into = HomotopyHom::new(&stalk, &wide, 0)
+        .unwrap()
+        .quotient()
+        .unwrap();
+    let back = HomotopyHom::new(&wide, &stalk, 0)
+        .unwrap()
+        .quotient()
+        .unwrap();
+    let endo = HomotopyHom::new(&stalk, &stalk, 0)
+        .unwrap()
+        .quotient()
+        .unwrap();
+    let one = [f5().one()];
+    let composite = into
+        .representative(&one)
+        .then(&back.representative(&one))
+        .unwrap();
+    assert_eq!(composite.range(), DegreeRange::new(0, 1).unwrap());
+    let (coordinates, remainder) = endo.reduce(&composite).unwrap();
+    assert_eq!(coordinates, one);
+    assert!(remainder.components().iter().all(Morphism::is_zero));
+    assert_eq!(endo.hom().coords(&composite).unwrap(), one);
+}

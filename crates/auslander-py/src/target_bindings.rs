@@ -66,15 +66,15 @@ impl PyTargetLimits {
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
-        max_endo_dimension: usize,
-        max_radical_products: usize,
-        max_paths: usize,
-        max_relation_terms: usize,
-        max_basis: usize,
-        max_word_len: usize,
-        max_steps: usize,
-        max_origin_terms: usize,
-        max_ambiguities: usize,
+        max_endo_dimension: u64,
+        max_radical_products: u64,
+        max_paths: u64,
+        max_relation_terms: u64,
+        max_basis: u64,
+        max_word_len: u64,
+        max_steps: u64,
+        max_origin_terms: u64,
+        max_ambiguities: u64,
     ) -> PyTargetLimits {
         PyTargetLimits {
             inner: TargetLimits {
@@ -94,47 +94,47 @@ impl PyTargetLimits {
     }
 
     #[getter]
-    fn max_endo_dimension(&self) -> usize {
+    fn max_endo_dimension(&self) -> u64 {
         self.inner.max_endo_dimension
     }
 
     #[getter]
-    fn max_radical_products(&self) -> usize {
+    fn max_radical_products(&self) -> u64 {
         self.inner.max_radical_products
     }
 
     #[getter]
-    fn max_paths(&self) -> usize {
+    fn max_paths(&self) -> u64 {
         self.inner.max_paths
     }
 
     #[getter]
-    fn max_relation_terms(&self) -> usize {
+    fn max_relation_terms(&self) -> u64 {
         self.inner.max_relation_terms
     }
 
     #[getter]
-    fn max_basis(&self) -> usize {
+    fn max_basis(&self) -> u64 {
         self.inner.completion.max_basis
     }
 
     #[getter]
-    fn max_word_len(&self) -> usize {
+    fn max_word_len(&self) -> u64 {
         self.inner.completion.max_word_len
     }
 
     #[getter]
-    fn max_steps(&self) -> usize {
+    fn max_steps(&self) -> u64 {
         self.inner.completion.max_steps
     }
 
     #[getter]
-    fn max_origin_terms(&self) -> usize {
+    fn max_origin_terms(&self) -> u64 {
         self.inner.completion.max_origin_terms
     }
 
     #[getter]
-    fn max_ambiguities(&self) -> usize {
+    fn max_ambiguities(&self) -> u64 {
         self.inner.completion.max_ambiguities
     }
 
@@ -160,22 +160,22 @@ pub(crate) struct PyTargetWork {
 #[pymethods]
 impl PyTargetWork {
     #[getter]
-    fn endo_dimension(&self) -> usize {
+    fn endo_dimension(&self) -> u64 {
         self.inner.endo_dimension
     }
 
     #[getter]
-    fn radical_products(&self) -> usize {
+    fn radical_products(&self) -> u64 {
         self.inner.radical_products
     }
 
     #[getter]
-    fn paths(&self) -> usize {
+    fn paths(&self) -> u64 {
         self.inner.paths
     }
 
     #[getter]
-    fn relation_terms(&self) -> usize {
+    fn relation_terms(&self) -> u64 {
         self.inner.relation_terms
     }
 
@@ -525,7 +525,7 @@ impl PyIncompleteTargetPresentation {
 
     /// Units reserved before a target-budget cut.
     #[getter]
-    fn used(&self) -> Option<usize> {
+    fn used(&self) -> Option<u64> {
         match self.inner.reason() {
             TargetCutReason::Budget(cut) => Some(cut.used),
             TargetCutReason::Completion(_) => None,
@@ -534,7 +534,7 @@ impl PyIncompleteTargetPresentation {
 
     /// Units requested by a rejected target reservation.
     #[getter]
-    fn requested(&self) -> Option<usize> {
+    fn requested(&self) -> Option<u64> {
         match self.inner.reason() {
             TargetCutReason::Budget(cut) => Some(cut.requested),
             TargetCutReason::Completion(_) => None,
@@ -543,7 +543,7 @@ impl PyIncompleteTargetPresentation {
 
     /// The target budget that rejected the reservation.
     #[getter]
-    fn limit(&self) -> Option<usize> {
+    fn limit(&self) -> Option<u64> {
         match self.inner.reason() {
             TargetCutReason::Budget(cut) => Some(cut.limit),
             TargetCutReason::Completion(_) => None,
@@ -570,7 +570,7 @@ impl PyIncompleteTargetPresentation {
 
     /// Completion work units consumed before a completion cut.
     #[getter]
-    fn completion_steps_used(&self) -> Option<usize> {
+    fn completion_steps_used(&self) -> Option<u64> {
         match self.inner.reason() {
             TargetCutReason::Budget(_) => None,
             TargetCutReason::Completion(cut) => Some(cut.steps_used),

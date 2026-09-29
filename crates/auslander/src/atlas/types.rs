@@ -1,20 +1,22 @@
 /// Resource ceilings for one catalog atlas.
+///
+/// The ceilings are `u64` because a catalog atlas artifact stores them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CatalogAtlasLimits {
     /// Maximum number of ordered source-target pairs.
-    pub max_pairs: usize,
+    pub max_pairs: u64,
     /// Maximum number of stored Ext dimensions, including degree zero.
-    pub max_ext_cells: usize,
+    pub max_ext_cells: u64,
     /// Maximum total number of retained source-resolution terms.
     ///
     /// This count excludes matrix entries allocated inside `resolve`.
-    pub max_resolution_terms: usize,
+    pub max_resolution_terms: u64,
     /// Maximum number of copies materialized in one direct sum.
-    pub max_materialized_summands: usize,
+    pub max_materialized_summands: u64,
     /// Maximum total matrix cells allocated while materializing one direct sum.
     ///
     /// This includes output arrow matrices and relation-check intermediates.
-    pub max_materialized_cells: usize,
+    pub max_materialized_cells: u64,
 }
 
 impl Default for CatalogAtlasLimits {
@@ -46,11 +48,11 @@ pub enum CatalogAtlasError {
         terms_per_source: usize,
     },
     /// The ordered pair count exceeds the caller ceiling.
-    PairLimit { requested: usize, limit: usize },
+    PairLimit { requested: u64, limit: u64 },
     /// The Ext-cell count exceeds the caller ceiling.
-    ExtCellLimit { requested: usize, limit: usize },
+    ExtCellLimit { requested: u64, limit: u64 },
     /// The resolution-term count exceeds the caller ceiling.
-    ResolutionTermLimit { requested: usize, limit: usize },
+    ResolutionTermLimit { requested: u64, limit: u64 },
 }
 
 display_error! { error CatalogAtlasError {
@@ -65,18 +67,20 @@ display_error! { error CatalogAtlasError {
 } }
 
 /// Exact operation counts for one catalog atlas.
+///
+/// The counts are `u64` because a catalog atlas artifact stores them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CatalogAtlasWork {
     /// Ordered source-target pairs stored in the atlas.
-    pub pairs: usize,
+    pub pairs: u64,
     /// Ext dimensions stored in the atlas.
-    pub ext_cells: usize,
+    pub ext_cells: u64,
     /// Source resolutions retained by the atlas.
-    pub resolutions: usize,
+    pub resolutions: u64,
     /// Resolution terms retained by the atlas.
-    pub resolution_terms: usize,
+    pub resolution_terms: u64,
     /// Ext tables computed from retained source resolutions.
-    pub ext_tables: usize,
+    pub ext_tables: u64,
 }
 
 /// One ordered source-target row in a catalog Ext table.
@@ -160,12 +164,14 @@ impl CatalogExtTable {
 pub type MultiplicityVector = Vec<usize>;
 
 /// Limits for one multiplicity enumeration.
+///
+/// The ceilings are `u64` because a catalog atlas artifact stores them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MultiplicityLimits {
     /// Maximum number of retained solutions.
-    pub max_solutions: usize,
+    pub max_solutions: u64,
     /// Maximum number of search states visited.
-    pub max_nodes: usize,
+    pub max_nodes: u64,
 }
 
 impl Default for MultiplicityLimits {
@@ -190,7 +196,7 @@ pub enum MultiplicityError {
 
 display_error! { error MultiplicityError {
     Self::DimensionVectorLength { expected, got } => "target dimension vector has {got} entries, expected {expected}";
-    Self::NodeCountOverflow => "multiplicity search node count overflows usize";
+    Self::NodeCountOverflow => "multiplicity search node count overflows u64";
     Self::NodeStackAllocationFailed { requested } => "multiplicity search stack allocation failed for {requested} entries";
 } }
 
@@ -200,7 +206,7 @@ pub enum AtlasMaterializeError {
     /// The vector needs one entry per catalog module.
     MultiplicityLength { expected: usize, got: usize },
     /// The requested copy count exceeds the caller ceiling.
-    SummandLimit { requested: usize, limit: usize },
+    SummandLimit { requested: u64, limit: u64 },
     /// The requested copy count does not fit in `usize`.
     SummandCountOverflow,
     /// A repeated module dimension does not fit in `usize`.
@@ -219,7 +225,7 @@ pub enum AtlasMaterializeError {
     /// The total materialized cell count does not fit in `usize`.
     CellCountOverflow,
     /// The materialized output and relation checks exceed the caller ceiling.
-    CellLimit { requested: usize, limit: usize },
+    CellLimit { requested: u64, limit: u64 },
     /// The copy-reference list could not reserve its checked size.
     AllocationFailed { requested: usize },
 }

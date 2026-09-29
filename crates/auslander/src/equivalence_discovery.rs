@@ -1,142 +1,39 @@
-//! Budgeted breadth-first discovery of tilting-complex mutations.
+//! Budgeted breadth-first discovery of tilting-complex mutations, optionally
+//! through silting complexes.
 
 mod key;
+mod storage;
+mod types;
 
 pub use key::TiltingComplexKey;
+use key::isomorphic;
+use storage::{complex_terms, matrix_entries, storage_stop};
+pub use types::{
+    BlockedMutationReason, BlockedTiltingMutation, DiscoveryLimits, DiscoveryStop,
+    TiltingMutationEdge,
+};
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use crate::algebra::Algebra;
-use crate::control::{ComputationControl, ProgressStage};
-use crate::quiver::ArrowId;
+use crate::control::{ComputationControl, ProgressStage, WorkMeter};
 use crate::tilting_complex::{
-    ApproximationDirection, CertifiedTiltingComplex, TiltingComplexBlocker, TiltingComplexError,
-    TiltingComplexLimits, TiltingComplexResult, TiltingMutationOutcome, left_tilting_mutation,
-    regular_tilting_complex, right_tilting_mutation,
+    ApproximationDirection, CertifiedSiltingComplex, Interrupt, TiltingComplexBlocker,
+    TiltingComplexError, TiltingComplexResult, TiltingMutationOutcome, metered_tilting_mutation,
+    regular_tilting_complex, tilting_mutation,
 };
 
-/// Deterministic limits for one mutation walk.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct DiscoveryLimits {
-    /// The greatest number of stored tilting complexes.
-    pub max_vertices: usize,
-    /// The greatest number of attempted directed mutations.
-    pub max_directed_mutations: usize,
-    /// The greatest sum of stored bounded-complex term counts.
-    pub max_total_terms: usize,
-    /// The greatest sum of stored module and differential matrix entries.
-    pub max_matrix_entries: usize,
-    /// The greatest number of charged mutation work units.
-    pub max_work_units: usize,
-    /// Limits for each tilting-complex classification.
-    pub tilting: TiltingComplexLimits,
-}
-
-impl Default for DiscoveryLimits {
-    fn default() -> Self {
-        DiscoveryLimits {
-            max_vertices: 1_024,
-            max_directed_mutations: 16_384,
-            max_total_terms: 65_536,
-            max_matrix_entries: 16_777_216,
-            max_work_units: 16_384,
-            tilting: TiltingComplexLimits::default(),
-        }
-    }
-}
-
-/// The exact reason a mutation walk stopped.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DiscoveryStop {
-    /// Every stored vertex and mutation direction was attempted.
-    ExhaustedFrontier,
-    /// The caller requested cancellation before the next mutation.
-    Cancelled { completed_mutations: usize },
-    /// The next directed mutation exceeded its count limit.
-    MutationLimit { completed: usize, limit: usize },
-    /// The next work unit exceeded its count limit.
-    WorkLimit { completed: usize, limit: usize },
-    /// A new vertex exceeded the stored-vertex limit.
-    VertexLimit { stored: usize, limit: usize },
-    /// A new vertex exceeded the total term limit.
-    TermLimit {
-        stored: usize,
-        requested: usize,
-        limit: usize,
-    },
-    /// A new vertex exceeded the matrix-entry limit.
-    MatrixLimit {
-        stored: usize,
-        requested: usize,
-        limit: usize,
-    },
-}
-
-/// A mutation that completed but did not produce a certified tilting complex.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BlockedMutationReason {
-    /// A shifted Hom class made the result silting but not tilting.
-    SiltingOnly {
-        source: usize,
-        target: usize,
-        degree: i32,
-        dimension: usize,
-    },
-    /// A classification obligation remained open.
-    Undetermined(TiltingComplexBlocker),
-}
-
-/// One stored non-edge from a complete mutation attempt.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BlockedTiltingMutation {
-    source: usize,
-    direction: ApproximationDirection,
-    summand: usize,
-    reason: BlockedMutationReason,
-}
-
-impl BlockedTiltingMutation {
-    accessor_methods! {
-        /// The source vertex index.
-        pub source() -> usize = |this| this.source;
-        /// The attempted mutation direction.
-        pub direction() -> ApproximationDirection = |this| this.direction;
-        /// The replaced summand index.
-        pub summand() -> usize = |this| this.summand;
-        /// Why no tilting edge was stored.
-        pub reason() -> &BlockedMutationReason = |this| &this.reason;
-    }
-}
-
-/// One certified directed mutation edge.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TiltingMutationEdge {
-    source: usize,
-    target: usize,
-    direction: ApproximationDirection,
-    summand: usize,
-}
-
-impl TiltingMutationEdge {
-    accessor_methods! {
-        /// The source vertex index.
-        pub source() -> usize = |this| this.source;
-        /// The target vertex index.
-        pub target() -> usize = |this| this.target;
-        /// The checked mutation direction.
-        pub direction() -> ApproximationDirection = |this| this.direction;
-        /// The replaced summand index.
-        pub summand() -> usize = |this| this.summand;
-    }
-}
-
-/// A verified mutation graph with no closure claim.
+/// A verified mutation graph of pairwise non-isomorphic tilting complexes,
+/// and of silting complexes under [`DiscoveryLimits::through_silting`].
+///
+/// Each edge ends at the stored vertex isomorphic to its mutation. The graph
+/// claims no closure beyond [`DiscoveryStop::ExhaustedFrontier`].
 #[derive(Clone, Debug)]
 pub struct IncompleteEquivalenceGraph {
     algebra: Arc<Algebra>,
     limits: DiscoveryLimits,
-    vertices: Vec<CertifiedTiltingComplex>,
+    vertices: Vec<CertifiedSiltingComplex>,
     keys: Vec<TiltingComplexKey>,
     edges: Vec<TiltingMutationEdge>,
     blocked: Vec<BlockedTiltingMutation>,
@@ -152,13 +49,17 @@ impl IncompleteEquivalenceGraph {
         pub algebra() -> &Arc<Algebra> = |this| &this.algebra;
         /// The effective discovery limits.
         pub limits() -> DiscoveryLimits = |this| this.limits;
-        /// The certified tilting-complex vertices in breadth-first order.
-        pub vertices() -> &[CertifiedTiltingComplex] = |this| &this.vertices;
-        /// One stable key per stored vertex.
+        /// The certified vertices in breadth-first order. A vertex is tilting
+        /// exactly when [`CertifiedSiltingComplex::to_tilting`] returns a
+        /// certificate. Without [`DiscoveryLimits::through_silting`], every
+        /// vertex is tilting.
+        pub vertices() -> &[CertifiedSiltingComplex] = |this| &this.vertices;
+        /// One homotopy-invariant key per stored vertex. Distinct vertices can
+        /// share a key.
         pub keys() -> &[TiltingComplexKey] = |this| &this.keys;
         /// The certified mutation edges in attempt order.
         pub edges() -> &[TiltingMutationEdge] = |this| &this.edges;
-        /// Complete attempts that yielded no tilting edge.
+        /// Complete attempts that yielded no edge.
         pub blocked() -> &[BlockedTiltingMutation] = |this| &this.blocked;
         /// Why the walk stopped without a closure claim.
         pub stop() -> &DiscoveryStop = |this| &this.stop;
@@ -170,8 +71,24 @@ impl IncompleteEquivalenceGraph {
         pub matrix_entries() -> usize = |this| this.matrix_entries;
     }
 
-    /// Rechecks each vertex, key, edge, blocker, and exact work total.
+    /// Rechecks each vertex, key, edge, blocker, and exact work total, and
+    /// that no two vertices are isomorphic.
     pub fn verify(&self) -> bool {
+        if self.vertices.is_empty() && !self.blocked.is_empty() {
+            return self.verify_regular_blocker();
+        }
+        self.records_match()
+            && self.vertices_are_distinct()
+            && self.edges.iter().all(|edge| self.verify_edge(edge))
+            && self
+                .blocked
+                .iter()
+                .all(|blocked| self.verify_blocked(blocked))
+    }
+
+    /// Whether the keys, totals, and attempt count match the stored
+    /// vertices, edges, and blockers.
+    fn records_match(&self) -> bool {
         let unretained = usize::from(
             matches!(
                 self.stop,
@@ -180,30 +97,31 @@ impl IncompleteEquivalenceGraph {
                     | DiscoveryStop::MatrixLimit { .. }
             ) && !self.vertices.is_empty(),
         );
-        if self.vertices.len() != self.keys.len()
-            || self.vertices.iter().any(|vertex| !vertex.verify())
-            || self
+        self.vertices.len() == self.keys.len()
+            && self.vertices.iter().all(|vertex| self.admits(vertex))
+            && self
                 .vertices
                 .iter()
                 .zip(&self.keys)
-                .any(|(vertex, key)| TiltingComplexKey::new(vertex) != *key)
-            || self.total_terms != self.vertices.iter().map(complex_terms).sum()
-            || self.matrix_entries != self.vertices.iter().map(matrix_entries).sum()
-            || self.completed_mutations != self.edges.len() + self.blocked.len() + unretained
-        {
-            return false;
-        }
-        let mut unique = self.keys.clone();
-        unique.sort();
-        unique.dedup();
-        if unique.len() != self.keys.len() {
-            return false;
-        }
-        self.edges.iter().all(|edge| self.verify_edge(edge))
-            && self
-                .blocked
-                .iter()
-                .all(|blocked| self.verify_blocked(blocked))
+                .all(|(vertex, key)| TiltingComplexKey::new(vertex) == *key)
+            && self.total_terms == self.vertices.iter().map(complex_terms).sum()
+            && self.matrix_entries == self.vertices.iter().map(matrix_entries).sum()
+            && self.completed_mutations == self.edges.len() + self.blocked.len() + unretained
+    }
+
+    /// Whether this is the walk that stops before its root: the regular
+    /// complex stays undetermined, and its blocker is the only record.
+    fn verify_regular_blocker(&self) -> bool {
+        let regular = regular_start(&self.algebra, self.limits);
+        self.stop == DiscoveryStop::ExhaustedFrontier
+            && self.keys.is_empty()
+            && self.edges.is_empty()
+            && [
+                self.completed_mutations,
+                self.total_terms,
+                self.matrix_entries,
+            ] == [0; 3]
+            && matches!(regular, Ok(RegularStart::Undetermined(root)) if root.blocked == self.blocked)
     }
 
     fn mutation(
@@ -217,18 +135,44 @@ impl IncompleteEquivalenceGraph {
                 TiltingComplexBlocker::Generation,
             ));
         };
-        mutate(parent, direction, summand, self.limits.tilting)
+        let step = (direction, self.limits.goal());
+        tilting_mutation(parent, summand, self.limits.tilting, step)
+    }
+
+    /// Whether `vertex` verifies and is tilting unless the walk goes through
+    /// silting complexes.
+    fn admits(&self, vertex: &CertifiedSiltingComplex) -> bool {
+        vertex.verify() && (self.limits.through_silting || vertex.negative_class().is_none())
+    }
+
+    fn vertices_are_distinct(&self) -> bool {
+        let meter = &mut WorkMeter::default();
+        self.keys.iter().enumerate().all(|(index, key)| {
+            (0..index).all(|other| {
+                self.keys[other] != *key
+                    || matches!(
+                        isomorphic(&self.vertices[index], &self.vertices[other], meter),
+                        Ok(false)
+                    )
+            })
+        })
     }
 
     fn verify_edge(&self, edge: &TiltingMutationEdge) -> bool {
-        let Some(target_key) = self.keys.get(edge.target) else {
+        let (Some(target), Some(target_key)) =
+            (self.vertices.get(edge.target), self.keys.get(edge.target))
+        else {
             return false;
         };
-        matches!(
-            self.mutation(edge.source, edge.direction, edge.summand),
-            Ok(TiltingMutationOutcome::Tilting(value))
-                if value.verify() && TiltingComplexKey::new(&value) == *target_key
-        )
+        let outcome = self.mutation(edge.source, edge.direction, edge.summand);
+        outcome.ok().and_then(stored_value).is_some_and(|value| {
+            self.admits(&value)
+                && TiltingComplexKey::new(&value) == *target_key
+                && matches!(
+                    isomorphic(&value, target, &mut WorkMeter::default()),
+                    Ok(true)
+                )
+        })
     }
 
     fn verify_blocked(&self, blocked: &BlockedTiltingMutation) -> bool {
@@ -239,66 +183,18 @@ impl IncompleteEquivalenceGraph {
     }
 }
 
-fn complex_terms(value: &CertifiedTiltingComplex) -> usize {
-    value
-        .candidate()
-        .summands()
-        .iter()
-        .map(|summand| summand.complex().len())
-        .sum()
-}
-
-fn matrix_entries(value: &CertifiedTiltingComplex) -> usize {
-    value
-        .candidate()
-        .summands()
-        .iter()
-        .map(|summand| {
-            let complex = summand.complex();
-            let actions: usize = complex
-                .terms()
-                .iter()
-                .map(|term| {
-                    (0..term.algebra().quiver().num_arrows())
-                        .map(|arrow| {
-                            let map = term.map(ArrowId(arrow as u32));
-                            map.rows() * map.cols()
-                        })
-                        .sum::<usize>()
-                })
-                .sum();
-            let differentials: usize = complex
-                .differentials()
-                .iter()
-                .map(|differential| {
-                    (0..complex.terms()[0].algebra().quiver().num_vertices())
-                        .map(|vertex| {
-                            let map = differential.map_at(vertex);
-                            map.rows() * map.cols()
-                        })
-                        .sum::<usize>()
-                })
-                .sum();
-            actions + differentials
-        })
-        .sum()
-}
-
-fn mutate(
-    parent: &CertifiedTiltingComplex,
-    direction: ApproximationDirection,
-    summand: usize,
-    limits: TiltingComplexLimits,
-) -> Result<TiltingMutationOutcome, TiltingComplexError> {
-    match direction {
-        ApproximationDirection::Left => left_tilting_mutation(parent, summand, limits),
-        ApproximationDirection::Right => right_tilting_mutation(parent, summand, limits),
+/// The certificate a mutation stores as a vertex, if any.
+fn stored_value(outcome: TiltingMutationOutcome) -> Option<Box<CertifiedSiltingComplex>> {
+    match outcome {
+        TiltingMutationOutcome::Tilting(value) => Some(Box::new(value.into_silting())),
+        TiltingMutationOutcome::Silting(value) => Some(value),
+        _ => None,
     }
 }
 
 fn blocked_reason(outcome: &TiltingMutationOutcome) -> Option<BlockedMutationReason> {
     match outcome {
-        TiltingMutationOutcome::Tilting(_) => None,
+        TiltingMutationOutcome::Tilting(_) | TiltingMutationOutcome::Silting(_) => None,
         TiltingMutationOutcome::SiltingOnly(rejection) => {
             Some(BlockedMutationReason::SiltingOnly {
                 source: rejection.source(),
@@ -315,7 +211,7 @@ fn blocked_reason(outcome: &TiltingMutationOutcome) -> Option<BlockedMutationRea
 
 #[derive(Default)]
 struct DiscoveryContents {
-    vertices: Vec<CertifiedTiltingComplex>,
+    vertices: Vec<CertifiedSiltingComplex>,
     keys: Vec<TiltingComplexKey>,
     edges: Vec<TiltingMutationEdge>,
     blocked: Vec<BlockedTiltingMutation>,
@@ -345,27 +241,35 @@ fn finish(
 }
 
 enum RegularStart {
-    Ready(CertifiedTiltingComplex),
+    Ready(Box<CertifiedSiltingComplex>),
     Undetermined(DiscoveryContents),
 }
 
-enum DiscoveryStart {
-    Ready(DiscoveryState),
+enum DiscoveryStart<'m> {
+    Ready(DiscoveryState<'m>),
     Finished(IncompleteEquivalenceGraph),
 }
 
-struct DiscoveryState {
-    contents: DiscoveryContents,
-    indices: BTreeMap<TiltingComplexKey, usize>,
-    frontier: VecDeque<usize>,
+/// One completed mutation: a vertex with its stored match, or a blocker.
+enum Attempt {
+    Vertex(Box<CertifiedSiltingComplex>, Option<usize>),
+    Blocked(BlockedMutationReason),
 }
 
-impl DiscoveryState {
+struct DiscoveryState<'m> {
+    contents: DiscoveryContents,
+    buckets: BTreeMap<TiltingComplexKey, Vec<usize>>,
+    frontier: VecDeque<usize>,
+    meter: &'m mut WorkMeter,
+}
+
+impl<'m> DiscoveryState<'m> {
     fn new(
-        regular: CertifiedTiltingComplex,
+        regular: CertifiedSiltingComplex,
         root_terms: usize,
         root_entries: usize,
-    ) -> DiscoveryState {
+        meter: &'m mut WorkMeter,
+    ) -> DiscoveryState<'m> {
         let root_key = TiltingComplexKey::new(&regular);
         DiscoveryState {
             contents: DiscoveryContents {
@@ -376,8 +280,9 @@ impl DiscoveryState {
                 matrix_entries: root_entries,
                 ..DiscoveryContents::default()
             },
-            indices: BTreeMap::from([(root_key, 0usize)]),
+            buckets: BTreeMap::from([(root_key, vec![0usize])]),
             frontier: VecDeque::from([0usize]),
+            meter,
         }
     }
 
@@ -386,20 +291,15 @@ impl DiscoveryState {
         limits: DiscoveryLimits,
         control: &ComputationControl,
     ) -> Option<DiscoveryStop> {
-        let completed = self.contents.completed_mutations;
+        let completed = self.contents.completed_mutations as u64;
         if control.is_cancelled() {
             Some(DiscoveryStop::Cancelled {
                 completed_mutations: completed,
             })
-        } else if completed == limits.max_directed_mutations {
+        } else if completed >= limits.max_directed_mutations {
             Some(DiscoveryStop::MutationLimit {
                 completed,
                 limit: limits.max_directed_mutations,
-            })
-        } else if completed == limits.max_work_units {
-            Some(DiscoveryStop::WorkLimit {
-                completed,
-                limit: limits.max_work_units,
             })
         } else {
             None
@@ -409,7 +309,7 @@ impl DiscoveryState {
     fn store_vertex(
         &mut self,
         key: TiltingComplexKey,
-        value: Box<CertifiedTiltingComplex>,
+        value: Box<CertifiedSiltingComplex>,
         limits: DiscoveryLimits,
     ) -> Result<usize, DiscoveryStop> {
         let terms = complex_terms(&value);
@@ -429,35 +329,68 @@ impl DiscoveryState {
         self.contents.matrix_entries += entries;
         self.contents.vertices.push(*value);
         self.contents.keys.push(key.clone());
-        self.indices.insert(key, target);
+        self.buckets.entry(key).or_default().push(target);
         self.frontier.push_back(target);
         Ok(target)
     }
 
-    fn process_tilting(
+    /// The stored vertex isomorphic to `value`, searched within its key.
+    fn stored_match(
+        &mut self,
+        key: &TiltingComplexKey,
+        value: &CertifiedSiltingComplex,
+    ) -> Result<Option<usize>, Interrupt> {
+        for &index in self.buckets.get(key).into_iter().flatten() {
+            if isomorphic(value, &self.contents.vertices[index], self.meter)? {
+                return Ok(Some(index));
+            }
+        }
+        Ok(None)
+    }
+
+    fn process_vertex(
+        &mut self,
+        edge: TiltingMutationEdge,
+        value: Box<CertifiedSiltingComplex>,
+        stored: Option<usize>,
+        limits: DiscoveryLimits,
+    ) -> Option<DiscoveryStop> {
+        let target = match stored {
+            Some(target) => target,
+            None => match self.store_vertex(TiltingComplexKey::new(&value), value, limits) {
+                Ok(target) => target,
+                Err(stop) => return Some(stop),
+            },
+        };
+        self.contents
+            .edges
+            .push(TiltingMutationEdge { target, ..edge });
+        None
+    }
+
+    /// Runs one mutation and matches a stored result against stored vertices.
+    fn metered_attempt(
         &mut self,
         source: usize,
         direction: ApproximationDirection,
         summand: usize,
-        value: Box<CertifiedTiltingComplex>,
         limits: DiscoveryLimits,
-    ) -> Result<Option<DiscoveryStop>, TiltingComplexError> {
-        let key = TiltingComplexKey::new(&value);
-        let target = if let Some(&target) = self.indices.get(&key) {
-            target
-        } else {
-            match self.store_vertex(key.clone(), value, limits) {
-                Ok(target) => target,
-                Err(stop) => return Ok(Some(stop)),
-            }
-        };
-        self.contents.edges.push(TiltingMutationEdge {
-            source,
-            target,
-            direction,
+    ) -> Result<Attempt, Interrupt> {
+        let outcome = metered_tilting_mutation(
+            &self.contents.vertices[source],
             summand,
-        });
-        Ok(None)
+            limits.tilting,
+            (direction, limits.goal()),
+            self.meter,
+        )?;
+        let reason = blocked_reason(&outcome);
+        let Some(value) = stored_value(outcome) else {
+            return Ok(Attempt::Blocked(
+                reason.expect("an outcome without a vertex has a blocker"),
+            ));
+        };
+        let stored = self.stored_match(&TiltingComplexKey::new(&value), &value)?;
+        Ok(Attempt::Vertex(value, stored))
     }
 
     fn attempt(
@@ -470,25 +403,34 @@ impl DiscoveryState {
     ) -> Result<Option<DiscoveryStop>, TiltingComplexError> {
         let completed = self.contents.completed_mutations;
         control.update(ProgressStage::Mutation, completed, completed + 1);
-        let outcome = mutate(
-            &self.contents.vertices[source],
-            direction,
-            summand,
-            limits.tilting,
-        )?;
+        let attempt = match self.metered_attempt(source, direction, summand, limits) {
+            Ok(attempt) => attempt,
+            Err(Interrupt::Cancelled) => {
+                return Ok(Some(DiscoveryStop::Cancelled {
+                    completed_mutations: completed as u64,
+                }));
+            }
+            Err(Interrupt::Error(error)) => return Err(error),
+        };
         self.contents.completed_mutations += 1;
         let completed = self.contents.completed_mutations;
         control.update(ProgressStage::Mutation, completed, completed);
-        match outcome {
-            TiltingMutationOutcome::Tilting(value) => {
-                self.process_tilting(source, direction, summand, value, limits)
+        match attempt {
+            Attempt::Vertex(value, stored) => {
+                let edge = TiltingMutationEdge {
+                    source,
+                    target: source,
+                    direction,
+                    summand,
+                };
+                Ok(self.process_vertex(edge, value, stored, limits))
             }
-            outcome => {
+            Attempt::Blocked(reason) => {
                 self.contents.blocked.push(BlockedTiltingMutation {
                     source,
                     direction,
                     summand,
-                    reason: blocked_reason(&outcome).expect("a non-tilting outcome has a blocker"),
+                    reason,
                 });
                 Ok(None)
             }
@@ -548,7 +490,9 @@ fn regular_start(
     limits: DiscoveryLimits,
 ) -> Result<RegularStart, TiltingComplexError> {
     match regular_tilting_complex(algebra, limits.tilting)? {
-        TiltingComplexResult::Tilting(value) => Ok(RegularStart::Ready(*value)),
+        TiltingComplexResult::Tilting(value) => {
+            Ok(RegularStart::Ready(Box::new(value.into_silting())))
+        }
         TiltingComplexResult::NotTilting(_) => unreachable!("the regular generator is tilting"),
         TiltingComplexResult::Undetermined(blocker) => {
             Ok(RegularStart::Undetermined(DiscoveryContents {
@@ -564,42 +508,13 @@ fn regular_start(
     }
 }
 
-fn storage_stop(
-    stored_vertices: usize,
-    stored_terms: usize,
-    stored_entries: usize,
-    requested_terms: usize,
-    requested_entries: usize,
-    limits: DiscoveryLimits,
-) -> Option<DiscoveryStop> {
-    if stored_vertices == limits.max_vertices {
-        Some(DiscoveryStop::VertexLimit {
-            stored: stored_vertices,
-            limit: limits.max_vertices,
-        })
-    } else if stored_terms.saturating_add(requested_terms) > limits.max_total_terms {
-        Some(DiscoveryStop::TermLimit {
-            stored: stored_terms,
-            requested: requested_terms,
-            limit: limits.max_total_terms,
-        })
-    } else if stored_entries.saturating_add(requested_entries) > limits.max_matrix_entries {
-        Some(DiscoveryStop::MatrixLimit {
-            stored: stored_entries,
-            requested: requested_entries,
-            limit: limits.max_matrix_entries,
-        })
-    } else {
-        None
-    }
-}
-
-fn initial_state(
+fn initial_state<'m>(
     algebra: &Arc<Algebra>,
     limits: DiscoveryLimits,
-) -> Result<DiscoveryStart, TiltingComplexError> {
+    meter: &'m mut WorkMeter,
+) -> Result<DiscoveryStart<'m>, TiltingComplexError> {
     let regular = match regular_start(algebra, limits)? {
-        RegularStart::Ready(regular) => regular,
+        RegularStart::Ready(regular) => *regular,
         RegularStart::Undetermined(contents) => {
             return Ok(DiscoveryStart::Finished(finish(
                 algebra,
@@ -623,6 +538,7 @@ fn initial_state(
         regular,
         root_terms,
         root_entries,
+        meter,
     )))
 }
 
@@ -637,13 +553,29 @@ fn update_completion_progress(
 }
 
 /// Walks left and right tilting mutations in deterministic breadth-first order.
+///
+/// With [`DiscoveryLimits::through_silting`], a silting result that is not
+/// tilting is stored and walked like any vertex.
+///
+/// Cancellation is observed before each mutation and before each work unit
+/// inside one. A cancelled walk keeps every completed mutation and discards
+/// the one in progress.
 pub fn discover_equivalences(
     algebra: &Arc<Algebra>,
     limits: DiscoveryLimits,
     control: &ComputationControl,
 ) -> Result<IncompleteEquivalenceGraph, TiltingComplexError> {
+    discover_metered(algebra, limits, control, &mut WorkMeter::new(control))
+}
+
+fn discover_metered(
+    algebra: &Arc<Algebra>,
+    limits: DiscoveryLimits,
+    control: &ComputationControl,
+    meter: &mut WorkMeter,
+) -> Result<IncompleteEquivalenceGraph, TiltingComplexError> {
     control.update(ProgressStage::Mutation, 0, 0);
-    let start = initial_state(algebra, limits)?;
+    let start = initial_state(algebra, limits, meter)?;
     let mut state = match start {
         DiscoveryStart::Ready(state) => state,
         DiscoveryStart::Finished(graph) => return Ok(graph),
@@ -653,3 +585,6 @@ pub fn discover_equivalences(
     update_completion_progress(&stop, completed, control);
     Ok(finish(algebra, limits, state.contents, stop))
 }
+
+#[cfg(test)]
+mod tests;

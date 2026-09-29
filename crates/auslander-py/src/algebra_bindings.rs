@@ -203,11 +203,11 @@ impl PyAlgebra {
         quiver: &PyQuiver,
         relations: Vec<Vec<(i64, Vec<u32>)>>,
         field: &PyPrimeField,
-        max_basis: Option<usize>,
-        max_word_len: Option<usize>,
-        max_steps: Option<usize>,
-        max_origin_terms: Option<usize>,
-        max_ambiguities: Option<usize>,
+        max_basis: Option<u64>,
+        max_word_len: Option<u64>,
+        max_steps: Option<u64>,
+        max_origin_terms: Option<u64>,
+        max_ambiguities: Option<u64>,
     ) -> PyResult<PyAlgebra> {
         let f = field.inner;
         let mut checked = Vec::with_capacity(relations.len());
@@ -259,11 +259,11 @@ impl PyAlgebra {
         py: Python<'_>,
         json: &str,
         field: Option<&PyPrimeField>,
-        max_basis: Option<usize>,
-        max_word_len: Option<usize>,
-        max_steps: Option<usize>,
-        max_origin_terms: Option<usize>,
-        max_ambiguities: Option<usize>,
+        max_basis: Option<u64>,
+        max_word_len: Option<u64>,
+        max_steps: Option<u64>,
+        max_origin_terms: Option<u64>,
+        max_ambiguities: Option<u64>,
     ) -> PyResult<PyAlgebra> {
         let limits = limits_from(
             max_basis,
@@ -439,7 +439,7 @@ impl PyAlgebra {
     /// general-relation algebra reports its stored limits; a field-free
     /// monomial algebra reports the limits derived from its presentation.
     #[getter]
-    fn completion_limits(&self) -> BTreeMap<&'static str, usize> {
+    fn completion_limits(&self) -> BTreeMap<&'static str, u64> {
         let limits = match &self.kind {
             AlgebraKind::Monomial { presentation, .. } => {
                 algebra::monomial_limits(presentation.ideal())

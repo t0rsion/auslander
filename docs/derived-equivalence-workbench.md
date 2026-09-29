@@ -36,7 +36,7 @@ In scope:
   thick-generation data.
 - Left and right mutation through checked minimal approximations and mapping
   cones.
-- A budgeted graph of certified tilting-complex mutations.
+- A budgeted graph of certified tilting- or silting-complex mutations.
 - Recovery and verification of `End_K(T)^op` for a split basic tilting
   complex.
 - Composition and inversion of checked derived-equivalence edges.
@@ -51,8 +51,8 @@ In scope:
 Out of scope: unbounded derived categories, non-split species, extension
 fields, characteristic zero, dg target algebras, minimal `A-infinity` models,
 Python construction of arbitrary tilting-complex witnesses, and a completeness
-claim for an unrestricted mutation graph. A bounded input whose replacement
-does not finish stays a cut. It is not called non-perfect.
+claim for an unrestricted mutation graph. A replacement that does not finish
+stays a cut and is never called non-perfect.
 
 ## 2. Mathematical domain
 
@@ -86,12 +86,9 @@ unchecked Boolean shortcut.
 
 ## 3. Projective complex witnesses
 
-`ProjectiveComplex` stores:
-
-- one checked `BoundedComplex`;
-- one verified decomposition of each term into the canonical projectives
-  `P_i = e_i A`;
-- the matching inclusions and projections.
+`ProjectiveComplex` stores one checked `BoundedComplex`, one verified
+decomposition of each term into the canonical projectives `P_i = e_i A`, and
+the matching inclusions and projections.
 
 `ProjectiveComplex::new` rejects the first term without such a decomposition.
 `verify()` recomputes every split and the bounded complex. A zero term has the
@@ -114,8 +111,7 @@ q: P -> X,
 ```
 
 exactness of `Cone(q)` proves that `q` is a quasi-isomorphism. `verify()`
-rebuilds the cone and its homology dimensions. It does not trust a stored list
-of zero dimensions.
+rebuilds the cone and its homology dimensions instead of trusting stored zeros.
 
 `PerfectReplacement` stores `X`, a `ProjectiveComplex` `P`, and a
 `QuasiIsomorphism` from `P` to `X`. It checks nominal source endpoints and the
@@ -169,11 +165,9 @@ max_matrix_entries
 max_work_units
 ```
 
-Every reservation uses checked arithmetic. `ReplacementOutcome` is:
-
-- `Replaced(PerfectReplacement)`.
-- `Cut(ReplacementCut)`.
-- `Cancelled(ReplacementCancellation)`.
+Every reservation uses checked arithmetic. `ReplacementOutcome` is
+`Replaced(PerfectReplacement)`, `Cut(ReplacementCut)`, or
+`Cancelled(ReplacementCancellation)`.
 
 A cut stores the exact complex-resolution prefix, the first nonzero kernel,
 the effective limits, and the first rejected reservation. It exposes no
@@ -250,23 +244,22 @@ for arbitrary bimodules.
 
 ## 8. Tilting complexes
 
-`TiltingComplexCandidate` stores an ordered list of nonzero
-`ProjectiveComplex` summands over one algebra. Their direct sum is the candidate
-`T`.
+`TiltingComplexCandidate` stores an ordered list of nonzero `ProjectiveComplex`
+summands over one algebra, with direct sum `T`.
 
-The release classifier has an exceptional domain. Each summand must have a
-one-dimensional degree-zero endomorphism quotient. This proves locality over
-the base field. A broader local endomorphism ring returns the typed
-`EndomorphismLocality` blocker. It is not rejected as nonlocal.
+Each summand must have a local degree-zero endomorphism ring with residue
+field `k`. The classifier proves this with a residue map `End_K(T_i) → k`
+whose kernel misses the identity and has a zero power. The Frobenius power
+`x^q`, for the least power `q` of `p` with `q ≥ dim End_K(T_i)`, finds the
+map. A zero, decomposable, or non-split endomorphism ring returns the typed
+`EndomorphismLocality` blocker, not a nonlocal rejection.
 
-Distinct summands must have no checked degree-zero homotopy isomorphism.
-An open isomorphism gate blocks classification.
+Distinct summands must have no checked degree-zero homotopy isomorphism. Two
+summands are isomorphic exactly when a basis composite `T_i → T_j → T_i` lies
+outside the radical. An open isomorphism gate blocks classification.
 
-`TiltingComplexResult` is:
-
-- `Tilting(CertifiedTiltingComplex)`.
-- `NotTilting(TiltingComplexRejection)`.
-- `Undetermined(TiltingComplexBlocker)`.
+`TiltingComplexResult` is `Tilting(CertifiedTiltingComplex)`,
+`NotTilting(TiltingComplexRejection)`, or `Undetermined(TiltingComplexBlocker)`.
 
 A nonzero class in `Hom_K(T, T[q])` for `q != 0` is a rejection and stores its
 representative chain map. A failed generation search is undetermined unless a
@@ -274,19 +267,22 @@ separate invariant proves that generation is impossible.
 
 `CertifiedTiltingComplex` stores every zero shifted Hom quotient, every
 degree-zero endomorphism quotient, and one thick-generation witness.
-`verify()` recomputes each part.
+`verify()` recomputes each part. It dereferences to a
+`CertifiedSiltingComplex`, which needs zero quotients only in positive shifts
+and keeps its first nonzero class in a negative shift.
 
 ## 9. Thick-generation witnesses
 
 `ThickGenerationWitness` has two exact forms:
 
 - `Regular`, for the ordered canonical projectives in degree zero.
-- `Mutation`, which stores a certified parent and one checked approximation
-  cone.
+- `Mutation`, which stores a certified silting parent and one checked
+  approximation cone. The cone relation needs only that the parent generates.
 
 The recursive mutation form proves that the parent and child generate the
 same thick subcategory. A chain must end at `Regular`. The verifier rebuilds
-each approximation and cone, then checks the child summand list.
+each approximation, cone, and minimal reduction, then checks the child summand
+list.
 
 This release does not accept an arbitrary user-supplied thick-expression
 directed acyclic graph. Classical tilting generation stays in its existing
@@ -306,38 +302,78 @@ in the homotopy category. Its candidate replacement is `Cone(f)`. A right
 mutation uses the dual construction.
 
 `ComplexApproximationWitness` stores the direction, replaced summand, ordered
-summand indices, and assembled chain map. The verifier recomputes every
-degree-zero homotopy Hom basis. One copy of each basis representative forms
-the universal evaluation or coevaluation map. In the exceptional domain this
-is the fixed minimal approximation.
+summand indices, assembled chain map, and minimal reduction. For each summand
+`T_j` of `U`, let `R_j` be the maps `X -> T_j` that factor through a radical
+map of `add(U)`. A basis representative of `Hom(X, T_j)` joins the
+approximation when it is independent of `R_j` and of the representatives kept
+before it. The kept maps form a basis of `Hom(X, T_j) / R_j`, which makes `f`
+minimal. The proof needs pairwise non-isomorphic summands with local
+endomorphism rings, and the parent certificate supplies both. When every `R_j`
+is zero, every basis representative is kept. The verifier recomputes the Hom
+bases, each `R_j`, and the selection.
 
-The replacement is the checked cone, shifted by `-1` for right mutation. The
-new ordered list must pass the same exceptional basicness, shifted Hom, and
-generation checks.
+The cone `C`, shifted by `-1` for right mutation, is reduced to a minimal
+complex `C'` that replaces `X`. Minimal means that no differential component
+between canonical projective summands is an isomorphism. Each Gaussian
+elimination step splits off one contractible summand `P -> P`, and zero end
+terms are trimmed. A cone without an isomorphism component keeps its term
+data. A contractible cone returns the `EndomorphismLocality` blocker with
+dimension zero.
 
-Every silting mutation candidate is checked for tilting self-orthogonality.
-If the negative shifts do not vanish, the result is a typed
-`SiltingOnly` outcome. It is not inserted in the tilting graph.
+`MinimalReduction` stores `C'` and chain maps `forward: C -> C'` and
+`backward: C' -> C`. The verifier rebuilds `C` and checks that `backward`
+followed by `forward` is the identity of `C'`. So `C = C' ⊕ K` as complexes,
+with `K` a bounded complex of projectives. It then checks that `C` and `C'`
+have equal homology dimension vectors in every degree. So `K` is acyclic, hence
+contractible, and the two maps are inverse homotopy equivalences. The
+verifier also rechecks minimality. Rickard's criterion is invariant under
+homotopy equivalence, but the classifier still checks every tilting
+obligation on `C'` itself.
+
+The new ordered list must pass the same exceptional basicness, shifted Hom,
+and generation checks. A tilting mutation checks every nonzero shift, and a
+nonvanishing negative shift gives a typed `SiltingOnly` outcome.
+`silting_mutation` checks positive shifts only. Irreducible mutation of a
+silting complex is silting (Aihara and Iyama, Theorem 2.31), so it returns
+`Tilting` or `Silting`.
 
 ## 11. Equivalence discovery
 
 `discover_equivalences(A, limits, control)` starts at the regular projective
 generator. It walks verified left and right tilting mutations in breadth-first
-order. A vertex key contains canonical complex data and does not use an
-address.
+order. With `DiscoveryLimits::through_silting`, off by default, it walks
+silting mutations and stores each `Silting` result as a vertex. Target
+recovery is a separate operation on a stored tilting vertex.
+
+Every stored summand is minimal, so homotopy equivalence of summands is
+isomorphism of complexes. A vertex key is the sorted list of summand shapes.
+A shape is the lowest degree and the multiplicity of each indecomposable
+projective in each term. Isomorphic vertices have equal keys in any summand
+order, and distinct vertices can share a key. Within one key, the summand test
+of section 8 decides identity. A mutation isomorphic to a stored vertex adds
+an edge to that vertex. The verifier rebuilds each edge, checks the
+isomorphism to its target, and checks that no two vertices are isomorphic.
 
 `DiscoveryLimits` bounds vertices, directed mutations, total complex terms,
-matrix entries, per-vertex Hom spaces, and work units. No wall-clock limit
-changes a mathematical outcome.
+matrix entries, and per-vertex Hom spaces. No wall-clock limit
+changes a mathematical outcome. Cancellation is observed before each mutation
+and before each work unit inside one: a Hom quotient build, a basis product,
+or an elimination step. The mutation in progress is discarded.
 
 Discovery always returns `IncompleteEquivalenceGraph`. The stop reason is an
-exhausted bounded frontier, a named resource limit, or cancellation. The
-value exposes certified vertices, checked mutation edges, and complete blocked
-attempts. It has no `equivalence_class()` accessor and makes no closure claim.
+exhausted frontier, a named resource limit, or cancellation. The value
+exposes certified vertices, checked mutation edges, and complete blocked
+attempts. It has no `equivalence_class()` accessor.
 
-Target recovery is a separate operation on any stored certified vertex.
-Fresh-process tests pin vertex keys, mutation order, target presentations, and
-artifacts.
+`ExhaustedFrontier` claims that every attempt from every stored vertex ended
+at an edge or a blocked attempt. So the stored vertices are closed under the
+attempted mutations up to isomorphism. The minimal approximation is unique up
+to isomorphism, so isomorphic vertices have isomorphic mutations. If no
+blocked attempt is `Undetermined`, the stored vertices are every tilting
+complex reachable from `A` through a chain of tilting mutations. With
+`through_silting`, they are every silting complex reachable through a chain of
+irreducible silting mutations. The claim covers no other silting complex and
+not the whole derived equivalence class of `A`.
 
 ## 12. Tilting-complex target algebras
 
@@ -381,18 +417,14 @@ release is the classical `DerivedTransport` from section 7.
 
 ## 14. Portable artifacts
 
-`DerivedArtifact` has schema identifier `auslander-derived-v1`. Its canonical
-JSON stores integers and arrays only. Field elements use canonical integers in
-`0..p`.
+`DerivedArtifact` has schema identifier `auslander-derived-v2`, which replaces
+the obsolete `auslander-derived-v1`. Its canonical JSON stores integers and
+arrays only. Field elements use canonical integers in `0..p`.
 
-The artifact stores:
-
-- the source completion certificate;
-- the ordered left or right mutation recipe from the regular generator;
-- the target completion certificate;
-- effective tilting and target limits;
-- exact target-recovery work counts;
-- one canonical fingerprint over every preceding field.
+The artifact stores the source completion certificate, the ordered left or
+right silting mutation recipe from the regular generator, the target completion
+certificate, effective tilting and target limits, exact target-recovery work
+counts, and one canonical fingerprint over every preceding field.
 
 It stores no memory addresses, elapsed times, cache state, or Python names.
 The recipe is the compressed witness. Expanded module, morphism, and
@@ -420,7 +452,7 @@ It performs these steps:
 
 1. Verify and rebuild the source algebra from its completion certificate.
 2. Start from the regular projective generator.
-3. Replay each prescribed left or right mutation.
+3. Replay each prescribed left or right silting mutation.
 4. Recheck the final tilting complex and its recursive generation witness.
 5. Recover the target and verify its completion and coordinate algebra map.
 6. Compare the target certificate and exact work counts byte for byte.
@@ -434,12 +466,11 @@ recipe, target certificate, declared limits, and work counts. It also changes
 the fingerprint without resigning. Every changed artifact fails.
 
 The fingerprint is FNV-1a, 64 bit. It detects accidental changes and fixes a
-canonical identifier. It is not a cryptographic signature or authentication
-mechanism.
+canonical identifier. It is not a cryptographic signature.
 
 ## 16. Command-line program
 
-The Rust package ships an `auslander` binary with these commands:
+The Rust package ships an `auslander` binary with these artifact commands:
 
 ```text
 auslander inspect ARTIFACT
@@ -448,14 +479,17 @@ auslander canonicalize ARTIFACT
 auslander fingerprint ARTIFACT
 ```
 
-`inspect` parses and prints declared metadata without asserting validity.
-`verify` runs the independent verifier. `canonicalize` succeeds only after
-verification and writes canonical JSON to standard output. `fingerprint`
-prints the verified fingerprint.
+Each command accepts every kind that `auslander::artifact::read_kind`
+registers. `inspect` parses and prints declared metadata without asserting
+validity. `verify` runs the independent verifier. Its first line is the
+status (`verified` or `verified-cut`), the kind, and the fingerprint, and
+the summary lines of `inspect` follow. `canonicalize` and `fingerprint`
+verify first, then print the canonical JSON or the fingerprint.
 
-All diagnostics go to standard error. Machine-readable output goes to
-standard output. Exit status is zero only for a complete verified result.
-No command reads the network.
+Diagnostics go to standard error, and results to standard output. The
+command exits 0 on success, 1 on failure, and 2 on a usage error or an
+unreadable file. A verified cut is accepted: it is a correct prefix, not a
+complete result. No command reads the network.
 
 The PyPI console entry uses the same program name for `repl` and `compute`.
 The Rust artifact binary and the Python workbench are separate installation
@@ -463,27 +497,16 @@ targets. A machine-readable research request uses the Python package.
 
 ## 17. Python package layout
 
-The wheel becomes a Python package:
-
-```text
-auslander/
-    __init__.py
-    __main__.py
-    _core.abi3.so
-    _core.pyi
-    compute.py
-    py.typed
-    session.py
-    display.py
-    parser.py
-```
+The wheel becomes a Python package `auslander/` and includes `__init__.py`,
+`__main__.py`, `_core.abi3.so`, `_core.pyi`, `compute.py`, `py.typed`,
+`session.py`, `display.py`, and `parser.py`.
 
 `auslander.__init__` re-exports the supported `_core` surface and defines
-`__version__`. Existing `import auslander` code keeps working.
+`__version__`.
 
 The extension stays the source of every mathematical value. Pure Python code
 parses text, manages names, formats checked values, and calls public extension
-methods. It does not duplicate algebra or verification logic.
+methods.
 
 ## 18. Session and text input
 
@@ -514,21 +537,14 @@ through checked constructors. It never deserializes a Python object graph.
 installed, the command uses it. Otherwise it uses Python's standard interactive
 console.
 
-The shell preloads:
-
-```text
-session, F, algebra, module, show, explain, verify_file
-```
+The shell preloads `session`, `F`, `algebra`, `module`, `show`, `explain`, and
+`verify_file`.
 
 `show(value)` returns a deterministic text rendering outside a notebook. In a
-notebook it also provides bounded HTML or SVG for:
-
-- quivers and algebra dimensions;
-- module dimension vectors and arrow matrices;
-- bounded complexes and resolutions;
-- support tau-tilting and equivalence graphs;
-- perfect replacements, derived Hom dimensions, automatic transport results,
-  and verified artifact metadata.
+notebook it also provides bounded HTML or SVG for quivers, algebra dimensions,
+module dimension vectors, arrow matrices, bounded complexes, resolutions,
+support tau-tilting graphs, equivalence graphs, perfect replacements, derived
+Hom dimensions, automatic transport results, and verified artifact metadata.
 
 Every rendering has an output-size limit. A cut prints the omitted count. No
 renderer triggers a mathematical computation.
@@ -544,12 +560,10 @@ outcomes. Older extension classes retain the broad `_CoreValue` fallback
 where their full historical surface is not enumerated. Stubs do not replace
 runtime tests.
 
-Optional adapters have no required dependency:
-
-- graph values expose `to_networkx()` and `to_dot()`.
-- `to_latex()` returns a string and does not import a renderer.
-- `matrix_from_sage()` and `matrix_to_sage()` live in the optional
-  `auslander.sage` module.
+Optional adapters have no required dependency. Graph values expose
+`to_networkx()` and `to_dot()`. `to_latex()` returns a string and does not
+import a renderer. `matrix_from_sage()` and `matrix_to_sage()` live in the
+optional `auslander.sage` module.
 
 Sage is an adapter, not the runtime object model. Every imported Sage matrix
 is copied into canonical field elements and passes the checked constructor.
@@ -610,33 +624,20 @@ reserved work counts. It contains no elapsed time. Python can poll it from
 another thread while the computation releases the GIL.
 
 Cancellation returns a typed cancellation value with the last completed
-certificate stage. It is not budget exhaustion and does not claim that a
-larger limit would help.
+certificate stage. It is not budget exhaustion and makes no claim about limits.
 
 Existing algorithms gain cancellation only where their loops can preserve a
 checked prefix. A call without `control` behaves exactly as before.
 
 ## 23. Acceptance fixtures
 
-The release includes `F_2` and `F_5` fixtures for:
-
-- identity replacement of a projective complex and automatic replacement of a
-  projective-dimension-two module;
-- a two-term ordinary complex;
-- a periodic-resolution cut and cancellation before the first cover;
-- derived Hom against direct Ext computations;
-- automatic transport through the classical projective-dimension-two equivalence;
-- the regular tilting complex;
-- genuine left and right tilting-complex mutations that are not modules in one
-  degree;
-- target recovery from a multi-degree tilting complex;
-- a two-edge formal composition and inverse;
-- artifact round trips for left and right recipes;
-- artifact mutations across every stored claim family;
-- command-line verification in a fresh process;
-- dense and sparse compute requests, batch work counts, and fresh-process JSON;
-- session save and checked reload;
-- fresh-process text, HTML, SVG, DOT, and LaTeX agreement.
+The release includes `F_2` and `F_5` fixtures for identity replacement,
+projective-dimension-two replacement, a two-term ordinary complex, a
+periodic-resolution cut, cancellation, derived Hom, classical transport, the
+regular tilting complex, left and right tilting mutations, a two-edge
+composition, artifact round trips, command-line verification, compute
+requests, batch counts, session reload, and text, HTML, SVG, DOT, and LaTeX
+agreement.
 
 Every pinned mathematical number has a derivation in its fixture. A fixture is
 not accepted because it matches this library on a second call.
@@ -649,9 +650,8 @@ fingerprints, renderings, and compute results.
 
 Performance records separate exact work counts from elapsed samples. CI gates
 work counts for fixed replacement, derived Hom, mutation discovery, target
-recovery, and artifact verification. It does not gate wall-clock time.
-The measured release record is
-[`derived-workbench-performance.md`](derived-workbench-performance.md).
+recovery, and artifact verification, not wall-clock time. The measured release
+record is [`derived-workbench-performance.md`](derived-workbench-performance.md).
 
 The production code scanner fixes its ceiling after the final deletion
 and duplicate-logic pass. Tests and generated stubs cannot offset Rust

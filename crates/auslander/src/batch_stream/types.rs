@@ -5,15 +5,16 @@ use crate::resolution::{ProjectiveResolution, ResolutionEnd};
 ///
 /// `max_live_sources` is a hard upper bound on the number of source modules
 /// passed to one [`HomologicalBatch`]. Pair and Ext-cell limits apply to each
-/// chunk. A stream does not retain completed chunks.
+/// chunk. A stream does not retain completed chunks. The fields are `u64`
+/// because a checkpoint stores them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HomologicalBatchStreamLimits {
     /// Maximum number of source modules retained in one chunk.
-    pub max_live_sources: usize,
+    pub max_live_sources: u64,
     /// Maximum number of self-pairs in one chunk.
-    pub max_pairs: usize,
+    pub max_pairs: u64,
     /// Maximum number of Ext dimension cells in one chunk.
-    pub max_ext_cells: usize,
+    pub max_ext_cells: u64,
 }
 
 impl Default for HomologicalBatchStreamLimits {
@@ -21,18 +22,33 @@ impl Default for HomologicalBatchStreamLimits {
         let batch = HomologicalBatchLimits::default();
         Self {
             max_live_sources: 1,
-            max_pairs: batch.max_pairs,
-            max_ext_cells: batch.max_ext_cells,
+            max_pairs: batch.max_pairs as u64,
+            max_ext_cells: batch.max_ext_cells as u64,
         }
     }
 }
 
 impl HomologicalBatchStreamLimits {
+    /// The batch limits for one chunk, saturated at `usize::MAX`.
+    ///
+    /// Saturation never changes a verdict: a chunk holds at most
+    /// [`Self::capacity`] sources, which already fits both limits.
     pub(super) fn batch(self) -> HomologicalBatchLimits {
         HomologicalBatchLimits {
-            max_pairs: self.max_pairs,
-            max_ext_cells: self.max_ext_cells,
+            max_pairs: usize::try_from(self.max_pairs).unwrap_or(usize::MAX),
+            max_ext_cells: usize::try_from(self.max_ext_cells).unwrap_or(usize::MAX),
         }
+    }
+
+    /// The most sources one chunk may hold: the least of `max_live_sources`,
+    /// `max_pairs`, and `max_ext_cells / degree_steps`.
+    ///
+    /// # Panics
+    /// Panics when `degree_steps` is zero.
+    pub(crate) fn capacity(self, degree_steps: usize) -> u64 {
+        self.max_live_sources
+            .min(self.max_pairs)
+            .min(self.max_ext_cells / degree_steps as u64)
     }
 }
 
@@ -45,8 +61,8 @@ pub enum HomologicalBatchStreamError {
     DegreeOverflow { degree: usize },
     /// Pair and Ext-cell limits leave no capacity for one source.
     NoPairCapacity {
-        max_pairs: usize,
-        max_ext_cells: usize,
+        max_pairs: u64,
+        max_ext_cells: u64,
         degree_steps: usize,
     },
     /// One source does not share the stream's first algebra object.
@@ -192,24 +208,28 @@ debug_fields! { HomologicalBatchStreamChunk |this| {
 } }
 
 /// Cumulative exact work and the largest source chunk retained so far.
+///
+/// The counters are `u64` because a checkpoint stores them. They add with
+/// checked `u64` arithmetic, so a sum overflows at the same point on every
+/// host.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HomologicalBatchStreamWork {
     /// Number of completed chunks.
-    pub chunks: usize,
+    pub chunks: u64,
     /// Number of completed source rows.
-    pub sources: usize,
+    pub sources: u64,
     /// Number of ordinary source resolutions.
-    pub resolutions: usize,
+    pub resolutions: u64,
     /// Number of target projective covers.
-    pub target_covers: usize,
+    pub target_covers: u64,
     /// Number of ordinary Hom spaces.
-    pub hom_spaces: usize,
+    pub hom_spaces: u64,
     /// Number of Hom spaces into target covers.
-    pub projective_factor_spaces: usize,
+    pub projective_factor_spaces: u64,
     /// Number of Ext tables.
-    pub ext_tables: usize,
+    pub ext_tables: u64,
     /// Largest number of sources held by one chunk.
-    pub peak_live_sources: usize,
+    pub peak_live_sources: u64,
 }
 
 impl HomologicalBatchStreamWork {
@@ -218,36 +238,38 @@ impl HomologicalBatchStreamWork {
         work: crate::batch::HomologicalBatchWork,
         sources: usize,
     ) -> Result<(), HomologicalBatchStreamError> {
-        self.chunks = self
-            .chunks
-            .checked_add(1)
-            .ok_or(HomologicalBatchStreamError::WorkOverflow)?;
-        self.sources = self
-            .sources
-            .checked_add(sources)
-            .ok_or(HomologicalBatchStreamError::WorkOverflow)?;
-        self.resolutions = self
-            .resolutions
-            .checked_add(work.resolutions)
-            .ok_or(HomologicalBatchStreamError::WorkOverflow)?;
-        self.target_covers = self
-            .target_covers
-            .checked_add(work.target_covers)
-            .ok_or(HomologicalBatchStreamError::WorkOverflow)?;
-        self.hom_spaces = self
-            .hom_spaces
-            .checked_add(work.hom_spaces)
-            .ok_or(HomologicalBatchStreamError::WorkOverflow)?;
-        self.projective_factor_spaces = self
-            .projective_factor_spaces
-            .checked_add(work.projective_factor_spaces)
-            .ok_or(HomologicalBatchStreamError::WorkOverflow)?;
-        self.ext_tables = self
-            .ext_tables
-            .checked_add(work.ext_tables)
-            .ok_or(HomologicalBatchStreamError::WorkOverflow)?;
-        self.peak_live_sources = self.peak_live_sources.max(sources);
+        let add = |total: &mut u64, value: usize| {
+            *total = total
+                .checked_add(value as u64)
+                .ok_or(HomologicalBatchStreamError::WorkOverflow)?;
+            Ok(())
+        };
+        add(&mut self.chunks, 1)?;
+        add(&mut self.sources, sources)?;
+        add(&mut self.resolutions, work.resolutions)?;
+        add(&mut self.target_covers, work.target_covers)?;
+        add(&mut self.hom_spaces, work.hom_spaces)?;
+        add(
+            &mut self.projective_factor_spaces,
+            work.projective_factor_spaces,
+        )?;
+        add(&mut self.ext_tables, work.ext_tables)?;
+        self.peak_live_sources = self.peak_live_sources.max(sources as u64);
         Ok(())
+    }
+
+    /// The sum of the five primitive counters, from `resolutions` through
+    /// `ext_tables`. `None` when the sum overflows `u64`.
+    pub(crate) fn primitive_units(self) -> Option<u64> {
+        [
+            self.resolutions,
+            self.target_covers,
+            self.hom_spaces,
+            self.projective_factor_spaces,
+            self.ext_tables,
+        ]
+        .into_iter()
+        .try_fold(0u64, u64::checked_add)
     }
 }
 

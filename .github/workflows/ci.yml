@@ -33,6 +33,23 @@ jobs:
           rm Cargo.lock
           cargo +1.88.0 check --workspace
 
+  wasm:
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: 1.92.0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: web/build.sh
+      - run: cargo build -p auslander --bin auslander --locked
+      - run: cargo run -p auslander-wasm --example parity_corpus --locked -- target/parity-corpus
+      - run: node web/parity.mjs target/debug/auslander web/auslander_wasm.wasm crates/auslander/artifacts target/parity-corpus
+
   package:
     runs-on: ubuntu-latest
     steps:

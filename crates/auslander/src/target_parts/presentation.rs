@@ -31,25 +31,33 @@ pub(super) fn source_data(
     Ok((endo, decomposition, basic))
 }
 
-fn bounded_source_data(
-    module: &Module,
-    limit: usize,
-) -> Result<(EndoAlgebra, Decomposition, BasicDecomposition), TargetErrorOrCut> {
-    let endo = EndoAlgebra::new(module);
-    endo.dim()
-        .checked_mul(endo.dim())
-        .ok_or(TargetError::SizeOverflow {
-            stage: TargetCutStage::EndoDimension,
-        })?;
-    if endo.dim() > limit {
+/// Cuts when `dimension` exceeds `limit`, then rejects a dimension whose
+/// square overflows `usize`. The limit check comes first, so every host
+/// reports the same cut.
+fn check_endo_dimension(dimension: usize, limit: u64) -> Result<(), TargetErrorOrCut> {
+    if dimension as u64 > limit {
         return Err(TargetCutReason::Budget(TargetBudgetCut {
             stage: TargetCutStage::EndoDimension,
             used: 0,
-            requested: endo.dim(),
+            requested: dimension as u64,
             limit,
         })
         .into());
     }
+    dimension
+        .checked_mul(dimension)
+        .ok_or(TargetError::SizeOverflow {
+            stage: TargetCutStage::EndoDimension,
+        })?;
+    Ok(())
+}
+
+fn bounded_source_data(
+    module: &Module,
+    limit: u64,
+) -> Result<(EndoAlgebra, Decomposition, BasicDecomposition), TargetErrorOrCut> {
+    let endo = EndoAlgebra::new(module);
+    check_endo_dimension(endo.dim(), limit)?;
     let decomposition = decompose_with_root_endo(module, Some(endo.clone()));
     let basic = BasicDecomposition::from_decomposition(module, &decomposition)
         .map_err(TargetError::from)?;
@@ -89,20 +97,7 @@ fn coordinate_target_data<A: CoordinateAlgebra>(
     ids: &[Vec<Fp>],
     limits: &TargetLimits,
 ) -> Result<CoordinateTargetData, TargetErrorOrCut> {
-    endo.dim()
-        .checked_mul(endo.dim())
-        .ok_or(TargetError::SizeOverflow {
-            stage: TargetCutStage::EndoDimension,
-        })?;
-    if endo.dim() > limits.max_endo_dimension {
-        return Err(TargetCutReason::Budget(TargetBudgetCut {
-            stage: TargetCutStage::EndoDimension,
-            used: 0,
-            requested: endo.dim(),
-            limit: limits.max_endo_dimension,
-        })
-        .into());
-    }
+    check_endo_dimension(endo.dim(), limits.max_endo_dimension)?;
     if !verify_idempotents(endo, ids) {
         return Err(target_defect("the coordinate idempotents do not form the identity").into());
     }
@@ -133,7 +128,7 @@ fn coordinate_target_data<A: CoordinateAlgebra>(
         normal_word_preimages: preimages,
         radical_nilpotency_index: powers.len(),
         work: TargetWork {
-            endo_dimension: endo.dim(),
+            endo_dimension: endo.dim() as u64,
             radical_products: products.used,
             paths: paths.count,
             relation_terms,

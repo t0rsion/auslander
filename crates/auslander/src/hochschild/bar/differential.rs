@@ -88,35 +88,46 @@ fn differential_is_empty(shape: &Shape, plan: &DifferentialPlan) -> bool {
     shape.cochain_dim == 0 || plan.0 == 0
 }
 
+/// A source tuple with at least one cochain row.
+struct SourceTuple {
+    words: Vec<BasisIdx>,
+    start: u32,
+    rows: std::ops::Range<usize>,
+}
+
+/// Every entry is a sum over (source row, target tuple) pairs, so the fill
+/// order does not change the matrix. Target tuples run outermost: each one
+/// is decoded, and its adjacent products are taken, once for all rows.
 fn fill_differential(context: &DifferentialContext<'_>, differential: &mut DenseMat) {
+    let sources = source_tuples(context);
+    let mut products = Vec::with_capacity(context.degree);
     tuple::walk_tuples(
         context.algebra,
-        context.degree,
-        context.shape.tuples,
+        context.target_degree,
+        context.target_offsets.len() - 1,
         context.starts,
-        |source_rank, source, source_start, _source_end| {
-            let row_start = context.source_layout.offsets[source_rank];
-            for row in row_start..context.source_layout.offsets[source_rank + 1] {
-                let output = context.source_layout.coordinates[row].output;
-                tuple::walk_tuples(
-                    context.algebra,
-                    context.target_degree,
-                    context.target_offsets.len() - 1,
-                    context.starts,
-                    |target_rank, target, target_start, target_end| {
-                        fill_target_tuple(
-                            context,
-                            source,
-                            source_start,
-                            target,
-                            (target_rank, target_start, target_end),
-                            (row, output),
-                            differential,
-                        );
-                        Ok::<(), ()>(())
-                    },
-                )
-                .expect("the differential callback cannot fail");
+        |target_rank, target, target_start, target_end| {
+            let coordinate = TargetCoordinate {
+                algebra: context.algebra,
+                offsets: context.target_offsets,
+                tuple_rank: target_rank,
+                source: target_start,
+                target: target_end,
+                field: context.field,
+            };
+            products.clear();
+            products.extend(
+                (1..=context.degree).map(|i| context.algebra.mul_basis(target[i - 1], target[i])),
+            );
+            for source in &sources {
+                fill_source(
+                    context,
+                    &coordinate,
+                    source,
+                    target,
+                    &products,
+                    differential,
+                );
             }
             Ok::<(), ()>(())
         },
@@ -124,59 +135,78 @@ fn fill_differential(context: &DifferentialContext<'_>, differential: &mut Dense
     .expect("the differential callback cannot fail");
 }
 
-fn fill_target_tuple(
+fn source_tuples(context: &DifferentialContext<'_>) -> Vec<SourceTuple> {
+    let mut sources = Vec::new();
+    tuple::walk_tuples(
+        context.algebra,
+        context.degree,
+        context.shape.tuples,
+        context.starts,
+        |rank, words, start, _end| {
+            let offsets = &context.source_layout.offsets;
+            if offsets[rank] < offsets[rank + 1] {
+                sources.push(SourceTuple {
+                    words: words.to_vec(),
+                    start,
+                    rows: offsets[rank]..offsets[rank + 1],
+                });
+            }
+            Ok::<(), ()>(())
+        },
+    )
+    .expect("the source callback cannot fail");
+    sources
+}
+
+/// Degree zero has vertex sources: the endpoint tests are then the whole
+/// face condition, and in positive degree the word tests imply them.
+fn fill_source(
     context: &DifferentialContext,
-    source: &[BasisIdx],
-    source_start: u32,
+    coordinate: &TargetCoordinate,
+    source: &SourceTuple,
     target: &[BasisIdx],
-    target_coordinates: (usize, u32, u32),
-    row_output: (usize, BasisIdx),
+    products: &[Vec<(BasisIdx, Fp)>],
     differential: &mut DenseMat,
 ) {
-    let (target_rank, target_start, target_end) = target_coordinates;
-    let (row, output) = row_output;
-    let coordinate = TargetCoordinate {
-        algebra: context.algebra,
-        offsets: context.target_offsets,
-        tuple_rank: target_rank,
-        source: target_start,
-        target: target_end,
-        field: context.field,
-    };
-    if context.degree == 0 {
-        if source_start == coordinate.target {
-            coordinate.add_product(differential, row, target[0], output, false);
-        }
-        if source_start == coordinate.source {
-            coordinate.add_product(differential, row, output, target[0], true);
-        }
+    let (words, degree) = (source.words.as_slice(), context.degree);
+    let first =
+        words == &target[1..] && source.start == context.algebra.basis()[target[0]].target();
+    let last = words == &target[..degree] && source.start == coordinate.source;
+    let middles = middle_coefficients(context, words, target, products);
+    if !first && !last && middles.is_empty() {
         return;
     }
-    if source == &target[1..] {
-        coordinate.add_product(differential, row, target[0], output, false);
+    for row in source.rows.clone() {
+        let output = context.source_layout.coordinates[row].output;
+        if first {
+            coordinate.add_product(differential, row, target[0], output, false);
+        }
+        for &value in &middles {
+            coordinate.add(differential, row, output, value);
+        }
+        if last {
+            let negative = context.target_degree % 2 == 1;
+            coordinate.add_product(differential, row, output, target[degree], negative);
+        }
     }
-    for i in 1..=context.degree {
-        for &(middle, coefficient) in &coordinate.algebra.mul_basis(target[i - 1], target[i]) {
+}
+
+/// The signed coefficients of the inner faces of `target` that equal `source`.
+fn middle_coefficients(
+    context: &DifferentialContext,
+    source: &[BasisIdx],
+    target: &[BasisIdx],
+    products: &[Vec<(BasisIdx, Fp)>],
+) -> Vec<Fp> {
+    let mut values = Vec::new();
+    for (i, product) in (1..=context.degree).zip(products) {
+        for &(middle, coefficient) in product {
             if matches_middle(source, target, i, middle) {
-                coordinate.add(
-                    differential,
-                    row,
-                    output,
-                    signed(coefficient, i % 2 == 1, context.field),
-                );
+                values.push(signed(coefficient, i % 2 == 1, context.field));
             }
         }
     }
-    if source == &target[..context.degree] {
-        let final_word = target[context.degree];
-        coordinate.add_product(
-            differential,
-            row,
-            output,
-            final_word,
-            context.target_degree % 2 == 1,
-        );
-    }
+    values
 }
 
 fn matches_middle(source: &[BasisIdx], target: &[BasisIdx], i: usize, middle: BasisIdx) -> bool {

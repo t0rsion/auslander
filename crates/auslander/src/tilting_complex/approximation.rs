@@ -1,18 +1,99 @@
 use super::cache::HomotopyBlockBuilder;
 use super::classification::basis_representative;
 use super::*;
+use crate::linalg::RowReducer;
 
 struct ApproximationBasis {
     indices: Vec<usize>,
     representatives: Vec<ChainMap>,
 }
 
+/// Representatives of `rad(T_middle, T_other)` for a left approximation, or
+/// of `rad(T_other, T_middle)` for a right one.
+///
+/// The certified parent has pairwise non-isomorphic summands with local
+/// endomorphism rings. So the radical between distinct summands is the whole
+/// Hom space, and on one summand it is the kernel of its residue map.
+fn radical_maps(
+    parent: &CertifiedSiltingComplex,
+    middle: usize,
+    other: usize,
+    direction: ApproximationDirection,
+    blocks: &mut HomotopyBlockBuilder<'_>,
+) -> Result<Vec<ChainMap>, Interrupt> {
+    if middle != other {
+        let (source, target) = direction.orient(middle, other);
+        let space = blocks.get(parent.candidate(), source, target, 0)?;
+        return Ok((0..space.dim())
+            .map(|index| basis_representative(&space, index))
+            .collect());
+    }
+    let end = &parent.degree_zero_endomorphisms()[other];
+    let residue = std::slice::from_ref(&parent.degree_zero_residues()[other]);
+    let kernel = DenseMat::from_rows(residue).kernel_basis(&parent.candidate().algebra().field());
+    Ok((0..kernel.rows())
+        .map(|row| end.representative(kernel.row(row)))
+        .collect())
+}
+
+/// Loads the maps between `T_replaced` and `T_other` that factor through a
+/// radical map of `add T'`, where `T'` omits `T_replaced`.
+///
+/// For a left approximation these are the composites `f·r` with
+/// `f: T_replaced → T_k` and `r ∈ rad(T_k, T_other)` over every `k` in `T'`,
+/// including `k = other`. A right approximation uses `r·f` with
+/// `r ∈ rad(T_other, T_k)` and `f: T_k → T_replaced`. Both products are
+/// bilinear, so basis composites span this subspace `R_other`.
+fn radical_factoring(
+    parent: &CertifiedSiltingComplex,
+    replaced: usize,
+    other: usize,
+    direction: ApproximationDirection,
+    space: &HomotopyHomQuotient,
+    blocks: &mut HomotopyBlockBuilder<'_>,
+) -> Result<RowReducer, Interrupt> {
+    let candidate = parent.candidate();
+    let field = candidate.algebra().field();
+    let mut reducer = RowReducer::new(space.dim());
+    for middle in (0..candidate.len()).filter(|&middle| middle != replaced) {
+        let (source, target) = direction.orient(replaced, middle);
+        let outer = blocks.get(candidate, source, target, 0)?;
+        let radical = radical_maps(parent, middle, other, direction, blocks)?;
+        for index in 0..outer.dim() {
+            let fixed = basis_representative(&outer, index);
+            for map in &radical {
+                blocks.meter.charge()?;
+                let (first, second) = direction.orient(&fixed, map);
+                reducer.push(&space.reduce(&first.then(second)?)?.0, &field);
+            }
+        }
+    }
+    Ok(reducer)
+}
+
+/// Selects the components of a minimal `add T'` approximation of
+/// `T_replaced`.
+///
+/// For each `j`, a basis map of `Hom(T_replaced, T_j)` is kept when it is
+/// independent of `R_j` and of the maps kept before it. The kept maps then
+/// project to a basis of `Hom(T_replaced, T_j) / R_j`. When `R_j = 0`, every
+/// basis map is kept. The proof is for a left approximation `f: X → Y`; the
+/// right case is dual. `J = rad End(T')` is nilpotent, and
+/// `Hom(X, T') = F + Hom(X, T')·J` with `F` the span of the kept maps.
+/// Iterating gives `Hom(X, T') = F·End(T')`, so `f` is an approximation. If
+/// `f·φ = f` for `φ` in `End(Y)`, reduce each component modulo `R_j`. The
+/// entries of `φ` between distinct summands and the radical parts of its
+/// diagonal entries land in `R_j`. The scalar parts `λ` then satisfy
+/// `f ≡ f·λ`, and independence forces `λ = 1`. So `φ` is the identity plus a
+/// radical endomorphism, hence an automorphism, and `f` is left minimal.
 fn approximation_basis(
-    candidate: &TiltingComplexCandidate,
+    parent: &CertifiedSiltingComplex,
     replaced: usize,
     direction: ApproximationDirection,
     blocks: &mut HomotopyBlockBuilder<'_>,
-) -> Result<ApproximationBasis, TiltingComplexError> {
+) -> Result<ApproximationBasis, Interrupt> {
+    let candidate = parent.candidate();
+    let field = candidate.algebra().field();
     let mut indices = Vec::new();
     let mut representatives = Vec::new();
     for other in 0..candidate.len() {
@@ -21,9 +102,14 @@ fn approximation_basis(
         }
         let (source, target) = direction.orient(replaced, other);
         let space = blocks.get(candidate, source, target, 0)?;
+        let mut factoring = radical_factoring(parent, replaced, other, direction, &space, blocks)?;
         for basis in 0..space.dim() {
-            indices.push(other);
-            representatives.push(basis_representative(&space, basis));
+            let mut unit = vec![field.zero(); space.dim()];
+            unit[basis] = field.one();
+            if factoring.push(&unit, &field) {
+                indices.push(other);
+                representatives.push(basis_representative(&space, basis));
+            }
         }
     }
     Ok(ApproximationBasis {
@@ -175,13 +261,13 @@ fn nonzero_approximation(
 }
 
 pub(super) fn approximation_map_with_blocks(
-    parent: &CertifiedTiltingComplex,
+    parent: &CertifiedSiltingComplex,
     replaced: usize,
     direction: ApproximationDirection,
     blocks: &mut HomotopyBlockBuilder<'_>,
-) -> Result<(ChainMap, Vec<usize>), TiltingComplexError> {
+) -> Result<(ChainMap, Vec<usize>), Interrupt> {
     let candidate = parent.candidate();
-    let basis = approximation_basis(candidate, replaced, direction, blocks)?;
+    let basis = approximation_basis(parent, replaced, direction, blocks)?;
     let map = if basis.indices.is_empty() {
         zero_approximation(candidate, replaced, direction)?
     } else {
@@ -191,14 +277,16 @@ pub(super) fn approximation_map_with_blocks(
 }
 
 pub(super) fn approximation_map(
-    parent: &CertifiedTiltingComplex,
+    parent: &CertifiedSiltingComplex,
     replaced: usize,
     direction: ApproximationDirection,
 ) -> Result<(ChainMap, Vec<usize>), TiltingComplexError> {
-    approximation_map_with_blocks(
+    let mut meter = WorkMeter::default();
+    let mut blocks = HomotopyBlockBuilder::cold(&mut meter);
+    unmetered(approximation_map_with_blocks(
         parent,
         replaced,
         direction,
-        &mut HomotopyBlockBuilder::cold(),
-    )
+        &mut blocks,
+    ))
 }

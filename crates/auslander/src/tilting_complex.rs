@@ -1,12 +1,18 @@
-//! Certified tilting complexes and checked left mutation.
+//! Certified tilting and silting complexes and checked mutation.
 
 mod approximation;
 mod cache;
+mod certified;
 mod classification;
+mod locality;
+mod mutation;
+mod reduction;
 
 use std::sync::Arc;
 
 use crate::algebra::Algebra;
+use crate::control::{Cancelled, WorkMeter};
+use crate::field::Fp;
 use crate::hom::{HomError, Morphism};
 use crate::homotopy::{
     BoundedComplex, BoundedComplexError, ChainMap, ChainMapError, DegreeRange, HomotopyHom,
@@ -17,9 +23,18 @@ use crate::module::{Module, same_representation};
 use crate::perfect::{ProjectiveComplex, ProjectiveComplexError};
 
 use approximation::{approximation_map, approximation_map_with_blocks};
+use cache::HomotopyBlockBuilder;
 pub use cache::TiltingComplexWork;
-use cache::{HomotopyBlockBuilder, HomotopyBlockCache};
-use classification::{ClassificationFailure, classify_tilting_complex_inner};
+pub(crate) use certified::OrthogonalityGoal;
+pub use certified::{CertifiedSiltingComplex, CertifiedTiltingComplex};
+pub(crate) use classification::summands_isomorphic;
+use classification::{ClassificationFailure, classify_tilting_complex_inner, classify_with_goal};
+use mutation::cone_replacement;
+pub use mutation::{
+    TiltingMutationOutcome, left_tilting_mutation, right_tilting_mutation, silting_mutation,
+};
+pub(crate) use mutation::{metered_tilting_mutation, tilting_mutation};
+pub use reduction::MinimalReduction;
 
 /// Why a tilting-complex candidate was rejected at construction.
 #[derive(Clone, Debug)]
@@ -111,8 +126,11 @@ pub enum ThickGenerationWitness {
     /// The candidate is the regular projective generator in vertex order.
     Regular,
     /// One cone mutation preserves the thick closure of a certified parent.
+    ///
+    /// The cone relation needs only that the parent generates, so a silting
+    /// parent suffices.
     Mutation {
-        parent: Arc<CertifiedTiltingComplex>,
+        parent: Arc<CertifiedSiltingComplex>,
         approximation: ComplexApproximationWitness,
     },
 }
@@ -166,13 +184,14 @@ impl ApproximationDirection {
     }
 }
 
-/// A universal approximation in the supported exceptional domain.
+/// A minimal approximation of one summand by the other summands.
 #[derive(Clone, Debug)]
 pub struct ComplexApproximationWitness {
     direction: ApproximationDirection,
     replaced: usize,
     indices: Vec<usize>,
     map: ChainMap,
+    reduction: Box<MinimalReduction>,
 }
 
 impl ComplexApproximationWitness {
@@ -181,14 +200,16 @@ impl ComplexApproximationWitness {
         pub direction() -> ApproximationDirection = |this| this.direction;
         /// The parent summand replaced by mutation.
         pub replaced() -> usize = |this| this.replaced;
-        /// One parent index per Hom-basis component, in deterministic order.
+        /// One parent index per kept Hom-basis component, in deterministic order.
         pub indices() -> &[usize] = |this| &this.indices;
         /// The checked universal approximation map.
         pub map() -> &ChainMap = |this| &this.map;
+        /// The homotopy equivalence from the replacement to the stored summand.
+        pub reduction() -> &MinimalReduction = |this| &this.reduction;
     }
 
-    /// Rebuilds every Hom basis and the resulting approximation map.
-    pub fn verify(&self, parent: &CertifiedTiltingComplex) -> bool {
+    /// Rebuilds every Hom basis, the minimal selection, and the approximation map.
+    pub fn verify(&self, parent: &CertifiedSiltingComplex) -> bool {
         let rebuilt = approximation_map(parent, self.replaced, self.direction);
         rebuilt.is_ok_and(|(map, indices)| {
             indices == self.indices && map.agrees_with(&self.map) && map.verify()
@@ -196,12 +217,37 @@ impl ComplexApproximationWitness {
     }
 
     /// Rebuilds the cone replacement in the parent grading convention.
+    ///
+    /// The stored summand is the minimal complex of
+    /// [`ComplexApproximationWitness::reduction`], not this cone.
     pub fn replacement(&self) -> Result<BoundedComplex, BoundedComplexError> {
-        let cone = self.map.mapping_cone()?;
-        match self.direction {
-            ApproximationDirection::Left => Ok(cone),
-            ApproximationDirection::Right => cone.shift(-1),
-        }
+        cone_replacement(&self.map, self.direction)
+    }
+
+    /// Whether `summand` is the checked minimal reduction of the rebuilt cone.
+    fn replacement_matches(&self, summand: &ProjectiveComplex) -> bool {
+        self.replacement()
+            .is_ok_and(|replacement| self.reduction.verify(&replacement))
+            && complexes_agree(self.reduction.minimal(), summand)
+    }
+
+    /// Whether the indices are in range and `candidate` keeps every parent
+    /// summand except the replaced one.
+    fn keeps_parent_summands(
+        &self,
+        parent: &CertifiedSiltingComplex,
+        candidate: &TiltingComplexCandidate,
+    ) -> bool {
+        let kept = parent.candidate().summands();
+        let in_range = |index: usize| index < kept.len() && index != self.replaced;
+        self.replaced < kept.len()
+            && candidate.len() == kept.len()
+            && self.indices.iter().all(|&index| in_range(index))
+            && candidate.summands().iter().zip(kept).enumerate().all(
+                |(index, (summand, parent))| {
+                    index == self.replaced || complexes_agree(summand, parent)
+                },
+            )
     }
 }
 
@@ -214,78 +260,42 @@ impl ThickGenerationWitness {
                 parent,
                 approximation,
             } => {
-                let replaced = approximation.replaced;
-                if !parent.verify()
-                    || replaced >= parent.candidate().len()
-                    || candidate.len() != parent.candidate().len()
-                    || approximation
-                        .indices
-                        .iter()
-                        .any(|&index| index >= parent.candidate().len() || index == replaced)
-                {
-                    return false;
-                }
-                let unchanged = candidate
-                    .summands()
-                    .iter()
-                    .enumerate()
-                    .all(|(index, summand)| {
-                        index == replaced
-                            || complexes_agree(summand, &parent.candidate().summands()[index])
-                    });
-                let Ok(replacement) = approximation.replacement() else {
-                    return false;
-                };
-                unchanged
+                parent.verify()
+                    && approximation.keeps_parent_summands(parent, candidate)
                     && approximation.verify(parent)
-                    && replacement.agrees_with(candidate.summands()[replaced].complex())
+                    && approximation
+                        .replacement_matches(&candidate.summands()[approximation.replaced])
             }
         }
     }
 
-    fn verify_with_cached_blocks(&self, candidate: &TiltingComplexCandidate) -> bool {
-        match self {
-            ThickGenerationWitness::Regular => regular_generation(candidate),
-            ThickGenerationWitness::Mutation {
-                parent,
-                approximation,
-            } => {
-                let replaced = approximation.replaced;
-                if !parent.candidate().verify()
-                    || replaced >= parent.candidate().len()
-                    || candidate.len() != parent.candidate().len()
-                    || approximation
-                        .indices
-                        .iter()
-                        .any(|&index| index >= parent.candidate().len() || index == replaced)
-                {
-                    return false;
-                }
-                let unchanged = candidate
-                    .summands()
-                    .iter()
-                    .enumerate()
-                    .all(|(index, summand)| {
-                        index == replaced
-                            || complexes_agree(summand, &parent.candidate().summands()[index])
-                    });
-                let Ok(replacement) = approximation.replacement() else {
-                    return false;
-                };
-                let mut blocks = HomotopyBlockBuilder::with_inherited(parent.block_cache());
-                let rebuilt = approximation_map_with_blocks(
-                    parent,
-                    replaced,
-                    approximation.direction,
-                    &mut blocks,
-                );
-                unchanged
-                    && approximation.map.verify()
-                    && rebuilt.is_ok_and(|(map, indices)| {
-                        indices == approximation.indices && map.agrees_with(&approximation.map)
-                    })
-                    && replacement.agrees_with(candidate.summands()[replaced].complex())
+    fn verify_with_cached_blocks(
+        &self,
+        candidate: &TiltingComplexCandidate,
+        meter: &mut WorkMeter,
+    ) -> Result<bool, Cancelled> {
+        let ThickGenerationWitness::Mutation {
+            parent,
+            approximation,
+        } = self
+        else {
+            return Ok(regular_generation(candidate));
+        };
+        if !parent.candidate().verify()
+            || !approximation.keeps_parent_summands(parent, candidate)
+            || !approximation.map.verify()
+            || !approximation.replacement_matches(&candidate.summands()[approximation.replaced])
+        {
+            return Ok(false);
+        }
+        let mut blocks = HomotopyBlockBuilder::with_inherited(parent.block_cache(), meter);
+        let (replaced, direction) = (approximation.replaced, approximation.direction);
+        match approximation_map_with_blocks(parent, replaced, direction, &mut blocks) {
+            Ok((map, indices)) => {
+                Ok(indices == approximation.indices && map.agrees_with(&approximation.map))
             }
+            Err(Interrupt::Cancelled) => Err(Cancelled),
+            Err(Interrupt::Error(_)) => Ok(false),
         }
     }
 }
@@ -293,8 +303,8 @@ impl ThickGenerationWitness {
 /// Limits for exact tilting-complex checks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TiltingComplexLimits {
-    /// The greatest number of homotopy Hom quotients built.
-    pub max_hom_spaces: usize,
+    /// The maximum number of homotopy Hom quotients built.
+    pub max_hom_spaces: u64,
 }
 
 impl Default for TiltingComplexLimits {
@@ -371,74 +381,15 @@ impl TiltingSelfOrthogonalityRejection {
 /// Why exact tilting classification remains open.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TiltingComplexBlocker {
-    /// A summand endomorphism quotient needs a general local-algebra test.
+    /// A summand endomorphism ring is not shown to be local with residue
+    /// field `k`.
     EndomorphismLocality { summand: usize, dimension: usize },
     /// Two summands are isomorphic in the homotopy category.
     RepeatedSummand { first: usize, second: usize },
     /// No checked thick-generation witness was supplied.
     Generation,
     /// The Hom-space limit stopped the finite check.
-    HomLimit { completed: usize, limit: usize },
-}
-
-/// A certified basic tilting complex.
-#[derive(Clone)]
-pub struct CertifiedTiltingComplex {
-    candidate: TiltingComplexCandidate,
-    generation: ThickGenerationWitness,
-    degree_zero_endomorphisms: Vec<HomotopyHomQuotient>,
-    zero_shifted_homs: Vec<TiltingHomCheck>,
-    limits: TiltingComplexLimits,
-    block_cache: HomotopyBlockCache,
-    work: TiltingComplexWork,
-}
-
-impl std::fmt::Debug for CertifiedTiltingComplex {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("CertifiedTiltingComplex")
-            .field("summands", &self.candidate.len())
-            .field("zero_shifted_homs", &self.zero_shifted_homs.len())
-            .field("hom_spaces_built", &self.work.hom_spaces_built())
-            .field("hom_spaces_reused", &self.work.hom_spaces_reused())
-            .finish()
-    }
-}
-
-impl CertifiedTiltingComplex {
-    accessor_methods! {
-        /// The ordered projective-complex candidate.
-        pub candidate() -> &TiltingComplexCandidate = |this| &this.candidate;
-        /// The checked thick-generation witness.
-        pub generation() -> &ThickGenerationWitness = |this| &this.generation;
-        /// One degree-zero endomorphism quotient per summand.
-        pub degree_zero_endomorphisms() -> &[HomotopyHomQuotient] = |this| &this.degree_zero_endomorphisms;
-        /// Every checked zero quotient in a nonzero shift.
-        pub zero_shifted_homs() -> &[TiltingHomCheck] = |this| &this.zero_shifted_homs;
-        /// The effective classification limits.
-        pub limits() -> TiltingComplexLimits = |this| this.limits;
-        /// The exact Homotopy-block work for this classification.
-        pub work() -> TiltingComplexWork = |this| this.work;
-    }
-
-    fn block_cache(&self) -> &HomotopyBlockCache {
-        &self.block_cache
-    }
-
-    /// Recomputes the complete tilting classification.
-    pub fn verify(&self) -> bool {
-        matches!(
-            classify_tilting_complex(
-                self.candidate.clone(),
-                Some(self.generation.clone()),
-                self.limits,
-            ),
-            Ok(TiltingComplexResult::Tilting(ref rebuilt))
-                if rebuilt.zero_shifted_homs.len() == self.zero_shifted_homs.len()
-                    && rebuilt.degree_zero_endomorphisms.len()
-                        == self.degree_zero_endomorphisms.len()
-        )
-    }
+    HomLimit { completed: usize, limit: u64 },
 }
 
 /// Exact tilting classification, rejection, or typed blocker.
@@ -490,21 +441,56 @@ from_variants! { TiltingComplexError {
     HomError => Hom,
 } }
 
+/// A structural error, or cancellation observed inside one metered check.
+#[derive(Debug)]
+pub(crate) enum Interrupt {
+    Error(TiltingComplexError),
+    Cancelled,
+}
+
+impl<E: Into<TiltingComplexError>> From<E> for Interrupt {
+    fn from(error: E) -> Self {
+        Interrupt::Error(error.into())
+    }
+}
+
+impl From<Cancelled> for Interrupt {
+    fn from(_: Cancelled) -> Self {
+        Interrupt::Cancelled
+    }
+}
+
+/// The structural error of a check run under a meter without a control.
+fn unmetered<T>(result: Result<T, Interrupt>) -> Result<T, TiltingComplexError> {
+    result.map_err(|interrupt| match interrupt {
+        Interrupt::Error(error) => error,
+        Interrupt::Cancelled => unreachable!("a meter without a control never cancels"),
+    })
+}
+
 /// Checks basicness, self-orthogonality, and thick generation.
 pub fn classify_tilting_complex(
     candidate: TiltingComplexCandidate,
     generation: Option<ThickGenerationWitness>,
     limits: TiltingComplexLimits,
 ) -> Result<TiltingComplexResult, TiltingComplexError> {
-    match classify_tilting_complex_inner(
-        candidate,
-        generation,
-        limits,
-        HomotopyBlockBuilder::cold(),
-        true,
-    ) {
-        Ok(outcome) | Err(ClassificationFailure::Outcome(outcome)) => Ok(outcome),
-        Err(ClassificationFailure::Error(error)) => Err(error),
+    let goal = OrthogonalityGoal::Tilting;
+    unmetered(classified(classify_with_goal(
+        candidate, generation, limits, goal,
+    )))
+}
+
+/// The tilting result of a classification under [`OrthogonalityGoal::Tilting`],
+/// which never keeps a negative class.
+fn classified(
+    result: Result<Box<CertifiedSiltingComplex>, ClassificationFailure>,
+) -> Result<TiltingComplexResult, Interrupt> {
+    match result {
+        Ok(silting) => Ok(TiltingComplexResult::Tilting(Box::new(
+            CertifiedTiltingComplex { silting: *silting },
+        ))),
+        Err(ClassificationFailure::Outcome(outcome)) => Ok(outcome),
+        Err(ClassificationFailure::Interrupt(interrupt)) => Err(interrupt),
     }
 }
 
@@ -517,116 +503,8 @@ pub fn regular_tilting_complex(
     classify_tilting_complex(candidate, Some(ThickGenerationWitness::Regular), limits)
 }
 
-/// The result of one checked left mutation.
-#[derive(Clone, Debug)]
-pub enum TiltingMutationOutcome {
-    /// The cone remains a certified tilting complex.
-    Tilting(Box<CertifiedTiltingComplex>),
-    /// The cone generates but has a nonzero shifted Hom class.
-    SiltingOnly(Box<TiltingSelfOrthogonalityRejection>),
-    /// Basicness or a resource limit remains open.
-    Undetermined(TiltingComplexBlocker),
-}
-
-fn mutated_candidate(
-    parent: &CertifiedTiltingComplex,
-    approximation: &ComplexApproximationWitness,
-) -> Result<TiltingComplexCandidate, TiltingComplexError> {
-    let cone = ProjectiveComplex::new(approximation.replacement()?)?;
-    let mut summands = parent.candidate().summands().to_vec();
-    summands[approximation.replaced] = cone;
-    Ok(TiltingComplexCandidate::new(summands)
-        .expect("mutation keeps a nonempty list over one algebra"))
-}
-
-fn tilting_mutation(
-    parent: &CertifiedTiltingComplex,
-    replaced: usize,
-    limits: TiltingComplexLimits,
-    direction: ApproximationDirection,
-) -> Result<TiltingMutationOutcome, TiltingComplexError> {
-    tilting_mutation_with_cache(parent, replaced, limits, direction, true)
-}
-
-fn tilting_mutation_with_cache(
-    parent: &CertifiedTiltingComplex,
-    replaced: usize,
-    limits: TiltingComplexLimits,
-    direction: ApproximationDirection,
-    reuse: bool,
-) -> Result<TiltingMutationOutcome, TiltingComplexError> {
-    if replaced >= parent.candidate().len() {
-        return Ok(TiltingMutationOutcome::Undetermined(
-            TiltingComplexBlocker::Generation,
-        ));
-    }
-    let mut blocks = mutation_blocks(parent, reuse);
-    let (map, indices) = approximation_map_with_blocks(parent, replaced, direction, &mut blocks)?;
-    let approximation = ComplexApproximationWitness {
-        direction,
-        replaced,
-        indices,
-        map,
-    };
-    let candidate = mutated_candidate(parent, &approximation)?;
-    blocks.set_changed(replaced);
-    let generation = ThickGenerationWitness::Mutation {
-        parent: Arc::new(parent.clone()),
-        approximation,
-    };
-    let classified = classify_mutated(candidate, generation, limits, blocks)?;
-    Ok(mutation_outcome(classified))
-}
-
-fn mutation_blocks(parent: &CertifiedTiltingComplex, reuse: bool) -> HomotopyBlockBuilder<'_> {
-    if reuse {
-        HomotopyBlockBuilder::with_inherited(parent.block_cache())
-    } else {
-        HomotopyBlockBuilder::cold()
-    }
-}
-
-fn classify_mutated(
-    candidate: TiltingComplexCandidate,
-    generation: ThickGenerationWitness,
-    limits: TiltingComplexLimits,
-    blocks: HomotopyBlockBuilder<'_>,
-) -> Result<TiltingComplexResult, TiltingComplexError> {
-    match classify_tilting_complex_inner(candidate, Some(generation), limits, blocks, false) {
-        Ok(outcome) | Err(ClassificationFailure::Outcome(outcome)) => Ok(outcome),
-        Err(ClassificationFailure::Error(error)) => Err(error),
-    }
-}
-
-fn mutation_outcome(classified: TiltingComplexResult) -> TiltingMutationOutcome {
-    match classified {
-        TiltingComplexResult::Tilting(value) => TiltingMutationOutcome::Tilting(value),
-        TiltingComplexResult::NotTilting(rejection) => {
-            TiltingMutationOutcome::SiltingOnly(rejection)
-        }
-        TiltingComplexResult::Undetermined(blocker) => {
-            TiltingMutationOutcome::Undetermined(blocker)
-        }
-    }
-}
-
-/// Computes the universal left mutation at one exceptional summand.
-pub fn left_tilting_mutation(
-    parent: &CertifiedTiltingComplex,
-    replaced: usize,
-    limits: TiltingComplexLimits,
-) -> Result<TiltingMutationOutcome, TiltingComplexError> {
-    tilting_mutation(parent, replaced, limits, ApproximationDirection::Left)
-}
-
-/// Computes the universal right mutation at one exceptional summand.
-pub fn right_tilting_mutation(
-    parent: &CertifiedTiltingComplex,
-    replaced: usize,
-    limits: TiltingComplexLimits,
-) -> Result<TiltingMutationOutcome, TiltingComplexError> {
-    tilting_mutation(parent, replaced, limits, ApproximationDirection::Right)
-}
-
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod reduction_tests;

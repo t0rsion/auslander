@@ -4,6 +4,127 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-09-29
+
+Version 0.10 adds certified derived classification. `classify_derived`
+partitions a finite family of algebras over one prime field. Two members
+share a class only through a replayable derived equivalence, and two classes
+are separated only by a recomputed invariant. Every other pair is typed
+`Unresolved`. The contract is
+[`docs/derived-classification.md`](docs/derived-classification.md).
+
+The committed atlas `derived-atlas-f2-n3.json` classifies the 88 connected
+gentle algebras with at most 3 vertices over `F_2` into 40 classes with no
+unresolved pair. With silting walks of 64 vertices,
+`derived-atlas-f2-n4.json` classifies the 982 with at most 4 vertices into
+143 classes with one unresolved pair. The 894 with exactly 4 vertices form
+103 classes: 791 merges, 5252 separated class pairs, and one unresolved
+pair of genus 2 whose complete gentle invariants agree.
+
+### Added
+
+- `DerivedInvariants` computes checked derived invariants of one algebra:
+  the vertex count, the Cartan determinant, the invariant factors of `C`,
+  `C + C^T`, and `C - C^T`, the pencil `det(xC + C^T)`, the
+  Avella-Alaminos-Geiss function, the winding class, and bounded Hochschild
+  dimensions. A limit gives a typed stop, and a presentation that is not
+  gentle gives `NotApplicable`. Neither reading separates.
+- `DerivedInequivalenceWitness` stores two algebras and one invariant with
+  different values. `verify()` rebuilds both algebras and recomputes both
+  values.
+- `GentlePresentation` recognizes gentle presentations with loops, cycles,
+  and multiple arrows, and computes permitted threads, the AAG function, and
+  the genus. `connected_gentle_algebras(n, field)` enumerates one
+  presentation per isomorphism class of connected gentle bound quiver, keyed
+  by `GentleKey`.
+- `GentlePresentation::complete_invariant` adds the winding class of the
+  surface model to the AAG function: `planar` in genus 0, a gcd in genus 1,
+  and `odd`, `even`, or an Arf value in higher genus. Two connected gentle
+  algebras are derived equivalent exactly when their values are equal
+  (Amiot, Plamondon, and Schroll, Theorem 5.4).
+  [`docs/gentle-derived-invariant.md`](docs/gentle-derived-invariant.md)
+  records the construction.
+- `AlgebraIsomorphism` stores a vertex bijection and one arrow image per
+  arrow. Its verifier checks five facts and needs no search.
+- `classify_derived(family, limits, control)` computes the invariants,
+  separates the members, and walks tilting mutations inside each group. A
+  merge stores the mutation recipe, the `DerivedEquivalencePath` to the
+  recovered target, and the isomorphism onto the matched member. An
+  unresolved pair lists every walk that could have merged it, with its
+  discovery stop.
+- `CertifiedSiltingComplex` and `DiscoveryLimits::through_silting`. A walk
+  can pass through silting complexes that are not tilting. Members 470 and
+  724 of `connected_gentle_algebras(4, F_2)` stay open under a tilting walk
+  and merge under a silting walk.
+- `derived-atlas-v1` stores a classification as a portable artifact.
+  `verify_derived_atlas_artifact` rebuilds every member, recomputes every
+  reading and separation, and replays every merge. It runs no discovery.
+- `auslander classify gentle --vertices N` classifies the connected gentle
+  algebras with at most `N` vertices, prints one row per family, and with
+  `--output` writes the verified atlas. `auslander inspect` and
+  `auslander verify` print atlas summaries. Every command takes `--help`.
+- `artifact::verify_artifact` reads the header of any portable value and
+  runs the verifier of its kind. `auslander verify` and the browser page use
+  it.
+- The `auslander-wasm` crate compiles that verifier to WebAssembly with no
+  imports. The static page in `web/` replays one artifact in the browser.
+  `web/parity.mjs` checks it against `auslander verify` on the same bytes in
+  CI. See [`docs/browser-verifier.md`](docs/browser-verifier.md).
+- Python exposes `derived_invariants()`, `gentle()`, `complete_invariant()`,
+  `connected_gentle_algebras`, `classify_derived` with `explain()`, and atlas
+  export and replay through `to_artifact()`, `export()`, and
+  `verify_derived_atlas`. Notebook display shows the class table,
+  `to_latex` writes it as a LaTeX table, and `presentation_text` writes a
+  member. The derived classification tour notebook runs these steps.
+
+### Changed
+
+- Every ceiling and work counter of a portable format is `u64` in the
+  format and in the Rust type. A 32-bit verifier now reads default budgets.
+  Portable bytes do not change.
+- Tilting mutation reduces each cone to a checked minimal complex and uses
+  minimal approximations modulo radical-factoring maps. The
+  derived-equivalence schema is now `auslander-derived-v2`, and a v1
+  artifact is rejected as obsolete.
+- Discovery identifies vertices by summand shapes and a checked
+  isomorphism, and checks cancellation before each work unit inside a
+  mutation.
+- A summand endomorphism ring is certified local through a checked residue
+  map `End_K(T_i) → k`.
+- Every artifact kind reads and writes through one shared portable JSON
+  layer. Committed artifacts serialize to the same bytes.
+- `ArtifactVerifyLimits` has four completion ceilings. A declared
+  completion limit above its ceiling stops replay with `DeclaredLimit`.
+  `ArtifactVerificationOutcome::Cut` is now `Stopped`.
+- Walk vertices are `CertifiedSiltingComplex` values.
+  `ThickGenerationWitness::Mutation::parent`,
+  `IncompleteEquivalenceGraph::vertices()`, and `TiltingComplexKey::new`
+  change type. `TiltingMutationOutcome` adds `Silting`.
+- `DiscoveryLimits::max_work_units`, `DiscoveryStop::WorkLimit`, and the
+  Python keyword `EquivalenceDiscoveryLimits(max_work_units=...)` are
+  removed. `max_directed_mutations` bounds the same count.
+- `GentleError::EmptyQuiver` no longer mentions trees.
+- `auslander verify` prints the summary lines of `auslander inspect` after
+  its first line. A usage error or an unreadable file exits with status 2.
+
+### Limits
+
+- A merge needs a certified tilting path. Equal complete gentle invariants
+  imply derived equivalence by Amiot, Plamondon, and Schroll, but they never
+  merge two classes.
+- Matching uses gentle keys and equal certificates. A recovered target that
+  matches neither is not compared by a general isomorphism search.
+- The invariants of an algebra that is not gentle are necessary conditions
+  only. An unresolved pair of such algebras can be derived equivalent or
+  not.
+- The flagship study covers connected gentle algebras over `F_2`. Extension
+  fields and characteristic zero remain outside this release.
+- An atlas walk record is a claim about discovery. Replay checks it against
+  the merges but does not rerun the walk.
+- The intersection pairing behind the winding class is derived in the
+  construction note, not quoted from a paper. Its rank and antisymmetry
+  checks run on every call.
+
 ## [0.9.0] - 2026-09-18
 
 Version 0.9 adds reusable catalog computations and checked gentle-tree

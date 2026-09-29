@@ -12,8 +12,8 @@ use crate::relation::{Relation, RelationError};
 use super::{TargetBudgetCut, TargetCutReason, TargetCutStage, TargetError, TargetWork};
 
 pub(super) struct ProductCounter {
-    pub(super) used: usize,
-    pub(super) limit: usize,
+    pub(super) used: u64,
+    pub(super) limit: u64,
 }
 
 pub(crate) trait CoordinateAlgebra {
@@ -158,7 +158,7 @@ pub(super) struct EvaluatedPath {
 
 pub(super) struct PathBuild {
     pub(super) between: Vec<Vec<Vec<EvaluatedPath>>>,
-    pub(super) count: usize,
+    pub(super) count: u64,
 }
 
 pub(super) fn target_paths<A: CoordinateAlgebra>(
@@ -166,7 +166,7 @@ pub(super) fn target_paths<A: CoordinateAlgebra>(
     arrow_images: &DenseMat,
     endo: &A,
     lambda: usize,
-    limit: usize,
+    limit: u64,
 ) -> Result<PathBuild, TargetErrorOrCut> {
     let n = quiver.num_vertices() as usize;
     let mut between: Vec<Vec<Vec<EvaluatedPath>>> = (0..n)
@@ -181,7 +181,7 @@ pub(super) fn target_paths<A: CoordinateAlgebra>(
             });
         }
     }
-    let mut used = 0usize;
+    let mut used = 0u64;
     for length in 2..=lambda {
         let mut next = Vec::new();
         for path in &current {
@@ -232,10 +232,10 @@ pub(super) fn target_relations(
     field: PrimeField,
     endo_dim: usize,
     paths: &PathBuild,
-    max_terms: usize,
-) -> Result<(Vec<Relation>, usize), TargetErrorOrCut> {
+    max_terms: u64,
+) -> Result<(Vec<Relation>, u64), TargetErrorOrCut> {
     let mut relations = Vec::new();
-    let mut used = 0usize;
+    let mut used = 0u64;
     for source in 0..quiver.num_vertices() {
         for target in 0..quiver.num_vertices() {
             let entries = &paths.between[source as usize][target as usize];
@@ -244,7 +244,7 @@ pub(super) fn target_relations(
             let kernel = evaluation.left_kernel_basis(&field);
             for r in 0..kernel.rows() {
                 let term_count = kernel.row(r).iter().filter(|c| !c.is_zero()).count();
-                let Some(reserved) = used.checked_add(term_count) else {
+                let Some(reserved) = used.checked_add(term_count as u64) else {
                     return Err(TargetError::SizeOverflow {
                         stage: TargetCutStage::Relations { source, target },
                     }
@@ -254,7 +254,7 @@ pub(super) fn target_relations(
                     return Err(TargetCutReason::Budget(TargetBudgetCut {
                         stage: TargetCutStage::Relations { source, target },
                         used,
-                        requested: term_count,
+                        requested: term_count as u64,
                         limit: max_terms,
                     })
                     .into());

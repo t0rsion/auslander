@@ -2,5 +2,6 @@ target/
 __pycache__/
 dist/
 paper-*-private/
+/web/auslander_wasm.wasm
 /crates/auslander-py/python/auslander/_core*.so
 /crates/auslander-py/python/auslander/_core*.pyd

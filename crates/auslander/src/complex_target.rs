@@ -5,7 +5,7 @@ use std::sync::{Arc, OnceLock};
 use crate::algebra::Algebra;
 use crate::certificate::Certificate;
 use crate::field::{Fp, PrimeField};
-use crate::homotopy::{ChainMap, ChainMapError, HomotopyHom, HomotopyHomQuotient};
+use crate::homotopy::{ChainMap, ChainMapError, HomSpaceMemo, HomotopyHom, HomotopyHomQuotient};
 use crate::linalg::DenseMat;
 use crate::target::{
     CoordinateAlgebra, CoordinateTargetData, CoordinateTargetOutcome, TargetCutReason, TargetError,
@@ -47,36 +47,15 @@ impl std::fmt::Debug for HomotopyEndomorphismAlgebra {
 
 impl HomotopyEndomorphismAlgebra {
     /// Builds every degree-zero homotopy Hom block in summand order.
+    ///
+    /// Diagonal blocks are the certified endomorphism quotients, so the
+    /// certified residue maps apply to their coordinates.
     pub fn new(
         tilting: &CertifiedTiltingComplex,
     ) -> Result<HomotopyEndomorphismAlgebra, ChainMapError> {
         let count = tilting.candidate().len();
         let field = tilting.candidate().algebra().field();
-        let mut blocks = Vec::with_capacity(count * count);
-        let mut basis_blocks = Vec::new();
-        let mut offset = 0usize;
-        for source in 0..count {
-            for target in 0..count {
-                let quotient = HomotopyHom::new(
-                    tilting.candidate().summands()[source].complex(),
-                    tilting.candidate().summands()[target].complex(),
-                    0,
-                )?
-                .quotient()?;
-                for local in 0..quotient.dim() {
-                    basis_blocks.push((blocks.len(), local));
-                }
-                let dimension = quotient.dim();
-                blocks.push(EndBlock {
-                    source,
-                    target,
-                    offset,
-                    quotient,
-                });
-                offset += dimension;
-            }
-        }
-        let dim = offset;
+        let (blocks, basis_blocks, dim) = build_end_blocks(tilting)?;
         let mut ids = Vec::with_capacity(count);
         for index in 0..count {
             let block = &blocks[index * count + index];
@@ -92,17 +71,22 @@ impl HomotopyEndomorphismAlgebra {
                 *value = field.add(*value, *coefficient);
             }
         }
-        let radical_rows: Vec<Vec<Fp>> = basis_blocks
+        let mut radical_rows: Vec<Vec<Fp>> = basis_blocks
             .iter()
             .enumerate()
             .filter(|(_, (block, _))| blocks[*block].source != blocks[*block].target)
-            .map(|(basis, _)| {
-                let mut row = vec![field.zero(); dim];
-                row[basis] = field.one();
-                row
-            })
+            .map(|(basis, _)| unit(field, dim, basis))
             .collect();
-        let radical = DenseMat::from_rows_with_cols(&radical_rows, dim);
+        for (index, residue) in tilting.degree_zero_residues().iter().enumerate() {
+            let block = &blocks[index * count + index];
+            let local = DenseMat::from_rows(std::slice::from_ref(residue)).kernel_basis(&field);
+            radical_rows.extend((0..local.rows()).map(|row| {
+                let mut embedded = vec![field.zero(); dim];
+                embedded[block.offset..block.offset + local.cols()].copy_from_slice(local.row(row));
+                embedded
+            }));
+        }
+        let radical = DenseMat::from_rows_with_cols(&radical_rows, dim).row_space_basis(&field);
         Ok(HomotopyEndomorphismAlgebra {
             tilting: tilting.clone(),
             field,
@@ -140,22 +124,24 @@ impl HomotopyEndomorphismAlgebra {
     fn structure_table(&self) -> &Vec<Vec<Fp>> {
         self.table.get_or_init(|| {
             let dim = self.dim();
+            let representatives: Vec<ChainMap> = self
+                .basis_blocks
+                .iter()
+                .map(|&(block, local)| {
+                    let quotient = &self.blocks[block].quotient;
+                    quotient.representative(&unit(self.field, quotient.dim(), local))
+                })
+                .collect();
             let mut table = vec![vec![self.field.zero(); dim]; dim * dim];
-            for (left, &(left_block, left_local)) in self.basis_blocks.iter().enumerate() {
-                for (right, &(right_block, right_local)) in self.basis_blocks.iter().enumerate() {
+            for (left, &(left_block, _)) in self.basis_blocks.iter().enumerate() {
+                for (right, &(right_block, _)) in self.basis_blocks.iter().enumerate() {
                     let left_data = &self.blocks[left_block];
                     let right_data = &self.blocks[right_block];
                     if left_data.target != right_data.source {
                         continue;
                     }
-                    let product = left_data
-                        .quotient
-                        .representative(&unit(self.field, left_data.quotient.dim(), left_local))
-                        .then(&right_data.quotient.representative(&unit(
-                            self.field,
-                            right_data.quotient.dim(),
-                            right_local,
-                        )))
+                    let product = representatives[left]
+                        .then(&representatives[right])
                         .expect("composable homotopy classes have matching middle terms");
                     let output = &self.blocks
                         [left_data.source * self.tilting.candidate().len() + right_data.target];
@@ -173,10 +159,13 @@ impl HomotopyEndomorphismAlgebra {
     }
 
     /// Multiplies coordinates in left-to-right chain-map order.
+    ///
+    /// Each term is below 2^62, so the sums stay inside u128 and are reduced
+    /// once per coordinate.
     pub fn multiply(&self, left: &[Fp], right: &[Fp]) -> Vec<Fp> {
         assert_eq!(left.len(), self.dim(), "left coordinate count");
         assert_eq!(right.len(), self.dim(), "right coordinate count");
-        let mut output = vec![self.field.zero(); self.dim()];
+        let mut output = vec![0u128; self.dim()];
         let table = self.structure_table();
         for (i, &a) in left.iter().enumerate() {
             if a.is_zero() {
@@ -186,13 +175,16 @@ impl HomotopyEndomorphismAlgebra {
                 if b.is_zero() {
                     continue;
                 }
-                let scale = self.field.mul(a, b);
+                let scale = self.field.mul(a, b).raw();
                 for (value, &coefficient) in output.iter_mut().zip(&table[i * self.dim() + j]) {
-                    *value = self.field.add(*value, self.field.mul(scale, coefficient));
+                    *value += (scale * coefficient.raw()) as u128;
                 }
             }
         }
         output
+            .into_iter()
+            .map(|value| self.field.reduce_wide(value))
+            .collect()
     }
 
     /// Recomputes every block, identity, radical row, and basis product.
@@ -213,6 +205,40 @@ impl HomotopyEndomorphismAlgebra {
                 })
             })
     }
+}
+
+/// The blocks, the flat `(block, local)` basis index, and `dim End_K(T)`.
+type EndBlocks = (Vec<EndBlock>, Vec<(usize, usize)>, usize);
+
+/// Returns the Hom blocks, basis index, and dimension of `End_K(T)`.
+fn build_end_blocks(tilting: &CertifiedTiltingComplex) -> Result<EndBlocks, ChainMapError> {
+    let (mut blocks, mut basis_blocks, mut offset) = (Vec::new(), Vec::new(), 0usize);
+    let homs = &mut HomSpaceMemo::default();
+    for source in 0..tilting.candidate().len() {
+        for target in 0..tilting.candidate().len() {
+            let quotient = if source == target {
+                tilting.degree_zero_endomorphisms()[source].clone()
+            } else {
+                HomotopyHom::new_in(
+                    tilting.candidate().summands()[source].complex(),
+                    tilting.candidate().summands()[target].complex(),
+                    0,
+                    homs,
+                )?
+                .into_quotient(homs)?
+            };
+            let dimension = quotient.dim();
+            basis_blocks.extend((0..dimension).map(|local| (blocks.len(), local)));
+            blocks.push(EndBlock {
+                source,
+                target,
+                offset,
+                quotient,
+            });
+            offset += dimension;
+        }
+    }
+    Ok((blocks, basis_blocks, offset))
 }
 
 fn unit(field: PrimeField, length: usize, index: usize) -> Vec<Fp> {
@@ -275,9 +301,10 @@ impl ComplexTargetCut {
 }
 
 /// A verified presentation of `End_K(T)^op`.
+///
+/// The source tilting complex is the one stored in `endo`.
 #[derive(Clone)]
 pub struct VerifiedComplexTargetPresentation {
-    tilting: CertifiedTiltingComplex,
     limits: TargetLimits,
     endo: HomotopyEndomorphismAlgebra,
     data: CoordinateTargetData,
@@ -297,7 +324,7 @@ impl std::fmt::Debug for VerifiedComplexTargetPresentation {
 impl VerifiedComplexTargetPresentation {
     accessor_methods! {
         /// The certified source tilting complex.
-        pub tilting() -> &CertifiedTiltingComplex = |this| &this.tilting;
+        pub tilting() -> &CertifiedTiltingComplex = |this| this.endo.tilting();
         /// The homotopy endomorphism algebra.
         pub endo() -> &HomotopyEndomorphismAlgebra = |this| &this.endo;
         /// The recovered algebra `End_K(T)^op`.
@@ -320,13 +347,13 @@ impl VerifiedComplexTargetPresentation {
         pub limits() -> &TargetLimits = |this| &this.limits;
     }
 
-    /// Rebuilds the homotopy algebra and independently checks the target map.
+    /// Rechecks the tilting certificate, checks the stored homotopy algebra
+    /// against a rebuild with [`HomotopyEndomorphismAlgebra::verify`], and
+    /// independently checks the target map over the stored algebra.
     pub fn verify(&self) -> bool {
-        let Ok(endo) = HomotopyEndomorphismAlgebra::new(&self.tilting) else {
-            return false;
-        };
+        let endo = &self.endo;
         endo.verify()
-            && verify_coordinate_target_data(&endo, endo.idempotents(), &self.limits, &self.data)
+            && verify_coordinate_target_data(endo, endo.idempotents(), &self.limits, &self.data)
     }
 }
 
@@ -350,18 +377,21 @@ pub fn present_complex_target(
     let endo = HomotopyEndomorphismAlgebra::new(tilting)?;
     match recover_coordinate_target(&endo, endo.idempotents(), limits)? {
         CoordinateTargetOutcome::Presented(data) => {
-            let verified = VerifiedComplexTargetPresentation {
-                tilting: tilting.clone(),
-                limits: limits.clone(),
-                endo,
-                data: *data,
-            };
-            if !verified.verify() {
+            // `tilting` passed its check above and `endo` is built from it, so
+            // `endo` equals its rebuild. This runs the rest of
+            // `VerifiedComplexTargetPresentation::verify` without that rebuild.
+            if !verify_coordinate_target_data(&endo, endo.idempotents(), limits, &data) {
                 return Err(ComplexTargetError::Defect {
                     reason: "the complex-target verifier rejected the presentation".to_string(),
                 });
             }
-            Ok(ComplexTargetOutcome::Presented(Box::new(verified)))
+            Ok(ComplexTargetOutcome::Presented(Box::new(
+                VerifiedComplexTargetPresentation {
+                    limits: limits.clone(),
+                    endo,
+                    data: *data,
+                },
+            )))
         }
         CoordinateTargetOutcome::Cut(reason) => {
             Ok(ComplexTargetOutcome::Cut(Box::new(ComplexTargetCut {

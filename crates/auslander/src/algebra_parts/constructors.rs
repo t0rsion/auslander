@@ -45,8 +45,8 @@ pub fn monomial_presentation(ideal: &MonomialIdeal, field: PrimeField) -> Presen
 /// of dimension above `max_steps` truncates.
 pub fn monomial_limits(ideal: &MonomialIdeal) -> CompletionLimits {
     let defaults = CompletionLimits::default();
-    let words = ideal.forbidden().len();
-    let longest = ideal.forbidden().iter().map(Vec::len).max().unwrap_or(0);
+    let words = ideal.forbidden().len() as u64;
+    let longest = ideal.forbidden().iter().map(Vec::len).max().unwrap_or(0) as u64;
     CompletionLimits {
         max_basis: defaults.max_basis.max(words),
         max_word_len: defaults

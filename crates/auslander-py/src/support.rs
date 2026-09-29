@@ -130,11 +130,11 @@ pub(crate) fn end_repr(end: ResolutionEnd) -> String {
 
 /// The completion limits, each omitted keyword keeping the default.
 pub(crate) fn limits_from(
-    max_basis: Option<usize>,
-    max_word_len: Option<usize>,
-    max_steps: Option<usize>,
-    max_origin_terms: Option<usize>,
-    max_ambiguities: Option<usize>,
+    max_basis: Option<u64>,
+    max_word_len: Option<u64>,
+    max_steps: Option<u64>,
+    max_origin_terms: Option<u64>,
+    max_ambiguities: Option<u64>,
 ) -> CompletionLimits {
     let mut limits = CompletionLimits::default();
     if let Some(n) = max_basis {
@@ -208,4 +208,39 @@ pub(crate) fn pair_parts(
     let module = BasicDecomposition::new(&sum).map_err(basic_error)?;
     let projective = ProjectiveSupport::new(algebra, vertices).map_err(basic_error)?;
     Ok((module, projective))
+}
+
+/// The snake_case name of an enum variant, read from its derived `Debug`
+/// form: `VertexLimit { .. }` gives `vertex_limit`.
+///
+/// Python names of typed outcomes come from here, so a name cannot drift
+/// from the Rust variant it reports.
+pub(crate) fn variant_name(value: &impl std::fmt::Debug) -> String {
+    let debug = format!("{value:?}");
+    let mut name = String::new();
+    for character in debug.chars().take_while(char::is_ascii_alphanumeric) {
+        if character.is_ascii_uppercase() && !name.is_empty() {
+            name.push('_');
+        }
+        name.push(character.to_ascii_lowercase());
+    }
+    name
+}
+
+/// Calls `function` of the pure-Python module `auslander.<module>` with
+/// `value` as its one argument.
+///
+/// Tables, notebook HTML, and explanations live in Python, next to the
+/// bounded renderers of `auslander.display`. A Rust class delegates its
+/// `__repr__`, `_repr_html_`, and `explain` there.
+pub(crate) fn python_helper<'py>(
+    value: &Bound<'py, PyAny>,
+    module: &str,
+    function: &str,
+) -> PyResult<Bound<'py, PyAny>> {
+    value
+        .py()
+        .import(format!("auslander.{module}").as_str())?
+        .getattr(function)?
+        .call1((value,))
 }

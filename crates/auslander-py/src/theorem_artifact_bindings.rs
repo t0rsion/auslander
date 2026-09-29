@@ -46,7 +46,7 @@ impl PySelfExtLocusVerifyLimits {
         max_string_bytes: Option<usize>,
         max_representatives: Option<usize>,
         max_degree_span: Option<usize>,
-        max_ext_spaces: Option<usize>,
+        max_ext_spaces: Option<u64>,
     ) -> Self {
         let defaults = SelfExtLocusVerifyLimits::default();
         let checkpoint = checkpoint.map_or(defaults.checkpoint, |value| value.inner);
@@ -105,7 +105,7 @@ impl PySelfExtLocusVerifyLimits {
     }
 
     #[getter]
-    fn max_ext_spaces(&self) -> usize {
+    fn max_ext_spaces(&self) -> u64 {
         self.inner.max_ext_spaces
     }
 

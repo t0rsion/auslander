@@ -92,6 +92,15 @@ impl Certificate {
     pub fn from_json(text: &str) -> Result<Certificate, CertParseError> {
         decode::certificate(&parser::parse(text)?)
     }
+
+    /// The larger of the vertex count and the normal-word count, read
+    /// without verification. A verified finite certificate has exactly this
+    /// dimension, so a verifier ceiling on it runs before the algebra, whose
+    /// tables grow with the square of the vertex count, is built.
+    pub(crate) fn declared_dimension(&self) -> u64 {
+        let vertices = u64::from(self.quiver.vertices);
+        vertices.max(self.normal_words.len() as u64)
+    }
 }
 
 #[cfg(test)]

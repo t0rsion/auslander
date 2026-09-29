@@ -196,3 +196,26 @@ fn dense_and_sparse_solve_agree_on_random_systems() {
         }
     }
 }
+
+#[test]
+fn row_coords_agrees_with_the_transposed_solve() {
+    let mut rng = XorShift64(0x9e3779b97f4a7c15);
+    for p in [2, 3, 101] {
+        let fp = f(p);
+        for _ in 0..60 {
+            let rows = 1 + rng.below(6) as usize;
+            let cols = 1 + rng.below(7) as usize;
+            let a = random_dense(&mut rng, &fp, rows, cols);
+            // A kernel basis takes the unit-column path and a random matrix
+            // usually takes the solver, so both branches run.
+            for basis in [a.kernel_basis(&fp), a] {
+                let inside = random_dense(&mut rng, &fp, 1, basis.rows()).mul(&basis, &fp);
+                let arbitrary = random_dense(&mut rng, &fp, 1, basis.cols());
+                for v in [inside, arbitrary] {
+                    let expected = basis.transpose().solve(v.row(0), &fp);
+                    assert_eq!(basis.row_coords(v.row(0), &fp), expected, "F_{p}");
+                }
+            }
+        }
+    }
+}

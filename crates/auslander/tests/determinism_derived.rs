@@ -99,7 +99,6 @@ fn determinism_payload() -> String {
                 max_directed_mutations: 16,
                 max_total_terms: 64,
                 max_matrix_entries: 1_024,
-                max_work_units: 16,
                 ..DiscoveryLimits::default()
             },
             &ComputationControl::new(),

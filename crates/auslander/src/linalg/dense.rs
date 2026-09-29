@@ -180,26 +180,9 @@ impl DenseMat {
             self.rows, self.cols, rhs.rows, rhs.cols
         );
         let mut out = DenseMat::zero(self.rows, rhs.cols);
-        // Each product is below 2^62 and a row adds self.cols of them, so the
-        // accumulator stays inside u128 and is reduced once per output entry.
         let mut acc = vec![0u128; rhs.cols];
         for i in 0..self.rows {
-            acc.fill(0);
-            for (k, &a) in self.data[i * self.cols..(i + 1) * self.cols]
-                .iter()
-                .enumerate()
-            {
-                if a.is_zero() {
-                    continue;
-                }
-                let a = a.raw();
-                for (t, &b) in acc
-                    .iter_mut()
-                    .zip(&rhs.data[k * rhs.cols..(k + 1) * rhs.cols])
-                {
-                    *t += (a * b.raw()) as u128;
-                }
-            }
+            self.accumulate_row(i, rhs, &mut acc);
             for (o, &t) in out.data[i * rhs.cols..(i + 1) * rhs.cols]
                 .iter_mut()
                 .zip(&acc)
@@ -208,6 +191,83 @@ impl DenseMat {
             }
         }
         out
+    }
+
+    /// Whether `self * rhs` is zero, without storing the product.
+    ///
+    /// # Panics
+    /// Panics unless `self.cols() == rhs.rows()`.
+    pub(crate) fn product_is_zero(&self, rhs: &DenseMat, f: &PrimeField) -> bool {
+        assert_eq!(self.cols, rhs.rows, "product_is_zero: inner dimensions");
+        let mut acc = vec![0u128; rhs.cols];
+        (0..self.rows).all(|i| {
+            self.accumulate_row(i, rhs, &mut acc);
+            acc.iter().all(|&t| f.reduce_wide(t).is_zero())
+        })
+    }
+
+    /// The coordinates `x` with `x · self = v`, equal to
+    /// `self.transpose().solve(v, f)`.
+    ///
+    /// When each row owns a unit column (1 in that row, 0 in the others), as
+    /// the rows of a kernel basis do, the rows are independent. Then `x` is
+    /// read off those columns and checked by one product, with no elimination.
+    ///
+    /// # Panics
+    /// Panics unless `v.len() == self.cols()`.
+    pub(crate) fn row_coords(&self, v: &[Fp], f: &PrimeField) -> Option<Vec<Fp>> {
+        assert_eq!(v.len(), self.cols, "row_coords: vector length");
+        let Some(units) = self.unit_columns() else {
+            return self.transpose().solve(v, f);
+        };
+        let x = DenseMat {
+            rows: 1,
+            cols: self.rows,
+            data: units.iter().map(|&c| v[c]).collect(),
+        };
+        let mut acc = vec![0u128; self.cols];
+        x.accumulate_row(0, self, &mut acc);
+        acc.iter()
+            .zip(v)
+            .all(|(&t, &value)| f.reduce_wide(t) == value)
+            .then_some(x.data)
+    }
+
+    /// One unit column per row, the first in column order, if every row has one.
+    fn unit_columns(&self) -> Option<Vec<usize>> {
+        let mut units = vec![None; self.rows];
+        for c in 0..self.cols {
+            let mut nonzero = (0..self.rows).filter(|&r| !self.get(r, c).is_zero());
+            if let (Some(r), None) = (nonzero.next(), nonzero.next())
+                && self.get(r, c) == Fp::ONE
+            {
+                units[r].get_or_insert(c);
+            }
+        }
+        units.into_iter().collect()
+    }
+
+    /// Row `i` of `self * rhs` before reduction, into `acc`.
+    ///
+    /// Each product is below 2^62 and a row adds `self.cols` of them, so the
+    /// accumulator stays inside u128 and is reduced once per output entry.
+    fn accumulate_row(&self, i: usize, rhs: &DenseMat, acc: &mut [u128]) {
+        acc.fill(0);
+        for (k, &a) in self.data[i * self.cols..(i + 1) * self.cols]
+            .iter()
+            .enumerate()
+        {
+            if a.is_zero() {
+                continue;
+            }
+            let a = a.raw();
+            for (t, &b) in acc
+                .iter_mut()
+                .zip(&rhs.data[k * rhs.cols..(k + 1) * rhs.cols])
+            {
+                *t += (a * b.raw()) as u128;
+            }
+        }
     }
 
     /// `A x` for a vector `x` of length `self.cols()`; the result has length
@@ -254,7 +314,8 @@ impl DenseMat {
         self.clone().into_rref(f)
     }
 
-    /// [`DenseMat::rref`] on an owned matrix, reduced in place.
+    /// Returns the reduced row echelon form and its pivot columns, reducing
+    /// the owned matrix in place.
     pub(crate) fn into_rref(mut self, f: &PrimeField) -> (DenseMat, Vec<usize>) {
         hit(Site::DenseRref);
         let pivots = self.rref_in_place(f);
@@ -323,7 +384,8 @@ impl DenseMat {
         self.clone().into_rank(f)
     }
 
-    /// [`DenseMat::rank`] on an owned matrix, eliminating in place.
+    /// Returns the dimension of the row space, eliminating the owned matrix
+    /// in place.
     pub(crate) fn into_rank(mut self, f: &PrimeField) -> usize {
         hit(Site::DenseRank);
         self.echelon_in_place(self.cols, f).len()
@@ -341,7 +403,8 @@ impl DenseMat {
         self.clone().into_kernel_basis(f)
     }
 
-    /// [`DenseMat::kernel_basis`] on an owned matrix, reduced in place.
+    /// Returns a basis of the right null space, reducing the owned matrix
+    /// in place.
     pub(crate) fn into_kernel_basis(self, f: &PrimeField) -> DenseMat {
         hit(Site::DenseKernelBasis);
         let cols = self.cols;
@@ -379,7 +442,7 @@ impl DenseMat {
         self.clone().into_row_space_basis(f)
     }
 
-    /// [`DenseMat::row_space_basis`] on an owned matrix, reduced in place.
+    /// Returns a basis of the row space, reducing the owned matrix in place.
     pub(crate) fn into_row_space_basis(self, f: &PrimeField) -> DenseMat {
         hit(Site::DenseRowSpaceBasis);
         let (mut m, pivots) = self.into_rref(f);

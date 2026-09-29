@@ -1,4 +1,6 @@
-use super::portable::{build_chunk, primitive_work_units, source_count, validate_config};
+use super::portable::{
+    build_chunk, chunk_source_count, primitive_work_units, source_count, validate_config,
+};
 use super::portable_types::{
     HomologicalStreamBudget, HomologicalStreamPortableError, HomologicalStreamPortableStatus,
     HomologicalStreamVerifyLimits, VerifiedHomologicalStream,
@@ -58,18 +60,23 @@ fn check_limits(
     portable: &HomologicalStreamPortable,
     limits: HomologicalStreamVerifyLimits,
 ) -> Result<(), HomologicalStreamPortableError> {
-    check_limit("max_degree", portable.max_degree(), limits.max_degree)?;
-    check_limit("rows", portable.rows().len(), limits.parse.max_rows)?;
+    let max_representatives = limits.max_representatives as u64;
+    check_limit(
+        "max_degree",
+        portable.max_degree() as u64,
+        limits.max_degree as u64,
+    )?;
+    check_limit(
+        "rows",
+        portable.rows().len() as u64,
+        limits.parse.max_rows as u64,
+    )?;
     check_limit(
         "next_source",
-        portable.next_source(),
-        limits.max_representatives,
+        portable.next_source() as u64,
+        max_representatives,
     )?;
-    check_limit(
-        "work.sources",
-        portable.work().sources,
-        limits.max_representatives,
-    )?;
+    check_limit("work.sources", portable.work().sources, max_representatives)?;
     let work_units = primitive_work_units(portable.work())?;
     check_limit("work_units", work_units, limits.max_work_units)?;
     validate_config(portable.max_degree(), portable.config().chunk_limits)
@@ -77,8 +84,8 @@ fn check_limits(
 
 fn check_limit(
     field: &'static str,
-    declared: usize,
-    limit: usize,
+    declared: u64,
+    limit: u64,
 ) -> Result<(), HomologicalStreamPortableError> {
     if declared > limit {
         Err(HomologicalStreamPortableError::VerificationLimit {
@@ -107,12 +114,16 @@ fn verify_prefix(
             field: "rows and next_source".to_string(),
         });
     }
-    if portable.work().sources != next {
+    if portable.work().sources != next as u64 {
         return Err(HomologicalStreamPortableError::CountMismatch {
             field: "work.sources".to_string(),
         });
     }
-    let capacity = chunk_capacity(portable);
+    let degree_steps = portable
+        .max_degree()
+        .checked_add(1)
+        .expect("verification validates degree overflow");
+    let capacity = portable.config().chunk_limits.capacity(degree_steps);
     verify_chunk_sizes(portable, capacity)?;
     let mut rebuilt_work = HomologicalBatchStreamWork::default();
     let mut first = 0usize;
@@ -133,15 +144,15 @@ fn verify_prefix(
             field: "work".to_string(),
         });
     }
-    verify_status(portable, census, rebuilt_work, capacity)
+    verify_status(portable, census, rebuilt_work)
 }
 
 fn verify_chunk_sizes(
     portable: &HomologicalStreamPortable,
-    capacity: usize,
+    capacity: u64,
 ) -> Result<(), HomologicalStreamPortableError> {
     let next = portable.next_source();
-    if portable.chunk_sizes().len() != portable.work().chunks {
+    if portable.chunk_sizes().len() as u64 != portable.work().chunks {
         return Err(HomologicalStreamPortableError::CountMismatch {
             field: "chunk sizes and work.chunks".to_string(),
         });
@@ -153,22 +164,17 @@ fn verify_chunk_sizes(
                 field: format!("chunk size {index} is zero"),
             });
         }
-        if size > capacity {
+        if size as u64 > capacity {
             return Err(HomologicalStreamPortableError::CountMismatch {
                 field: format!("chunk size {index} exceeds capacity"),
             });
         }
-        covered =
-            covered
-                .checked_add(size)
-                .ok_or(HomologicalStreamPortableError::CounterOverflow {
-                    field: "chunk source count",
-                })?;
-        if covered > next {
+        if size > next - covered {
             return Err(HomologicalStreamPortableError::CountMismatch {
                 field: "chunk sizes exceed next_source".to_string(),
             });
         }
+        covered += size;
     }
     if covered != next {
         return Err(HomologicalStreamPortableError::CountMismatch {
@@ -203,7 +209,6 @@ fn verify_status(
     portable: &HomologicalStreamPortable,
     census: &crate::census::VerifiedCensus,
     work: HomologicalBatchStreamWork,
-    capacity: usize,
 ) -> Result<(), HomologicalStreamPortableError> {
     let next = portable.next_source();
     let total = source_count(census);
@@ -211,7 +216,7 @@ fn verify_status(
         HomologicalStreamPortableStatus::Complete => verify_complete(next, total),
         HomologicalStreamPortableStatus::Active => verify_active(portable, next, total, work),
         HomologicalStreamPortableStatus::Cut(reason) => {
-            verify_cut(portable, census, next, total, work, capacity, *reason)
+            verify_cut(portable, census, next, total, work, *reason)
         }
     }
 }
@@ -239,7 +244,7 @@ fn verify_active(
     }
     let units = primitive_work_units(work)?;
     let budget = portable.config().budget;
-    if next == 0 || (next < budget.max_sources && units < budget.max_work_units) {
+    if next == 0 || ((next as u64) < budget.max_sources && units < budget.max_work_units) {
         Ok(())
     } else {
         Err(HomologicalStreamPortableError::CountMismatch {
@@ -254,7 +259,6 @@ fn verify_cut(
     next: usize,
     total: usize,
     work: HomologicalBatchStreamWork,
-    capacity: usize,
     reason: HomologicalStreamCutReason,
 ) -> Result<(), HomologicalStreamPortableError> {
     let budget = portable.config().budget;
@@ -274,7 +278,7 @@ fn verify_cut(
                     field: "work-limit reason and budget".to_string(),
                 });
             }
-            verify_work_boundary(portable, census, work, limit, capacity)
+            verify_work_boundary(portable, census, work, limit)
         }
     }
 }
@@ -292,9 +296,9 @@ fn verify_cancelled(next: usize, total: usize) -> Result<(), HomologicalStreamPo
 fn verify_source_limit(
     next: usize,
     total: usize,
-    limit: usize,
+    limit: u64,
 ) -> Result<(), HomologicalStreamPortableError> {
-    if next == limit && next < total {
+    if next as u64 == limit && next < total {
         Ok(())
     } else {
         Err(HomologicalStreamPortableError::CountMismatch {
@@ -307,8 +311,7 @@ fn verify_work_boundary(
     portable: &HomologicalStreamPortable,
     census: &crate::census::VerifiedCensus,
     work: HomologicalBatchStreamWork,
-    limit: usize,
-    capacity: usize,
+    limit: u64,
 ) -> Result<(), HomologicalStreamPortableError> {
     let next = portable.next_source();
     let total = source_count(census);
@@ -324,7 +327,7 @@ fn verify_work_boundary(
             field: "work-limit committed work".to_string(),
         });
     }
-    if next >= max_sources {
+    if next as u64 >= max_sources {
         return Err(HomologicalStreamPortableError::CountMismatch {
             field: "work-limit source boundary".to_string(),
         });
@@ -332,7 +335,7 @@ fn verify_work_boundary(
     if units == limit {
         return Ok(());
     }
-    let count = capacity.min(total - next).min(max_sources - next);
+    let count = chunk_source_count(portable, total);
     let chunk = build_chunk(
         census,
         next,
@@ -349,17 +352,4 @@ fn verify_work_boundary(
             field: "work-limit boundary".to_string(),
         })
     }
-}
-
-fn chunk_capacity(portable: &HomologicalStreamPortable) -> usize {
-    let degree_steps = portable
-        .max_degree()
-        .checked_add(1)
-        .expect("verification validates degree overflow");
-    portable
-        .config()
-        .chunk_limits
-        .max_live_sources
-        .min(portable.config().chunk_limits.max_pairs)
-        .min(portable.config().chunk_limits.max_ext_cells / degree_steps)
 }

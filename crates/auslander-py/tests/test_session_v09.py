@@ -145,7 +145,7 @@ def test_session_rejects_boolean_field_and_workflow_rejects_unhashable_schema(
     path.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(ValueError, match="field must be an integer"):
         auslander.Session.load(path)
-    with pytest.raises(ValueError, match="scalar values"):
+    with pytest.raises(ValueError, match="invalid portable value JSON at byte 10"):
         verify_file_text('{"schema":[],"kind":"census-v1"}')
 
 

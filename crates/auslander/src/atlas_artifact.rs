@@ -16,6 +16,7 @@ pub const CATALOG_ATLAS_ARTIFACT_KIND: &str = "catalog-atlas-v1";
 pub const CATALOG_ATLAS_ARTIFACT_ENGINE: &str = "catalog-ext-multiplicity-v1";
 
 pub use errors::CatalogAtlasArtifactError;
+pub(crate) use model::provenance_str;
 pub use model::{
     CatalogAtlasArtifact, CatalogAtlasArtifactExtRow, CatalogAtlasArtifactParseLimits,
     CatalogAtlasArtifactResultRow, CatalogAtlasArtifactStatus, CatalogAtlasArtifactVerifyLimits,

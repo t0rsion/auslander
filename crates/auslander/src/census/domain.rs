@@ -102,20 +102,22 @@ impl CensusRetention {
 }
 
 /// Resource limits for one finite module census.
+///
+/// The ceilings are `u64` because a portable census stores them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CensusLimits {
     /// Retention policy for duplicate classes.
     pub retention: CensusRetention,
     /// Maximum raw candidates fully processed.
-    pub max_candidates: usize,
+    pub max_candidates: u64,
     /// Maximum retained representatives.
-    pub max_representatives: usize,
+    pub max_representatives: u64,
     /// Maximum retained duplicate assignments and witnesses. Compact retention ignores this limit.
-    pub max_assignments: usize,
+    pub max_assignments: u64,
     /// Maximum completed isomorphism comparisons.
-    pub max_isomorphism_checks: usize,
+    pub max_isomorphism_checks: u64,
     /// Maximum candidate and comparison work units.
-    pub max_work_units: usize,
+    pub max_work_units: u64,
 }
 
 impl Default for CensusLimits {
@@ -146,19 +148,19 @@ pub enum CensusCutReason {
     /// Cooperative cancellation was observed before the next candidate.
     Cancelled,
     /// The next candidate would exceed `max_candidates`.
-    CandidateLimit { limit: usize },
+    CandidateLimit { limit: u64 },
     /// The next new class would exceed `max_representatives`.
-    RepresentativeLimit { limit: usize },
+    RepresentativeLimit { limit: u64 },
     /// The next duplicate witness would exceed `max_assignments`.
-    AssignmentLimit { limit: usize },
+    AssignmentLimit { limit: u64 },
     /// The next comparison would exceed `max_isomorphism_checks`.
-    IsomorphismLimit { limit: usize },
+    IsomorphismLimit { limit: u64 },
     /// The next reservation would exceed `max_work_units`.
     WorkLimit {
         stage: CensusWorkStage,
-        limit: usize,
+        limit: u64,
     },
-    /// The existing isomorphism engine returned no certified decision.
+    /// The isomorphism engine returned no certified decision.
     UnknownIsomorphism {
         representative: usize,
         reason: String,

@@ -9,7 +9,8 @@ use crate::homspace::scale_morphism;
 use crate::module::{Module, same_morphism_data, same_representation, same_slice};
 
 use super::complex::{
-    BoundedComplex, BoundedComplexError, DegreeRange, checked_degree, padded_complex, zero_between,
+    BoundedComplex, BoundedComplexError, DegreeRange, checked_degree, padded_complex,
+    placed_complex, zero_between,
 };
 
 pub(super) fn shifted_complex(
@@ -33,6 +34,23 @@ pub(super) fn padded_pair(
         source.padded_to(range).map_err(ChainMapError::Padding)?,
         target.padded_to(range).map_err(ChainMapError::Padding)?,
     ))
+}
+
+/// Places `complex` on `range` after checking that every dropped term is zero.
+///
+/// The result is then the same object of the homotopy category.
+fn aligned_complex(
+    complex: &BoundedComplex,
+    range: DegreeRange,
+) -> Result<BoundedComplex, ChainMapError> {
+    let mut degrees = (complex.range.lower..=complex.range.upper).zip(&complex.terms);
+    if degrees.any(|(degree, term)| !range.contains(degree) && !term.is_zero()) {
+        return Err(ChainMapError::Padding(BoundedComplexError::PaddingRange {
+            requested: range,
+            stored: complex.range,
+        }));
+    }
+    placed_complex(complex, range).map_err(ChainMapError::Padding)
 }
 
 /// Rejected chain map input.
@@ -98,7 +116,7 @@ fn same_complex_identity(a: &BoundedComplex, b: &BoundedComplex) -> bool {
         && a.differentials == b.differentials
 }
 
-pub(super) fn same_complex_data(a: &BoundedComplex, b: &BoundedComplex) -> bool {
+pub(crate) fn same_complex_data(a: &BoundedComplex, b: &BoundedComplex) -> bool {
     a.range == b.range
         && same_slice(&a.terms, &b.terms, same_representation)
         && same_slice(&a.differentials, &b.differentials, same_morphism_data)
@@ -152,7 +170,7 @@ fn padded_with_component_endpoints(
     padded_complex(complex, range, terms).map_err(ChainMapError::Padding)
 }
 
-pub(super) fn rebase_morphism(f: &Morphism, source: &Module, target: &Module) -> Morphism {
+pub(crate) fn rebase_morphism(f: &Morphism, source: &Module, target: &Module) -> Morphism {
     let maps = (0..source.algebra().quiver().num_vertices() as usize)
         .map(|vertex| f.map_at(vertex as u32).clone())
         .collect();
@@ -180,7 +198,7 @@ fn padded_chain_maps(
     right: &ChainMap,
     range: DegreeRange,
 ) -> Result<(ChainMap, ChainMap), ChainMapError> {
-    Ok((left.padded_to(range)?, right.padded_to(range)?))
+    Ok((left.aligned_to(range)?, right.aligned_to(range)?))
 }
 
 fn boundary_difference(
@@ -348,8 +366,15 @@ impl ChainMap {
         same_chain_data(self, &rebuilt)
     }
 
-    fn padded_to(&self, range: DegreeRange) -> Result<ChainMap, ChainMapError> {
-        let (source, target) = padded_pair(&self.source, &self.target, range)?;
+    /// Moves the map to `range` by padding zero components and dropping
+    /// components outside `range`.
+    ///
+    /// Every dropped component must run between zero terms. A composite
+    /// through a middle complex with a wider range has such components, and a
+    /// Hom space over the narrower range reduces it only after this step.
+    pub(super) fn aligned_to(&self, range: DegreeRange) -> Result<ChainMap, ChainMapError> {
+        let source = aligned_complex(&self.source, range)?;
+        let target = aligned_complex(&self.target, range)?;
         let mut components = Vec::with_capacity(range.len());
         for offset in 0..range.len() {
             let degree = range.lower + offset as i32;
@@ -386,8 +411,8 @@ impl ChainMap {
     /// Adds two maps with the same source and target complexes.
     pub fn add(&self, other: &ChainMap) -> Result<ChainMap, ChainMapError> {
         let range = union_range(chain_map_range(self), chain_map_range(other));
-        let left = self.padded_to(range)?;
-        let right = other.padded_to(range)?;
+        let left = self.aligned_to(range)?;
+        let right = other.aligned_to(range)?;
         if !same_map_endpoints(&left, &right) {
             return Err(ChainMapError::CompositionMismatch);
         }
@@ -424,7 +449,8 @@ impl ChainMap {
         ChainMap::new(&source, &target, self.components.clone())
     }
 
-    /// Returns the homotopy boundary of `homotopy`, namely `d h + h d`.
+    /// Returns whether `self` and `other` differ by the boundary `d h + h d`
+    /// of `homotopy`.
     pub fn homotopic_to(
         &self,
         other: &ChainMap,

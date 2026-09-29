@@ -7,7 +7,15 @@ from dataclasses import dataclass
 from html import escape
 from typing import Any
 
+from .derived_display import (
+    classification_html,
+    classification_latex,
+    invariants_html,
+    render_classification,
+    render_invariants,
+)
 from .explanation import Explanation, explain  # noqa: F401
+from .presentation import algebra_lines, render_isomorphism, render_merge
 
 
 @dataclass(frozen=True)
@@ -102,13 +110,6 @@ def _ar_quiver_lines(value: Any) -> list[str]:
         for index, arrow in enumerate(arrows)
     )
     return lines
-
-
-def _algebra_lines(value: Any, max_items: int) -> list[str]:
-    return [
-        f"Algebra: dim {value.dim}, field {value.field}",
-        str(show(value.quiver, max_items=max_items)),
-    ]
 
 
 def _module_lines(value: Any) -> list[str]:
@@ -330,7 +331,7 @@ def _render_ar_quiver(value: Any, max_items: int) -> tuple[list[str], str | None
 
 
 def _render_algebra(value: Any, max_items: int) -> tuple[list[str], str | None]:
-    return _algebra_lines(value, max_items), _quiver_svg(value.quiver, max_items)
+    return algebra_lines(value), _quiver_svg(value.quiver, max_items)
 
 
 def _render_module(value: Any, _: int) -> tuple[list[str], str | None]:
@@ -367,6 +368,15 @@ _RENDERERS = {
     "VerifiedCatalogAtlasArtifact": _render_catalog_atlas_artifact,
     "ClosedSupportTauTiltingGraph": _render_support_graph,
     "IncompleteSupportTauTiltingGraph": _render_support_graph,
+    "DerivedInvariants": render_invariants,
+    "DerivedClassification": render_classification,
+    "DerivedMerge": render_merge,
+    "AlgebraIsomorphism": render_isomorphism,
+}
+
+_HTML_RENDERERS = {
+    "DerivedInvariants": invariants_html,
+    "DerivedClassification": classification_html,
 }
 
 
@@ -390,7 +400,11 @@ def show(value: Any, *, max_items: int = 200, max_chars: int = 12000) -> Rendere
     if len(text) > max_chars:
         omitted += len(text) - max_chars
         text = text[:max_chars] + f"\n... {len(text) - max_chars} characters omitted"
-    html = f"<pre>{escape(text)}</pre>"
+    html_renderer = _HTML_RENDERERS.get(type(value).__name__)
+    if html_renderer is None:
+        html = f"<pre>{escape(text)}</pre>"
+    else:
+        html = html_renderer(value, max_items)
     return Rendered(text, html, svg, omitted)
 
 
@@ -583,8 +597,13 @@ def _quiver_networkx(nx: Any, value: Any) -> Any:
 
 
 def to_latex(value: Any) -> str:
-    """Return a small LaTeX representation without importing a renderer."""
+    """Return a small LaTeX representation without importing a renderer.
+
+    A `DerivedClassification` gives a `tabular` with one row per class.
+    """
     name = type(value).__name__
+    if name == "DerivedClassification":
+        return classification_latex(value)
     if name == "Module":
         return _module_latex(value)
     if name == "ArQuiver":

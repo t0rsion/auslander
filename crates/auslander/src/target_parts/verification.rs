@@ -61,10 +61,10 @@ pub(super) fn verify_idempotents<A: CoordinateAlgebra>(endo: &A, ids: &[Vec<Fp>]
     sum == endo.one()
 }
 
-fn unlimited_radical_chain<A: CoordinateAlgebra>(endo: &A) -> Option<(Vec<DenseMat>, usize)> {
+fn unlimited_radical_chain<A: CoordinateAlgebra>(endo: &A) -> Option<(Vec<DenseMat>, u64)> {
     let mut products = ProductCounter {
         used: 0,
-        limit: usize::MAX,
+        limit: u64::MAX,
     };
     let powers = radical_chain(endo, &mut products).ok()?;
     powers
@@ -77,10 +77,10 @@ fn expected_arrow_images<A: CoordinateAlgebra>(
     endo: &A,
     ids: &[Vec<Fp>],
     powers: &[DenseMat],
-) -> Option<(Quiver, DenseMat, usize)> {
+) -> Option<(Quiver, DenseMat, u64)> {
     let mut products = ProductCounter {
         used: 0,
-        limit: usize::MAX,
+        limit: u64::MAX,
     };
     let built = target_quiver(endo, ids, powers, &mut products).ok()?;
     Some((built.quiver, built.arrow_images, products.used))
@@ -93,7 +93,7 @@ fn initial_coordinate_data_valid<A: CoordinateAlgebra>(
     value: &CoordinateTargetData,
 ) -> bool {
     endo.dim().checked_mul(endo.dim()).is_some()
-        && endo.dim() <= limits.max_endo_dimension
+        && endo.dim() as u64 <= limits.max_endo_dimension
         && value.work.endo_dimension <= limits.max_endo_dimension
         && value.work.radical_products <= limits.max_radical_products
         && value.work.paths <= limits.max_paths
@@ -106,8 +106,8 @@ fn initial_coordinate_data_valid<A: CoordinateAlgebra>(
 struct ExpectedCoordinateTarget {
     quiver: Quiver,
     arrows: DenseMat,
-    radical_products: usize,
-    paths: usize,
+    radical_products: u64,
+    paths: u64,
 }
 
 fn expected_coordinate_target<A: CoordinateAlgebra>(
@@ -121,7 +121,7 @@ fn expected_coordinate_target<A: CoordinateAlgebra>(
     }
     let (quiver, arrows, corner_products) = expected_arrow_images(endo, ids, &powers)?;
     let radical_products = chain_products.checked_add(corner_products)?;
-    let paths = target_paths(&quiver, &arrows, endo, powers.len(), usize::MAX).ok()?;
+    let paths = target_paths(&quiver, &arrows, endo, powers.len(), u64::MAX).ok()?;
     Some(ExpectedCoordinateTarget {
         quiver,
         arrows,
@@ -140,10 +140,10 @@ fn recovered_structure_valid<A: CoordinateAlgebra>(
         return false;
     };
     let work = TargetWork {
-        endo_dimension: endo.dim(),
+        endo_dimension: endo.dim() as u64,
         radical_products: expected.radical_products,
         paths: expected.paths,
-        relation_terms: value.completion.input_relations.iter().flatten().count(),
+        relation_terms: value.completion.input_relations.iter().flatten().count() as u64,
     };
     expected.quiver == *value.target.quiver()
         && expected.arrows == value.arrow_images

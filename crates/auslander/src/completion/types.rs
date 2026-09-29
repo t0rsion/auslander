@@ -9,25 +9,25 @@ use crate::quiver::ArrowId;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompletionLimits {
     /// Maximum number of working-basis elements.
-    pub max_basis: usize,
+    pub max_basis: u64,
     /// Maximum arrow count of any input word or superposition word.
-    pub max_word_len: usize,
+    pub max_word_len: u64,
     /// Maximum number of work units across the whole run. Each reduction
     /// step and each emitted normal word costs one unit. The budget is
     /// checked before the next word is allocated, so a huge finite
     /// normal-word language truncates rather than exhausting memory.
-    pub max_steps: usize,
+    pub max_steps: u64,
     /// Maximum number of provenance terms in one origin. One reduction step
     /// adds up to the whole origin of the basis element it uses, so
     /// provenance compounds across the basis while `max_steps` charges one
     /// unit per step. The budget is checked at every origin mutation.
-    pub max_origin_terms: usize,
+    pub max_origin_terms: u64,
     /// Maximum number of ambiguity keys held at once, and of entries in the
     /// certificate's `ambiguities` list. Enumeration over all pairs of
     /// leading words is quadratic in the basis and independent of
     /// `max_steps`: over a monomial ideal every composition is zero, so the
     /// queue drains at zero step cost however large it is.
-    pub max_ambiguities: usize,
+    pub max_ambiguities: u64,
 }
 
 impl Default for CompletionLimits {
@@ -71,7 +71,7 @@ pub struct TruncationDiagnostics {
     pub pending_ambiguities: usize,
     /// Work units consumed before the stop: reduction steps plus emitted
     /// normal words.
-    pub steps_used: usize,
+    pub steps_used: u64,
     pub reason: TruncationReason,
 }
 

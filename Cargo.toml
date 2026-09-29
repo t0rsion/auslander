@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/auslander", "crates/auslander-py"]
+members = ["crates/auslander", "crates/auslander-py", "crates/auslander-wasm"]
 
 [workspace.package]
 edition = "2024"
@@ -18,3 +18,11 @@ opt-level = 2
 [profile.perf]
 inherits = "release"
 debug = true
+
+# The browser verifier in `web/`. `web/build.sh` builds `auslander-wasm` with it.
+[profile.wasm]
+inherits = "release"
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1

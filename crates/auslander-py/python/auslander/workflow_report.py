@@ -55,7 +55,9 @@ def _portable_inspection(kind: str, value: Any, verification: str) -> WorkflowIn
         from .atlas_report import atlas_inspection
 
         return atlas_inspection(value, verification)
-    if kind == "census":
+    if kind == "derived_atlas":
+        scope = _derived_atlas_scope(value)
+    elif kind == "census":
         scope = _census_scope(value)
     elif kind == "homological":
         data = _homological_data(value)
@@ -80,6 +82,15 @@ def _portable_inspection(kind: str, value: Any, verification: str) -> WorkflowIn
         value.fingerprint,
         value,
     )
+
+
+def _derived_atlas_scope(value: Any) -> dict[str, Any]:
+    return {
+        "field": value.field,
+        "members": value.member_count,
+        "classes": value.class_count,
+        "unresolved": value.unresolved_count,
+    }
 
 
 def _census_scope(value: Any) -> dict[str, Any]:

@@ -1,4 +1,4 @@
-use super::portable_encode::{canonical_without_fingerprint, fingerprint};
+use super::portable_encode::canonical_without_fingerprint;
 use super::portable_parser;
 use super::portable_types::{
     HomologicalStreamBudget, HomologicalStreamConfig, HomologicalStreamCutReason,
@@ -8,12 +8,13 @@ use super::portable_types::{
 use super::{
     HomologicalBatchStreamChunk, HomologicalBatchStreamLimits, HomologicalBatchStreamWork,
 };
-use crate::batch::{HomologicalBatch, HomologicalBatchLimits};
+use crate::batch::HomologicalBatch;
 use crate::census::{CensusOutcome, CensusPortableStatus, VerifiedCensus};
 use crate::control::{CancellationToken, ComputationControl};
 use crate::field::Fp;
 use crate::linalg::DenseMat;
 use crate::module::Module;
+use crate::portable::{fingerprint, is_fingerprint, seal};
 use crate::quiver::ArrowId;
 
 /// A canonical homological self-pair stream checkpoint.
@@ -81,11 +82,7 @@ impl HomologicalStreamPortable {
 
     /// Serializes this checkpoint to byte-exact canonical JSON.
     pub fn to_canonical_json(&self) -> String {
-        let mut output = canonical_without_fingerprint(self);
-        output.push_str(",\"fingerprint\":\"");
-        output.push_str(&self.fingerprint);
-        output.push_str("\"}");
-        output
+        seal(canonical_without_fingerprint(self), &self.fingerprint)
     }
 
     /// Parses one canonical checkpoint under explicit limits.
@@ -94,15 +91,10 @@ impl HomologicalStreamPortable {
         limits: HomologicalStreamParseLimits,
     ) -> Result<Self, HomologicalStreamPortableError> {
         let raw = portable_parser::parse(text, limits)?;
-        let census =
-            String::from_utf8(raw.census).map_err(|_| HomologicalStreamPortableError::Syntax {
-                byte: 0,
-                message: "embedded census bytes are not UTF-8".to_string(),
-            })?;
         validate_fingerprint(&raw.census_fingerprint)?;
         validate_fingerprint(&raw.fingerprint)?;
         let portable = Self {
-            census,
+            census: raw.census,
             census_fingerprint: raw.census_fingerprint,
             max_degree: raw.max_degree,
             config: raw.config,
@@ -175,10 +167,11 @@ impl HomologicalSelfPairCheckpointStream {
     ) -> Result<Self, HomologicalStreamPortableError> {
         let mut portable = verified.portable.clone();
         let committed_work = primitive_work_units(portable.work)?;
-        if budget.max_sources < portable.next_source {
+        let committed_sources = portable.next_source as u64;
+        if budget.max_sources < committed_sources {
             return Err(HomologicalStreamPortableError::ResumeBudget {
                 field: "max_sources",
-                committed: portable.next_source,
+                committed: committed_sources,
                 limit: budget.max_sources,
             });
         }
@@ -247,7 +240,7 @@ impl HomologicalSelfPairCheckpointStream {
             self.refresh_fingerprint();
             return Some(self.terminal_step());
         }
-        if self.portable.next_source >= self.portable.config.budget.max_sources {
+        if self.portable.next_source as u64 >= self.portable.config.budget.max_sources {
             self.cut(HomologicalStreamCutReason::SourceLimit {
                 limit: self.portable.config.budget.max_sources,
             });
@@ -268,16 +261,7 @@ impl HomologicalSelfPairCheckpointStream {
 
     fn compute_chunk(&mut self) -> HomologicalStreamStep {
         let total = source_count(&self.census);
-        let capacity = self.chunk_capacity();
-        let remaining_budget = self
-            .portable
-            .config
-            .budget
-            .max_sources
-            .saturating_sub(self.portable.next_source);
-        let count = capacity
-            .min(total - self.portable.next_source)
-            .min(remaining_budget);
+        let count = chunk_source_count(&self.portable, total);
         let chunk = match build_chunk(
             &self.census,
             self.portable.next_source,
@@ -323,10 +307,10 @@ impl HomologicalSelfPairCheckpointStream {
         self.refresh_fingerprint();
     }
 
-    fn set_boundary_status(&mut self, total: usize, units: usize) {
+    fn set_boundary_status(&mut self, total: usize, units: u64) {
         if self.portable.next_source == total {
             self.portable.status = HomologicalStreamPortableStatus::Complete;
-        } else if self.portable.next_source >= self.portable.config.budget.max_sources {
+        } else if self.portable.next_source as u64 >= self.portable.config.budget.max_sources {
             self.cut(HomologicalStreamCutReason::SourceLimit {
                 limit: self.portable.config.budget.max_sources,
             });
@@ -359,20 +343,6 @@ impl HomologicalSelfPairCheckpointStream {
         self.cancellation
             .as_ref()
             .is_some_and(CancellationToken::is_cancelled)
-    }
-
-    fn chunk_capacity(&self) -> usize {
-        let degree_steps = self
-            .portable
-            .max_degree
-            .checked_add(1)
-            .expect("stream configuration validates degree overflow");
-        self.portable
-            .config
-            .chunk_limits
-            .max_live_sources
-            .min(self.portable.config.chunk_limits.max_pairs)
-            .min(self.portable.config.chunk_limits.max_ext_cells / degree_steps)
     }
 
     fn terminal_step(&self) -> HomologicalStreamStep {
@@ -417,7 +387,7 @@ pub(super) fn validate_config(
             "max_live_sources must be positive".to_string(),
         ));
     }
-    if limits.max_pairs == 0 || limits.max_ext_cells / degree_steps == 0 {
+    if limits.capacity(degree_steps) == 0 {
         return Err(HomologicalStreamPortableError::InvalidConfig(
             "chunk limits cannot fit one source".to_string(),
         ));
@@ -427,6 +397,30 @@ pub(super) fn validate_config(
 
 pub(super) fn source_count(census: &VerifiedCensus) -> usize {
     census.portable().representatives().len()
+}
+
+/// The size of the next chunk after `portable.next_source`: the chunk
+/// capacity, capped by the sources left in the census and in the budget.
+///
+/// The result is at most `total - next_source`, so it fits `usize`.
+pub(super) fn chunk_source_count(portable: &HomologicalStreamPortable, total: usize) -> usize {
+    let next = portable.next_source;
+    let degree_steps = portable
+        .max_degree
+        .checked_add(1)
+        .expect("stream configuration validates degree overflow");
+    let remaining_budget = portable
+        .config
+        .budget
+        .max_sources
+        .saturating_sub(next as u64);
+    let count = portable
+        .config
+        .chunk_limits
+        .capacity(degree_steps)
+        .min(remaining_budget)
+        .min((total - next) as u64);
+    usize::try_from(count).expect("count is at most total - next_source")
 }
 
 pub(super) fn build_chunk(
@@ -439,15 +433,8 @@ pub(super) fn build_chunk(
     let modules = (first_source..first_source + count)
         .map(|index| representative_module(census, index))
         .collect::<Result<Vec<_>, _>>()?;
-    let batch = HomologicalBatch::self_pairs(
-        modules,
-        max_degree,
-        HomologicalBatchLimits {
-            max_pairs: limits.max_pairs,
-            max_ext_cells: limits.max_ext_cells,
-        },
-    )
-    .map_err(HomologicalStreamPortableError::Batch)?;
+    let batch = HomologicalBatch::self_pairs(modules, max_degree, limits.batch())
+        .map_err(HomologicalStreamPortableError::Batch)?;
     super::stream::make_chunk(first_source, batch).map_err(HomologicalStreamPortableError::Stream)
 }
 
@@ -518,30 +505,15 @@ fn representative_module(
 
 pub(super) fn primitive_work_units(
     work: HomologicalBatchStreamWork,
-) -> Result<usize, HomologicalStreamPortableError> {
-    [
-        work.resolutions,
-        work.target_covers,
-        work.hom_spaces,
-        work.projective_factor_spaces,
-        work.ext_tables,
-    ]
-    .into_iter()
-    .try_fold(0usize, |total, value| {
-        total
-            .checked_add(value)
-            .ok_or(HomologicalStreamPortableError::CounterOverflow {
-                field: "primitive work units",
-            })
-    })
+) -> Result<u64, HomologicalStreamPortableError> {
+    work.primitive_units()
+        .ok_or(HomologicalStreamPortableError::CounterOverflow {
+            field: "primitive work units",
+        })
 }
 
 fn validate_fingerprint(value: &str) -> Result<(), HomologicalStreamPortableError> {
-    if value.len() == 16
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
+    if is_fingerprint(value) {
         Ok(())
     } else {
         Err(HomologicalStreamPortableError::FingerprintShape)

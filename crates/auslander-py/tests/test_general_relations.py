@@ -315,7 +315,7 @@ def test_rejected_relations_raise_value_error():
 
 
 def test_readme_example():
-    # The end-to-end non-monomial example from README.md, kept in sync with it.
+    # The end-to-end non-monomial example from docs/algebra.md, kept in sync with it.
     F = auslander.PrimeField(5)
     Q = auslander.Quiver(4, [(0, 1), (1, 3), (0, 2), (2, 3)])
     A = auslander.Algebra.from_relations(Q, [[(1, [0, 1]), (-1, [2, 3])]], F)

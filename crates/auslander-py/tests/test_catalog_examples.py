@@ -1,4 +1,4 @@
-"""Execute the v0.9 catalog atlas example from the installed package."""
+"""Execute the example notebooks and script from the installed package."""
 
 from __future__ import annotations
 
@@ -13,6 +13,16 @@ from nbclient import NotebookClient
 
 EXAMPLES = Path(__file__).parents[1] / "examples"
 NOTEBOOK = EXAMPLES / "catalog_workflow.ipynb"
+TOUR = EXAMPLES / "derived_classification_tour.ipynb"
+TOUR_LINES = [
+    "first difference: None",
+    "class of A_3: [37, 63, 64, 76]",
+    "11 trees, 1 class, status complete",
+    "DerivedInequivalenceWitness(kind=\"winding_class\", left_value='gcd 0', right_value='gcd 2')",
+    "  recipe from the regular complex of member 44: left mutation at summand 1",
+    "DerivedClassification: status complete, verification replayed",
+    "% derived-atlas-v1 fingerprint 2277621c2c2270ef",
+]
 SCRIPT = EXAMPLES / "catalog_workflow.py"
 EXPECTED_RAW_ROWS = [
     "row: scalars=[0, 0, 0], self_ext=[4, 3, 1, 0]",
@@ -98,12 +108,9 @@ def _assert_script_artifacts(output: str, directory: Path) -> None:
         assert "verification: replayed" in report.read_text(encoding="utf-8")
 
 
-def test_catalog_notebook_executes_with_the_current_interpreter(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    """The committed notebook runs without repository import paths."""
-    notebook = nbformat.read(NOTEBOOK, as_version=4)
+def _execute(path: Path, tmp_path: Path, monkeypatch) -> str:
+    """Run one committed notebook and return its stream output."""
+    notebook = nbformat.read(path, as_version=4)
     client = NotebookClient(
         notebook,
         timeout=180,
@@ -111,7 +118,25 @@ def test_catalog_notebook_executes_with_the_current_interpreter(
         resources={"metadata": {"path": str(EXAMPLES)}},
     )
     client.execute()
-    _assert_notebook_scope(_notebook_output(notebook))
+    return _notebook_output(notebook)
+
+
+def test_catalog_notebook_executes_with_the_current_interpreter(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The committed notebook runs without repository import paths."""
+    _assert_notebook_scope(_execute(NOTEBOOK, tmp_path, monkeypatch))
+
+
+def test_derived_tour_reproduces_its_committed_output(tmp_path: Path, monkeypatch) -> None:
+    """The tour reruns to the stream output stored in the committed file."""
+    committed = _notebook_output(nbformat.read(TOUR, as_version=4))
+    output = _execute(TOUR, tmp_path, monkeypatch)
+
+    assert output == committed
+    for line in TOUR_LINES:
+        assert line in output.splitlines()
 
 
 def test_catalog_script_writes_replayed_atlas_artifacts_from_the_installed_package(

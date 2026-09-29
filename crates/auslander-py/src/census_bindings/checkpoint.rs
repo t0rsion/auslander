@@ -92,37 +92,37 @@ impl PyCensusCheckpoint {
 
     /// The number of fully processed raw candidates.
     #[getter]
-    fn candidates(&self) -> usize {
+    fn candidates(&self) -> u64 {
         self.inner.candidates()
     }
 
     /// The number of relation-valid candidates classified into classes.
     #[getter]
-    fn accepted_modules(&self) -> usize {
+    fn accepted_modules(&self) -> u64 {
         self.inner.accepted_modules()
     }
 
     /// The number of relation-invalid candidates.
     #[getter]
-    fn rejected_candidates(&self) -> usize {
+    fn rejected_candidates(&self) -> u64 {
         self.inner.rejected_candidates()
     }
 
     /// The number of completed isomorphism checks.
     #[getter]
-    fn isomorphism_checks(&self) -> usize {
+    fn isomorphism_checks(&self) -> u64 {
         self.inner.isomorphism_checks()
     }
 
     /// The candidate and comparison work units used by this checkpoint.
     #[getter]
-    fn work_units(&self) -> usize {
+    fn work_units(&self) -> u64 {
         self.inner.work_units()
     }
 
     /// The exact counters as a mapping.
     #[getter]
-    fn counts(&self) -> BTreeMap<&'static str, usize> {
+    fn counts(&self) -> BTreeMap<&'static str, u64> {
         census_counts(&self.inner)
     }
 
@@ -259,37 +259,37 @@ impl PyVerifiedCensusCheckpoint {
 
     /// The number of fully processed raw candidates.
     #[getter]
-    fn candidates(&self) -> usize {
+    fn candidates(&self) -> u64 {
         self.inner.portable().candidates()
     }
 
     /// The number of relation-valid candidates classified into classes.
     #[getter]
-    fn accepted_modules(&self) -> usize {
+    fn accepted_modules(&self) -> u64 {
         self.inner.portable().accepted_modules()
     }
 
     /// The number of relation-invalid candidates.
     #[getter]
-    fn rejected_candidates(&self) -> usize {
+    fn rejected_candidates(&self) -> u64 {
         self.inner.portable().rejected_candidates()
     }
 
     /// The number of completed isomorphism checks.
     #[getter]
-    fn isomorphism_checks(&self) -> usize {
+    fn isomorphism_checks(&self) -> u64 {
         self.inner.portable().isomorphism_checks()
     }
 
     /// The candidate and comparison work units used by this checkpoint.
     #[getter]
-    fn work_units(&self) -> usize {
+    fn work_units(&self) -> u64 {
         self.inner.portable().work_units()
     }
 
     /// The exact counters as a mapping.
     #[getter]
-    fn counts(&self) -> BTreeMap<&'static str, usize> {
+    fn counts(&self) -> BTreeMap<&'static str, u64> {
         census_counts(self.inner.portable())
     }
 

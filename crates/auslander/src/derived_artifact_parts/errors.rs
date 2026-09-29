@@ -19,13 +19,18 @@ pub enum ArtifactError {
     },
     /// The bounded JSON parser rejected one byte.
     Syntax { byte: usize, message: String },
-    /// An embedded completion certificate was malformed.
+    /// An embedded completion certificate is malformed.
     Certificate { path: String, message: String },
-    /// The schema identifier was not supported.
+    /// The schema identifier is not supported.
     Schema { found: String },
-    /// The fingerprint field was not 16 lowercase hexadecimal digits.
+    /// The schema `found` is replaced by `current`.
+    ObsoleteSchema {
+        found: String,
+        current: &'static str,
+    },
+    /// The fingerprint field is not 16 lowercase hexadecimal digits.
     FingerprintShape,
-    /// The fingerprint did not match the canonical preceding fields.
+    /// The fingerprint does not match the canonical preceding fields.
     FingerprintMismatch,
     /// A completion certificate failed independent verification.
     Verify(VerifyError),
@@ -46,6 +51,7 @@ display_error! { ArtifactError {
     Self::Syntax { byte, message } => "invalid artifact JSON at byte {byte}: {message}";
     Self::Certificate { path, message } => "invalid certificate in {path}: {message}";
     Self::Schema { found } => "unsupported artifact schema {found:?}";
+    Self::ObsoleteSchema { found, current } => "obsolete artifact schema {found:?}, current schema {current:?}";
     Self::FingerprintShape => "artifact fingerprint must contain 16 lowercase hexadecimal digits";
     Self::FingerprintMismatch => "artifact fingerprint does not match its canonical fields";
     Self::Verify(error) => "completion certificate rejected: {error}";
@@ -95,3 +101,4 @@ impl From<CertParseError> for ArtifactError {
         }
     }
 }
+from_portable_error!(ArtifactError);

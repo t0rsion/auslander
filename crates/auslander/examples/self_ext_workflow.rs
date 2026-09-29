@@ -72,8 +72,8 @@ fn publish_artifact(
 
 fn complete_census(
     dimensions: Vec<usize>,
-    max_candidates: usize,
-    max_assignments: usize,
+    max_candidates: u64,
+    max_assignments: u64,
 ) -> VerifiedCensus {
     let algebra = commutative_square(PrimeField::new(2).unwrap());
     let census = Census::new(&algebra, dimensions).unwrap();

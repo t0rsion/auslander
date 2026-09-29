@@ -3,11 +3,11 @@ use crate::algebra::BasisIdx;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BarLimits {
     /// Maximum number of tensor tuples at one degree.
-    pub max_tensor_tuples: usize,
+    pub max_tensor_tuples: u64,
     /// Maximum number of cochain coordinates at one degree.
-    pub max_cochain_dim: usize,
+    pub max_cochain_dim: u64,
     /// Maximum retained matrix entries plus one live scratch reservation.
-    pub max_matrix_entries: usize,
+    pub max_matrix_entries: u64,
     /// Maximum deterministic work units across the request.
     pub max_work_units: u64,
 }

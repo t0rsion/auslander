@@ -44,11 +44,11 @@ struct CensusState {
     domain: CensusDomain,
     limits: CensusLimits,
     cursor: u128,
-    candidates: usize,
-    accepted_modules: usize,
-    rejected_candidates: usize,
-    isomorphism_checks: usize,
-    work_units: usize,
+    candidates: u64,
+    accepted_modules: u64,
+    rejected_candidates: u64,
+    isomorphism_checks: u64,
+    work_units: u64,
     representatives: Vec<CensusRepresentative>,
     assignments: Vec<CensusAssignment>,
 }
@@ -89,15 +89,15 @@ impl CensusResult {
         /// The first unvisited raw cursor, equal to the raw-space size.
         pub cursor() -> u128 = |this| this.state.cursor;
         /// The number of fully processed raw candidates.
-        pub candidates() -> usize = |this| this.state.candidates;
+        pub candidates() -> u64 = |this| this.state.candidates;
         /// The number of relation-valid candidates classified into a class.
-        pub accepted_modules() -> usize = |this| this.state.accepted_modules;
+        pub accepted_modules() -> u64 = |this| this.state.accepted_modules;
         /// The number of relation-invalid candidates rejected by `Module::new`.
-        pub rejected_candidates() -> usize = |this| this.state.rejected_candidates;
+        pub rejected_candidates() -> u64 = |this| this.state.rejected_candidates;
         /// The number of completed isomorphism comparisons.
-        pub isomorphism_checks() -> usize = |this| this.state.isomorphism_checks;
+        pub isomorphism_checks() -> u64 = |this| this.state.isomorphism_checks;
         /// The candidate and comparison work units used by the result.
-        pub work_units() -> usize = |this| this.state.work_units;
+        pub work_units() -> u64 = |this| this.state.work_units;
         /// The retained representatives, in first-seen order.
         pub representatives() -> &[CensusRepresentative] = |this| &this.state.representatives;
         /// The verified duplicate assignments, in candidate order.
@@ -131,7 +131,7 @@ impl CensusFailed {
         /// The first unvisited raw cursor.
         pub cursor() -> u128 = |this| this.state.cursor;
         /// The number of fully processed raw candidates.
-        pub candidates() -> usize = |this| this.state.candidates;
+        pub candidates() -> u64 = |this| this.state.candidates;
         /// The retained representatives before the failed candidate.
         pub representatives() -> &[CensusRepresentative] = |this| &this.state.representatives;
         /// The retained duplicate assignments before the failed candidate.
@@ -155,15 +155,15 @@ impl CensusCut {
         /// The first unvisited raw cursor.
         pub cursor() -> u128 = |this| this.state.cursor;
         /// The number of fully processed raw candidates.
-        pub candidates() -> usize = |this| this.state.candidates;
+        pub candidates() -> u64 = |this| this.state.candidates;
         /// The number of relation-valid candidates classified into a class.
-        pub accepted_modules() -> usize = |this| this.state.accepted_modules;
+        pub accepted_modules() -> u64 = |this| this.state.accepted_modules;
         /// The number of relation-invalid candidates rejected by `Module::new`.
-        pub rejected_candidates() -> usize = |this| this.state.rejected_candidates;
+        pub rejected_candidates() -> u64 = |this| this.state.rejected_candidates;
         /// The number of completed isomorphism comparisons.
-        pub isomorphism_checks() -> usize = |this| this.state.isomorphism_checks;
+        pub isomorphism_checks() -> u64 = |this| this.state.isomorphism_checks;
         /// The candidate and comparison work units used by the prefix.
-        pub work_units() -> usize = |this| this.state.work_units;
+        pub work_units() -> u64 = |this| this.state.work_units;
         /// The retained representatives, in first-seen order.
         pub representatives() -> &[CensusRepresentative] = |this| &this.state.representatives;
         /// The verified duplicate assignments, in candidate order.

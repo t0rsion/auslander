@@ -84,7 +84,7 @@ def test_shell_namespace_and_typed_package_files_are_present():
     package = Path(auslander.__file__).parent
     assert (package / "py.typed").is_file()
     assert (package / "_core.pyi").is_file()
-    assert auslander.__version__ == "0.9.0"
+    assert auslander.__version__ == "0.10.0"
 
 
 def test_stable_hom_exposes_projective_factors_and_reduction():
@@ -190,6 +190,26 @@ def test_python_builds_and_independently_verifies_multi_degree_artifacts(prime):
     assert isinstance(verified, auslander.VerifiedDerivedArtifact)
     assert verified.mutation_count == 1
     assert verified.source_field == verified.target_field == prime
+    assert verified.canonical_json == text
+    assert verified.verify()
+
+
+@pytest.mark.parametrize("prime", [2, 5])
+@pytest.mark.parametrize(
+    ("algebra", "mutations"),
+    [
+        (auslander.Algebra.linear_an(3), [("left", 1), ("right", 1)]),
+        (auslander.Algebra.an_with_relations(3, [(0, 2)]), [("left", 2)]),
+    ],
+)
+def test_python_artifacts_of_summands_in_different_degrees(
+    prime, algebra, mutations
+):
+    field = auslander.PrimeField(prime)
+    text = auslander.build_derived_artifact(algebra, mutations, field)
+    verified = auslander.verify_derived_artifact(text)
+
+    assert verified.mutation_count == len(mutations)
     assert verified.canonical_json == text
     assert verified.verify()
 

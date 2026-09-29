@@ -217,7 +217,7 @@ impl PyCatalogAtlasArtifactStatus {
 
     /// Search states visited before a cut.
     #[getter]
-    fn nodes_visited(&self) -> Option<usize> {
+    fn nodes_visited(&self) -> Option<u64> {
         self.inner.nodes_visited()
     }
 

@@ -213,6 +213,10 @@ def _is_algebra(value: Any) -> bool:
 
 
 def _canonical_text(value: Any) -> str:
+    from ._core import DerivedClassification
+
+    if isinstance(value, DerivedClassification):
+        value = value.to_artifact()
     canonical = getattr(value, "canonical_json", None)
     if not isinstance(canonical, str):
         kind = getattr(value, "kind", "portable value")

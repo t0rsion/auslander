@@ -22,7 +22,7 @@ impl PyHomologicalStreamBudget {
     /// `HomologicalStreamBudget(max_sources=None, max_work_units=None)`.
     #[new]
     #[pyo3(signature = (max_sources=None, max_work_units=None))]
-    fn new(max_sources: Option<usize>, max_work_units: Option<usize>) -> Self {
+    fn new(max_sources: Option<u64>, max_work_units: Option<u64>) -> Self {
         let defaults = HomologicalStreamBudget::default();
         Self {
             inner: HomologicalStreamBudget {
@@ -33,12 +33,12 @@ impl PyHomologicalStreamBudget {
     }
 
     #[getter]
-    fn max_sources(&self) -> usize {
+    fn max_sources(&self) -> u64 {
         self.inner.max_sources
     }
 
     #[getter]
-    fn max_work_units(&self) -> usize {
+    fn max_work_units(&self) -> u64 {
         self.inner.max_work_units
     }
 
@@ -69,11 +69,11 @@ impl PyHomologicalStreamConfig {
         max_work_units=None,
     ))]
     fn new(
-        max_live_sources: Option<usize>,
-        max_pairs: Option<usize>,
-        max_ext_cells: Option<usize>,
-        max_sources: Option<usize>,
-        max_work_units: Option<usize>,
+        max_live_sources: Option<u64>,
+        max_pairs: Option<u64>,
+        max_ext_cells: Option<u64>,
+        max_sources: Option<u64>,
+        max_work_units: Option<u64>,
     ) -> Self {
         let chunk = HomologicalBatchStreamLimits::default();
         let budget = HomologicalStreamBudget::default();
@@ -93,27 +93,27 @@ impl PyHomologicalStreamConfig {
     }
 
     #[getter]
-    fn max_live_sources(&self) -> usize {
+    fn max_live_sources(&self) -> u64 {
         self.inner.chunk_limits.max_live_sources
     }
 
     #[getter]
-    fn max_pairs(&self) -> usize {
+    fn max_pairs(&self) -> u64 {
         self.inner.chunk_limits.max_pairs
     }
 
     #[getter]
-    fn max_ext_cells(&self) -> usize {
+    fn max_ext_cells(&self) -> u64 {
         self.inner.chunk_limits.max_ext_cells
     }
 
     #[getter]
-    fn max_sources(&self) -> usize {
+    fn max_sources(&self) -> u64 {
         self.inner.budget.max_sources
     }
 
     #[getter]
-    fn max_work_units(&self) -> usize {
+    fn max_work_units(&self) -> u64 {
         self.inner.budget.max_work_units
     }
 
@@ -166,7 +166,7 @@ impl PyHomologicalStreamVerifyLimits {
         max_string_bytes: Option<usize>,
         max_representatives: Option<usize>,
         max_degree: Option<usize>,
-        max_work_units: Option<usize>,
+        max_work_units: Option<u64>,
     ) -> Self {
         let defaults = HomologicalStreamVerifyLimits::default();
         Self {
@@ -251,7 +251,7 @@ impl PyHomologicalStreamVerifyLimits {
     }
 
     #[getter]
-    fn max_work_units(&self) -> usize {
+    fn max_work_units(&self) -> u64 {
         self.inner.max_work_units
     }
 
@@ -285,7 +285,7 @@ impl PyHomologicalStreamCutReason {
     }
 
     #[getter]
-    fn limit(&self) -> Option<usize> {
+    fn limit(&self) -> Option<u64> {
         match self.inner {
             HomologicalStreamCutReason::Cancelled => None,
             HomologicalStreamCutReason::SourceLimit { limit }
@@ -353,42 +353,42 @@ pub(crate) struct PyHomologicalStreamWork {
 #[pymethods]
 impl PyHomologicalStreamWork {
     #[getter]
-    fn chunks(&self) -> usize {
+    fn chunks(&self) -> u64 {
         self.inner.chunks
     }
 
     #[getter]
-    fn sources(&self) -> usize {
+    fn sources(&self) -> u64 {
         self.inner.sources
     }
 
     #[getter]
-    fn resolutions(&self) -> usize {
+    fn resolutions(&self) -> u64 {
         self.inner.resolutions
     }
 
     #[getter]
-    fn target_covers(&self) -> usize {
+    fn target_covers(&self) -> u64 {
         self.inner.target_covers
     }
 
     #[getter]
-    fn hom_spaces(&self) -> usize {
+    fn hom_spaces(&self) -> u64 {
         self.inner.hom_spaces
     }
 
     #[getter]
-    fn projective_factor_spaces(&self) -> usize {
+    fn projective_factor_spaces(&self) -> u64 {
         self.inner.projective_factor_spaces
     }
 
     #[getter]
-    fn ext_tables(&self) -> usize {
+    fn ext_tables(&self) -> u64 {
         self.inner.ext_tables
     }
 
     #[getter]
-    fn peak_live_sources(&self) -> usize {
+    fn peak_live_sources(&self) -> u64 {
         self.inner.peak_live_sources
     }
 }

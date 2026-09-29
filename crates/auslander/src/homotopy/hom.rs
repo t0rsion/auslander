@@ -1,15 +1,40 @@
 //! Chain Hom spaces and homotopy quotients.
 
+use std::sync::Arc;
+
+use rustc_hash::FxHashMap;
+
 use crate::complex::CheckedComplex;
 use crate::field::Fp;
+use crate::hom::Morphism;
 use crate::homspace::{HomSpace, deterministic_complement, row_times, scale_morphism, stack_rows};
 use crate::linalg::DenseMat;
+use crate::module::Module;
 
 use super::chain::{
     ChainHomotopy, ChainMap, ChainMapError, agrees_after_padding, checked_union_range, padded_pair,
     rebase_morphism, same_complex_data, shifted_complex,
 };
-use super::complex::{BoundedComplex, BoundedComplexError, zero_between};
+use super::complex::{BoundedComplex, BoundedComplexError};
+
+/// Hom spaces between complex terms, keyed by module identity.
+///
+/// Each entry holds clones of its two modules, so no other module takes
+/// either address while the memo lives. Blocks of one classification in
+/// different shifts share terms, so one memo serves all of them.
+#[derive(Default)]
+pub(crate) struct HomSpaceMemo(FxHashMap<(usize, usize), HomSpace>);
+
+impl HomSpaceMemo {
+    fn space(&mut self, source: &Module, target: &Module) -> HomSpace {
+        self.0
+            .entry((source.addr(), target.addr()))
+            .or_insert_with(|| {
+                HomSpace::new(source, target).expect("complex terms share the algebra")
+            })
+            .clone()
+    }
+}
 
 /// A deterministic basis of chain maps between two bounded complexes.
 #[derive(Clone, Debug)]
@@ -23,20 +48,36 @@ pub struct ChainHomSpace {
 fn chain_flat(map: &ChainMap, spaces: &[HomSpace]) -> Vec<Fp> {
     let mut row = Vec::with_capacity(spaces.iter().map(HomSpace::dim).sum());
     for (component, space) in map.components.iter().zip(spaces) {
-        let component = if component.source().ptr_eq(space.source())
-            && component.target().ptr_eq(space.target())
-        {
-            component.clone()
-        } else {
-            rebase_morphism(component, space.source(), space.target())
-        };
-        row.extend(
-            space
-                .coords(&component)
-                .expect("chain map component has matching endpoints"),
-        );
+        row.extend(component_coords(component, space));
     }
     row
+}
+
+/// Coordinates of `component` in `space`, rebased onto the endpoints of
+/// `space` when they are other module values.
+fn component_coords(component: &Morphism, space: &HomSpace) -> Vec<Fp> {
+    let rebased;
+    let component =
+        if component.source().ptr_eq(space.source()) && component.target().ptr_eq(space.target()) {
+            component
+        } else {
+            rebased = rebase_morphism(component, space.source(), space.target());
+            &rebased
+        };
+    space
+        .coords(component)
+        .expect("chain map component has matching endpoints")
+}
+
+/// The first flat coordinate of each component space.
+fn component_offsets(spaces: &[HomSpace]) -> Vec<usize> {
+    let mut offsets = Vec::with_capacity(spaces.len());
+    let mut cursor = 0;
+    for space in spaces {
+        offsets.push(cursor);
+        cursor += space.dim();
+    }
+    offsets
 }
 
 fn chain_map_from_flat(
@@ -60,18 +101,13 @@ fn chain_constraints(
     source: &BoundedComplex,
     target: &BoundedComplex,
     spaces: &[HomSpace],
+    homs: &mut HomSpaceMemo,
 ) -> DenseMat {
     let width: usize = spaces.iter().map(HomSpace::dim).sum();
-    let mut offsets = Vec::with_capacity(spaces.len());
-    let mut cursor = 0;
-    for space in spaces {
-        offsets.push(cursor);
-        cursor += space.dim();
-    }
+    let offsets = component_offsets(spaces);
     let mut rows: Vec<Vec<Fp>> = Vec::new();
     for index in 1..source.len() {
-        let equation = HomSpace::new(&source.terms[index], &target.terms[index - 1])
-            .expect("chain equation endpoints share the algebra");
+        let equation = homs.space(&source.terms[index], &target.terms[index - 1]);
         let equation_dim = equation.dim();
         let mut contributions: Vec<Vec<Fp>> =
             vec![vec![source.terms[0].field().zero(); width]; equation_dim];
@@ -105,38 +141,39 @@ fn chain_constraints(
     DenseMat::from_rows_with_cols(&rows, width)
 }
 
+/// The row space of the boundaries `d h + h d` of the basis homotopies.
+///
+/// A homotopy `h` supported in one degree `i` has two nonzero boundary
+/// components: `h d` in degree `i` and `d h` in degree `i + 1`.
 fn homotopy_rows(
     source: &BoundedComplex,
     target: &BoundedComplex,
     spaces: &[HomSpace],
     ambient: &DenseMat,
+    homs: &mut HomSpaceMemo,
 ) -> DenseMat {
     let field = source.terms[0].field();
+    let offsets = component_offsets(spaces);
     let mut rows = Vec::new();
     for index in 0..source.len().saturating_sub(1) {
-        let space = HomSpace::new(&source.terms[index], &target.terms[index + 1])
-            .expect("homotopy endpoints share the algebra");
-        for basis_index in 0..space.dim() {
-            let mut components = Vec::with_capacity(source.len().saturating_sub(1));
-            for j in 0..source.len().saturating_sub(1) {
-                let source_term = &source.terms[j];
-                let target_term = &target.terms[j + 1];
-                components.push(if j == index {
-                    space.basis_morphism(basis_index)
-                } else {
-                    zero_between(source_term, target_term)
-                });
+        let space = homs.space(&source.terms[index], &target.terms[index + 1]);
+        for homotopy in space.basis_iter() {
+            let lower = homotopy
+                .then(&target.differentials[index])
+                .expect("homotopy and target differential endpoints match");
+            let upper = source.differentials[index]
+                .then(&homotopy)
+                .expect("source differential and homotopy endpoints match");
+            let mut row = vec![field.zero(); ambient.cols()];
+            for (degree, part) in [(index, lower), (index + 1, upper)] {
+                let coordinates = component_coords(&part, &spaces[degree]);
+                row[offsets[degree]..offsets[degree] + coordinates.len()]
+                    .copy_from_slice(&coordinates);
             }
-            let homotopy = ChainHomotopy::new(source, target, components)
-                .expect("homotopy basis components have matching endpoints");
-            let boundary = homotopy
-                .boundary()
-                .expect("homotopy boundary is a chain map");
-            rows.push(chain_flat(&boundary, spaces));
+            rows.push(row);
         }
     }
-    let inner = DenseMat::from_rows_with_cols(&rows, ambient.cols());
-    inner.row_space_basis(&field)
+    DenseMat::from_rows_with_cols(&rows, ambient.cols()).row_space_basis(&field)
 }
 
 impl ChainHomSpace {
@@ -145,15 +182,23 @@ impl ChainHomSpace {
         source: &BoundedComplex,
         target: &BoundedComplex,
     ) -> Result<ChainHomSpace, ChainMapError> {
+        ChainHomSpace::new_in(source, target, &mut HomSpaceMemo::default())
+    }
+
+    fn new_in(
+        source: &BoundedComplex,
+        target: &BoundedComplex,
+        homs: &mut HomSpaceMemo,
+    ) -> Result<ChainHomSpace, ChainMapError> {
         let range = checked_union_range(source, target)?;
         let (source, target) = padded_pair(source, target, range)?;
         let components: Vec<HomSpace> = source
             .terms
             .iter()
             .zip(&target.terms)
-            .map(|(source, target)| HomSpace::new(source, target).expect("algebras were checked"))
+            .map(|(source, target)| homs.space(source, target))
             .collect();
-        let constraints = chain_constraints(&source, &target, &components);
+        let constraints = chain_constraints(&source, &target, &components, homs);
         let flat = constraints.kernel_basis(&source.terms[0].field());
         Ok(ChainHomSpace {
             source: source.clone(),
@@ -197,17 +242,25 @@ impl ChainHomSpace {
     }
 
     /// Coordinates of a chain map in the deterministic basis.
+    ///
+    /// The map may carry zero terms outside the degree range of this space.
     pub fn coords(&self, map: &ChainMap) -> Result<Vec<Fp>, ChainMapError> {
+        self.flat
+            .row_coords(&self.flat_row(map)?, &self.source.terms[0].field())
+            .ok_or(ChainMapError::OutsideHomSpace)
+    }
+
+    /// The component coordinates of `map` after aligning it to this space.
+    fn flat_row(&self, map: &ChainMap) -> Result<Vec<Fp>, ChainMapError> {
+        let map = map
+            .aligned_to(self.source.range)
+            .map_err(|_| ChainMapError::OutsideHomSpace)?;
         if !same_complex_data(&self.source, &map.source)
             || !same_complex_data(&self.target, &map.target)
         {
             return Err(ChainMapError::OutsideHomSpace);
         }
-        let row = chain_flat(map, &self.components);
-        self.flat
-            .transpose()
-            .solve(&row, &self.source.terms[0].field())
-            .ok_or(ChainMapError::OutsideHomSpace)
+        Ok(chain_flat(&map, &self.components))
     }
 
     /// Recomputes the chain-map equations and compares their deterministic basis.
@@ -220,12 +273,21 @@ impl ChainHomSpace {
 
     /// The quotient by null-homotopic chain maps.
     pub fn quotient(&self) -> Result<ChainHomQuotient, ChainMapError> {
-        let null = homotopy_rows(&self.source, &self.target, &self.components, &self.flat);
+        self.quotient_in(&mut HomSpaceMemo::default())
+    }
+
+    fn quotient_in(&self, homs: &mut HomSpaceMemo) -> Result<ChainHomQuotient, ChainMapError> {
+        let null = homotopy_rows(
+            &self.source,
+            &self.target,
+            &self.components,
+            &self.flat,
+            homs,
+        );
         for row in 0..null.rows() {
             if self
                 .flat
-                .transpose()
-                .solve(null.row(row), &self.source.terms[0].field())
+                .row_coords(null.row(row), &self.source.terms[0].field())
                 .is_none()
             {
                 return Err(ChainMapError::OutsideHomSpace);
@@ -294,14 +356,12 @@ impl ChainHomQuotient {
     }
 
     /// Reduces a chain map to quotient coordinates and a null-homotopic remainder.
+    ///
+    /// The map may carry zero terms outside the degree range of this space.
+    /// The remainder uses the complexes of this space.
     pub fn reduce(&self, map: &ChainMap) -> Result<(Vec<Fp>, ChainMap), ChainMapError> {
-        if !same_complex_data(&self.space.source, &map.source)
-            || !same_complex_data(&self.space.target, &map.target)
-        {
-            return Err(ChainMapError::OutsideHomSpace);
-        }
         let field = self.space.source.terms[0].field();
-        let row = chain_flat(map, &self.space.components);
+        let row = self.space.flat_row(map)?;
         let stacked = stack_rows(&[&self.complement, &self.null], self.complement.cols());
         let Some(coordinates) = stacked.transpose().solve(&row, &field) else {
             return Err(ChainMapError::OutsideHomSpace);
@@ -337,8 +397,19 @@ impl HomotopyHom {
         target: &BoundedComplex,
         degree: i32,
     ) -> Result<HomotopyHom, ChainMapError> {
+        HomotopyHom::new_in(source, target, degree, &mut HomSpaceMemo::default())
+    }
+
+    /// Builds a `HomotopyHom` as [`HomotopyHom::new`] does, with Hom spaces
+    /// from `homs`.
+    pub(crate) fn new_in(
+        source: &BoundedComplex,
+        target: &BoundedComplex,
+        degree: i32,
+        homs: &mut HomSpaceMemo,
+    ) -> Result<HomotopyHom, ChainMapError> {
         let shifted_target = shifted_complex(target, degree)?;
-        let space = ChainHomSpace::new(source, &shifted_target)?;
+        let space = ChainHomSpace::new_in(source, &shifted_target, homs)?;
         Ok(HomotopyHom {
             degree,
             source: source.clone(),
@@ -398,18 +469,30 @@ impl HomotopyHom {
 
     /// Returns the quotient by null-homotopic degree-`q` maps.
     pub fn quotient(&self) -> Result<HomotopyHomQuotient, ChainMapError> {
+        self.clone().into_quotient(&mut HomSpaceMemo::default())
+    }
+
+    /// Builds a `HomotopyHomQuotient` as [`HomotopyHom::quotient`] does,
+    /// with Hom spaces from `homs` and without copying this value.
+    pub(crate) fn into_quotient(
+        self,
+        homs: &mut HomSpaceMemo,
+    ) -> Result<HomotopyHomQuotient, ChainMapError> {
+        let quotient = Arc::new(self.space.quotient_in(homs)?);
         Ok(HomotopyHomQuotient {
-            hom: self.clone(),
-            quotient: self.space.quotient()?,
+            hom: Arc::new(self),
+            quotient,
         })
     }
 }
 
 /// Degree-`q` chain Hom modulo null-homotopic maps.
+///
+/// The parts are immutable and shared, so a clone copies no matrix.
 #[derive(Clone, Debug)]
 pub struct HomotopyHomQuotient {
-    hom: HomotopyHom,
-    quotient: ChainHomQuotient,
+    hom: Arc<HomotopyHom>,
+    quotient: Arc<ChainHomQuotient>,
 }
 
 impl HomotopyHomQuotient {
@@ -461,8 +544,8 @@ impl ChainMap {
     }
 }
 
-/// A short name for the bounded homological complex type.
+/// Alias of [`BoundedComplex`].
 pub type DegreeComplex = BoundedComplex;
 
-/// A short name for a chain homotopy.
+/// Alias of [`ChainHomotopy`].
 pub type Homotopy = ChainHomotopy;
