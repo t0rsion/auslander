@@ -11,6 +11,7 @@ from ._core import (
     CatalogAtlasArtifactVerifyLimits,
     CensusCheckpoint,
     CensusVerifyLimits,
+    DerivedAtlasArtifact,
     HomologicalCheckpoint,
     HomologicalStreamBudget,
     HomologicalStreamVerifyLimits,
@@ -21,6 +22,7 @@ from ._core import (
     VerifiedDerivedArtifact,
     VerifiedHomologicalCheckpoint,
     VerifiedSelfExtLocusArtifact,
+    _header_kind,
     verify_catalog_atlas_artifact,
 )
 from .checkpoint import (
@@ -41,27 +43,18 @@ from .workflow import (
     _stream_config,
 )
 
-_COMPUTATION_SCHEMA = "auslander-computation-v1"
-_ATLAS_KIND = "catalog-atlas-v1"
 _KIND_LIMIT_TYPES = (
     ("census", CensusVerifyLimits),
     ("homological", HomologicalStreamVerifyLimits),
     ("theorem", SelfExtLocusVerifyLimits),
     ("atlas", CatalogAtlasArtifactVerifyLimits),
 )
-_SCHEMA_KINDS = (
-    ((DEFINITION_SCHEMA, DEFINITION_KIND), "definition"),
-    ((_COMPUTATION_SCHEMA, "census-v1"), "census"),
-    ((_COMPUTATION_SCHEMA, "homological-self-pair-stream-v2"), "homological"),
-    ((_COMPUTATION_SCHEMA, _ATLAS_KIND), "atlas"),
-    (("auslander-theorem-v1", "fixed-dimension-self-ext-locus-v1"), "theorem"),
-    (("auslander-derived-v1", None), "derived"),
-)
 _PORTABLE_LOADERS = (
     ("census", CensusCheckpoint),
     ("homological", HomologicalCheckpoint),
     ("theorem", SelfExtLocusArtifact),
     ("atlas", CatalogAtlasArtifact),
+    ("derived_atlas", lambda text, _limits: DerivedAtlasArtifact(text)),
 )
 
 
@@ -71,6 +64,7 @@ def _portable_kind(value: Any) -> str | None:
         ("homological", (HomologicalCheckpoint, VerifiedHomologicalCheckpoint)),
         ("theorem", (SelfExtLocusArtifact, VerifiedSelfExtLocusArtifact)),
         ("atlas", (CatalogAtlasArtifact, VerifiedCatalogAtlasArtifact)),
+        ("derived_atlas", (DerivedAtlasArtifact,)),
     )
     for kind, classes in kinds:
         if isinstance(value, classes):
@@ -91,6 +85,7 @@ def _default_input_bytes() -> int:
         SelfExtLocusVerifyLimits().max_input_bytes,
     ]
     defaults.append(CatalogAtlasArtifactVerifyLimits().parse.max_input_bytes)
+    defaults.append(DerivedAtlasArtifact.max_input_bytes)
     return max(defaults)
 
 
@@ -129,6 +124,8 @@ def _validate_limit_type(limits: Any | None) -> None:
 def _validate_kind_limits(kind: str, limits: Any | None) -> None:
     if limits is None:
         return
+    if kind == "derived_atlas":
+        raise TypeError("limits do not apply to a derived atlas")
     expected = _dispatch(_KIND_LIMIT_TYPES, kind)
     if expected is None:
         return
@@ -138,47 +135,29 @@ def _validate_kind_limits(kind: str, limits: Any | None) -> None:
 
 def _json_kind(text: str) -> str:
     try:
-        value = json.loads(
-            text, object_pairs_hook=_pairs, parse_constant=_reject_constant
-        )
-    except json.JSONDecodeError as error:
-        raise ValueError(
-            f"invalid portable JSON at line {error.lineno}, column {error.colno}"
-        ) from None
-    if not isinstance(value, dict):
-        raise ValueError("portable value must be an object")
-    return _schema_kind(value.get("schema"), value.get("kind"))
+        return _header_kind(text)
+    except ValueError:
+        if _is_definition(text):
+            return "definition"
+        raise
 
 
-def _schema_kind(schema: Any, kind: Any) -> str:
-    _check_schema_scalars(schema, kind)
-    result = _dispatch(_SCHEMA_KINDS, (schema, kind))
-    if result is None:
-        raise ValueError("unsupported portable value schema")
-    return result
-
-
-def _check_schema_scalars(schema: Any, kind: Any) -> None:
-    scalar = (str, int, float, bool, type(None))
-    if not isinstance(schema, scalar) or not isinstance(kind, scalar):
-        raise ValueError("portable schema and kind must be scalar values") from None
+def _is_definition(text: str) -> bool:
+    # A definition has sorted keys, so its schema is not the first member
+    # that the Rust header reader requires.
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return False
+    return (
+        isinstance(value, dict)
+        and value.get("schema") == DEFINITION_SCHEMA
+        and value.get("kind") == DEFINITION_KIND
+    )
 
 
 def _dispatch(table: tuple[tuple[Any, Any], ...], key: Any) -> Any:
     return next((value for candidate, value in table if candidate == key), None)
-
-
-def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"duplicate portable field {key!r}")
-        result[key] = value
-    return result
-
-
-def _reject_constant(value: str) -> None:
-    raise ValueError(f"JSON constant {value!r} is not allowed")
 
 
 def _verify_definition(text: str, limits: Any | None) -> WorkflowDefinition:
@@ -226,6 +205,13 @@ def _verify_atlas(text: str, limits: Any | None) -> Any:
     return verify_catalog_atlas_artifact(text, effective)
 
 
+def _verify_derived_atlas(text: str, limits: Any | None) -> Any:
+    _validate_kind_limits("derived_atlas", limits)
+    from .derived_atlas import verify_derived_atlas
+
+    return verify_derived_atlas(text)
+
+
 _VERIFY_HANDLERS = (
     ("definition", _verify_definition),
     ("census", _verify_census),
@@ -233,6 +219,7 @@ _VERIFY_HANDLERS = (
     ("theorem", _verify_theorem),
     ("derived", _verify_derived),
     ("atlas", _verify_atlas),
+    ("derived_atlas", _verify_derived_atlas),
 )
 
 
@@ -377,7 +364,7 @@ def _write_checkpoint_value(value: Any, path: str | Path) -> Path:
         raise TypeError("value must be a workflow or portable checkpoint")
     if kind == "theorem":
         return write_theorem_artifact(path, value)
-    if kind in {"atlas", "derived"}:
+    if kind in {"atlas", "derived", "derived_atlas"}:
         return _write_canonical_json(path, value.canonical_json)
     return write_checkpoint(path, value)
 

@@ -1,8 +1,9 @@
 use super::classification::quotient;
-use super::{TiltingComplexCandidate, TiltingComplexError};
-use crate::homotopy::HomotopyHomQuotient;
+use super::{Interrupt, TiltingComplexCandidate};
+use crate::control::WorkMeter;
+use crate::homotopy::{HomSpaceMemo, HomotopyHomQuotient};
 
-/// Exact Homotopy-block work for one tilting construction.
+/// Exact homotopy-block work for one tilting construction.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TiltingComplexWork {
     hom_spaces_built: usize,
@@ -11,9 +12,9 @@ pub struct TiltingComplexWork {
 
 impl TiltingComplexWork {
     accessor_methods! {
-        /// The number of Homotopy quotients built from linear algebra.
+        /// The number of homotopy quotients built from linear algebra.
         pub hom_spaces_built() -> usize = |this| this.hom_spaces_built;
-        /// The number of Homotopy quotients reused from exact cached data.
+        /// The number of homotopy quotients reused from exact cached data.
         pub hom_spaces_reused() -> usize = |this| this.hom_spaces_reused;
     }
 }
@@ -73,33 +74,40 @@ impl HomotopyBlockCache {
 
 pub(super) struct HomotopyBlockBuilder<'a> {
     inherited: Option<&'a HomotopyBlockCache>,
+    pub(super) meter: &'a mut WorkMeter,
     cache: HomotopyBlockCache,
     pub(super) work: TiltingComplexWork,
     pub(super) budget_built: usize,
     charge_budget: bool,
     changed: Option<usize>,
+    homs: HomSpaceMemo,
 }
 
 impl<'a> HomotopyBlockBuilder<'a> {
-    pub(super) fn cold() -> HomotopyBlockBuilder<'static> {
-        HomotopyBlockBuilder {
-            inherited: None,
-            cache: HomotopyBlockCache::default(),
-            work: TiltingComplexWork::default(),
-            budget_built: 0,
-            charge_budget: false,
-            changed: None,
-        }
+    pub(super) fn cold(meter: &'a mut WorkMeter) -> HomotopyBlockBuilder<'a> {
+        HomotopyBlockBuilder::inheriting(None, meter)
     }
 
-    pub(super) fn with_inherited(inherited: &'a HomotopyBlockCache) -> HomotopyBlockBuilder<'a> {
+    pub(super) fn with_inherited(
+        inherited: &'a HomotopyBlockCache,
+        meter: &'a mut WorkMeter,
+    ) -> HomotopyBlockBuilder<'a> {
+        HomotopyBlockBuilder::inheriting(Some(inherited), meter)
+    }
+
+    fn inheriting(
+        inherited: Option<&'a HomotopyBlockCache>,
+        meter: &'a mut WorkMeter,
+    ) -> HomotopyBlockBuilder<'a> {
         HomotopyBlockBuilder {
-            inherited: Some(inherited),
+            inherited,
+            meter,
             cache: HomotopyBlockCache::default(),
             work: TiltingComplexWork::default(),
             budget_built: 0,
             charge_budget: false,
             changed: None,
+            homs: HomSpaceMemo::default(),
         }
     }
 
@@ -122,22 +130,25 @@ impl<'a> HomotopyBlockBuilder<'a> {
         target: usize,
         degree: i32,
     ) -> bool {
-        if self
-            .changed
-            .is_some_and(|changed| source == changed || target == changed)
-        {
-            return self
-                .cache
-                .matching(candidate, source, target, degree)
-                .is_some();
-        }
         self.cache
             .matching(candidate, source, target, degree)
-            .or_else(|| {
-                self.inherited
-                    .and_then(|cache| cache.matching(candidate, source, target, degree))
-            })
+            .or_else(|| self.inherited_block(candidate, source, target, degree))
             .is_some()
+    }
+
+    /// The inherited block, unless the summand at either end changed.
+    fn inherited_block(
+        &self,
+        candidate: &TiltingComplexCandidate,
+        source: usize,
+        target: usize,
+        degree: i32,
+    ) -> Option<HomotopyHomQuotient> {
+        let changed = self
+            .changed
+            .is_some_and(|changed| source == changed || target == changed);
+        let inherited = self.inherited.filter(|_| !changed)?;
+        inherited.matching(candidate, source, target, degree)
     }
 
     pub(super) fn blocks_needed(
@@ -156,21 +167,12 @@ impl<'a> HomotopyBlockBuilder<'a> {
         source: usize,
         target: usize,
         degree: i32,
-    ) -> Result<HomotopyHomQuotient, TiltingComplexError> {
+    ) -> Result<HomotopyHomQuotient, Interrupt> {
         if let Some(quotient) = self.cache.matching(candidate, source, target, degree) {
             self.work.hom_spaces_reused += 1;
             return Ok(quotient);
         }
-        if let Some(quotient) = self
-            .changed
-            .filter(|&changed| source == changed || target == changed)
-            .is_none()
-            .then(|| {
-                self.inherited
-                    .and_then(|cache| cache.matching(candidate, source, target, degree))
-            })
-            .flatten()
-        {
+        if let Some(quotient) = self.inherited_block(candidate, source, target, degree) {
             self.work.hom_spaces_reused += 1;
             self.cache.blocks.push(CachedHomotopyBlock {
                 source,
@@ -180,10 +182,12 @@ impl<'a> HomotopyBlockBuilder<'a> {
             });
             return Ok(quotient);
         }
+        self.meter.charge()?;
         let quotient = quotient(
             &candidate.summands()[source],
             &candidate.summands()[target],
             degree,
+            &mut self.homs,
         )?;
         self.work.hom_spaces_built += 1;
         if self.charge_budget {

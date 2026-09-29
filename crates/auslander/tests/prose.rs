@@ -155,6 +155,13 @@ const TOMBSTONES: &[Tombstone] = &[
             "docs/certified-bound-quiver.md",
         ],
     },
+    Tombstone {
+        text: "Write checkpoints for the page with explicit budgets",
+        reason: "ceilings and work counters are u64 on every host, so the \
+                 page reads the default u64::MAX budget",
+        scope: Scope::Everywhere,
+        allowed: &[SELF, "CHANGELOG.md"],
+    },
 ];
 
 /// Every tracked source and documentation file this gate scans.
@@ -271,10 +278,9 @@ fn no_retired_claim_reappears() {
 /// Every tombstone fires through the checker.
 ///
 /// Each entry runs through `violations` at a synthetic path that no allowlist
-/// covers, which is the property that matters: the gate catches the string
-/// where it should not appear. Scanning the real tree cannot test that. This
-/// file holds every tombstone in its own table, so such a scan always finds
-/// them and never fails.
+/// covers. The gate catches the string where it should not appear. Scanning
+/// the real tree cannot test that. This file holds every tombstone in its own
+/// table, so such a scan always finds them and never fails.
 #[test]
 fn every_tombstone_is_caught_by_the_checker() {
     for stone in TOMBSTONES {

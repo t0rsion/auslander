@@ -22,7 +22,7 @@ fn verified_census() -> VerifiedCensus {
     portable.verify(CensusVerifyLimits::default()).unwrap()
 }
 
-fn config(chunk_size: usize, budget: HomologicalStreamBudget) -> HomologicalStreamConfig {
+fn config(chunk_size: u64, budget: HomologicalStreamBudget) -> HomologicalStreamConfig {
     HomologicalStreamConfig {
         chunk_limits: HomologicalBatchStreamLimits {
             max_live_sources: chunk_size,
@@ -90,7 +90,7 @@ fn verified_cut_resumes_from_the_first_unfinished_representative() {
             1,
             HomologicalStreamBudget {
                 max_sources: 1,
-                max_work_units: usize::MAX,
+                max_work_units: u64::MAX,
             },
         ),
         None,
@@ -130,7 +130,7 @@ fn resumed_checkpoint_replays_partial_source_budget_chunk() {
             2,
             HomologicalStreamBudget {
                 max_sources: 1,
-                max_work_units: usize::MAX,
+                max_work_units: u64::MAX,
             },
         ),
         None,
@@ -151,7 +151,7 @@ fn resumed_checkpoint_replays_partial_source_budget_chunk() {
     complete
         .verify(HomologicalStreamVerifyLimits::default())
         .unwrap();
-    assert_eq!(complete.chunk_sizes().len(), complete.work().chunks);
+    assert_eq!(complete.chunk_sizes().len() as u64, complete.work().chunks);
 }
 
 #[test]
@@ -164,7 +164,7 @@ fn resume_rejects_ceilings_below_committed_work() {
             1,
             HomologicalStreamBudget {
                 max_sources: 1,
-                max_work_units: usize::MAX,
+                max_work_units: u64::MAX,
             },
         ),
         None,
@@ -182,7 +182,7 @@ fn resume_rejects_ceilings_below_committed_work() {
         verified.resume(
             HomologicalStreamBudget {
                 max_sources: 0,
-                max_work_units: usize::MAX,
+                max_work_units: u64::MAX,
             },
             None,
         ),
@@ -198,7 +198,7 @@ fn resume_rejects_ceilings_below_committed_work() {
     assert!(matches!(
         verified.resume(
             HomologicalStreamBudget {
-                max_sources: usize::MAX,
+                max_sources: u64::MAX,
                 max_work_units: committed_work - 1,
             },
             None,
@@ -220,7 +220,7 @@ fn work_ceiling_cuts_without_committing_an_incomplete_chunk() {
         config(
             1,
             HomologicalStreamBudget {
-                max_sources: usize::MAX,
+                max_sources: u64::MAX,
                 max_work_units: 1,
             },
         ),

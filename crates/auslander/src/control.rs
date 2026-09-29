@@ -118,3 +118,67 @@ impl ComputationControl {
         };
     }
 }
+
+/// A cancellation request observed before a charged work unit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Cancelled;
+
+/// Checks cancellation before each work unit of one controlled computation.
+///
+/// A cancelled computation finishes at most the unit already running. A meter
+/// without a control never observes cancellation.
+#[derive(Debug, Default)]
+pub(crate) struct WorkMeter {
+    control: Option<ComputationControl>,
+    #[cfg(test)]
+    charged: usize,
+    #[cfg(test)]
+    cancel_at: Option<usize>,
+}
+
+impl WorkMeter {
+    /// A meter that observes the cancellation flag of `control`.
+    pub(crate) fn new(control: &ComputationControl) -> WorkMeter {
+        WorkMeter {
+            control: Some(control.clone()),
+            #[cfg(test)]
+            charged: 0,
+            #[cfg(test)]
+            cancel_at: None,
+        }
+    }
+
+    /// A meter that cancels `control` when `units` work units have run.
+    #[cfg(test)]
+    pub(crate) fn cancelling_at(control: &ComputationControl, units: usize) -> WorkMeter {
+        WorkMeter {
+            cancel_at: Some(units),
+            ..WorkMeter::new(control)
+        }
+    }
+
+    /// Starts one work unit, or reports cancellation without starting it.
+    pub(crate) fn charge(&mut self) -> Result<(), Cancelled> {
+        let Some(control) = &self.control else {
+            return Ok(());
+        };
+        #[cfg(test)]
+        if self.cancel_at == Some(self.charged) {
+            control.cancel();
+        }
+        if control.is_cancelled() {
+            return Err(Cancelled);
+        }
+        #[cfg(test)]
+        {
+            self.charged += 1;
+        }
+        Ok(())
+    }
+
+    /// The number of started work units.
+    #[cfg(test)]
+    pub(crate) fn charged(&self) -> usize {
+        self.charged
+    }
+}

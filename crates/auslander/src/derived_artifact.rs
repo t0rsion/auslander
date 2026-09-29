@@ -12,14 +12,23 @@ mod serialization;
 mod verification;
 
 /// The portable derived-equivalence schema identifier.
-pub const DERIVED_ARTIFACT_SCHEMA: &str = "auslander-derived-v1";
+///
+/// Replay reduces each mutation cone to a minimal complex.
+pub const DERIVED_ARTIFACT_SCHEMA: &str = "auslander-derived-v2";
+
+/// The schema whose replay kept unreduced mutation cones. Its recipes can
+/// replay to different complexes, so the parsers reject it.
+pub(crate) const OBSOLETE_DERIVED_ARTIFACT_SCHEMA: &str = "auslander-derived-v1";
 
 pub use errors::ArtifactError;
 pub use model::{ArtifactMutation, ArtifactParseLimits, ArtifactVerifyLimits, DerivedArtifact};
+pub(crate) use parser::read_mutation;
+pub(crate) use serialization::push_mutation;
 pub use verification::{
     ArtifactVerificationCut, ArtifactVerificationOutcome, VerifiedDerivedArtifact,
     verify_derived_artifact,
 };
+pub(crate) use verification::{declared_limits, exceeded, replay_recipe};
 
 #[cfg(test)]
 #[path = "derived_artifact_parts/tests.rs"]

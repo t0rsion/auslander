@@ -16,21 +16,28 @@ pub const HOMOLOGICAL_STREAM_ENGINE_ID: &str = "raw-arrow-matrix-v1+homological-
 ///
 /// `max_sources` counts representatives from source zero. `max_work_units`
 /// counts source resolutions, target covers, Hom spaces, projective-factor
-/// spaces, and Ext tables. A zero ceiling cuts before the first chunk.
+/// spaces, and Ext tables. A zero ceiling cuts before the first chunk. The
+/// default is [`HomologicalStreamBudget::UNBOUNDED`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct HomologicalStreamBudget {
-    /// The greatest number of representative rows that may be committed.
-    pub max_sources: usize,
+    /// The maximum number of representative rows that may be committed.
+    pub max_sources: u64,
     /// The greatest cumulative primitive-work count that may be committed.
-    pub max_work_units: usize,
+    pub max_work_units: u64,
+}
+
+impl HomologicalStreamBudget {
+    /// Both ceilings at `u64::MAX`. A checkpoint stores this budget with
+    /// the same 20 digits on every host.
+    pub const UNBOUNDED: Self = Self {
+        max_sources: u64::MAX,
+        max_work_units: u64::MAX,
+    };
 }
 
 impl Default for HomologicalStreamBudget {
     fn default() -> Self {
-        Self {
-            max_sources: usize::MAX,
-            max_work_units: usize::MAX,
-        }
+        Self::UNBOUNDED
     }
 }
 
@@ -50,13 +57,13 @@ pub struct HomologicalStreamParseLimits {
     pub max_input_bytes: usize,
     /// The greatest byte count of the embedded complete census JSON.
     pub max_census_bytes: usize,
-    /// The greatest number of stored rows.
+    /// The maximum number of stored rows.
     pub max_rows: usize,
-    /// The greatest number of Ext entries in one row.
+    /// The maximum number of Ext entries in one row.
     pub max_ext_dimensions: usize,
-    /// The greatest number of numeric values in the document.
+    /// The maximum number of numeric values in the document.
     pub max_numeric_values: usize,
-    /// The greatest number of array elements in the document.
+    /// The maximum number of array elements in the document.
     pub max_array_elements: usize,
     /// The greatest digit count in one unsigned integer.
     pub max_integer_digits: usize,
@@ -91,7 +98,7 @@ pub struct HomologicalStreamVerifyLimits {
     /// The greatest Ext degree accepted by one checkpoint.
     pub max_degree: usize,
     /// The greatest cumulative primitive-work count replayed.
-    pub max_work_units: usize,
+    pub max_work_units: u64,
 }
 
 impl Default for HomologicalStreamVerifyLimits {
@@ -112,9 +119,9 @@ pub enum HomologicalStreamCutReason {
     /// Cancellation was observed before the next chunk.
     Cancelled,
     /// The next source would exceed the absolute source ceiling.
-    SourceLimit { limit: usize },
+    SourceLimit { limit: u64 },
     /// The next chunk would exceed the absolute primitive-work ceiling.
-    WorkLimit { limit: usize },
+    WorkLimit { limit: u64 },
 }
 
 display_error! { HomologicalStreamCutReason {
@@ -137,7 +144,7 @@ pub enum HomologicalStreamPortableStatus {
 /// A parser, verification, or replay error for a homological checkpoint.
 #[derive(Clone, Debug)]
 pub enum HomologicalStreamPortableError {
-    /// A declared parser container or scalar limit was exceeded.
+    /// A declared parser container or scalar limit is exceeded.
     ParseLimit {
         path: String,
         used: usize,
@@ -166,10 +173,10 @@ pub enum HomologicalStreamPortableError {
     /// A declared checkpoint workload exceeds the caller's ceiling.
     VerificationLimit {
         field: &'static str,
-        declared: usize,
-        limit: usize,
+        declared: u64,
+        limit: u64,
     },
-    /// A serialized counter does not fit the host `usize` type.
+    /// A sum of serialized counters overflows `u64`.
     CounterOverflow { field: &'static str },
     /// A checkpoint field is inconsistent with the complete census.
     DomainMismatch { field: String },
@@ -182,16 +189,18 @@ pub enum HomologicalStreamPortableError {
     /// A resume ceiling is below work already committed to the checkpoint.
     ResumeBudget {
         field: &'static str,
-        committed: usize,
-        limit: usize,
+        committed: u64,
+        limit: u64,
     },
     /// A reconstructed representative is not a module.
     Module(ModuleError),
     /// A homological chunk failed.
     Batch(HomologicalBatchError),
-    /// The existing stream invariant failed.
+    /// An internal stream invariant failed.
     Stream(super::HomologicalBatchStreamError),
 }
+
+from_portable_error!(HomologicalStreamPortableError, header);
 
 display_error! { HomologicalStreamPortableError {
     Self::ParseLimit { path, used, limit } => "portable field {path} needs {used} units, limit {limit}";
@@ -206,7 +215,7 @@ display_error! { HomologicalStreamPortableError {
     Self::Census(error) => "embedded census rejected: {error}";
     Self::CensusNotComplete => "homological stream requires a complete embedded census";
     Self::VerificationLimit { field, declared, limit } => "homological verification field {field} has {declared}, limit {limit}";
-    Self::CounterOverflow { field } => "homological stream field {field} does not fit usize";
+    Self::CounterOverflow { field } => "homological stream field {field} overflows u64";
     Self::DomainMismatch { field } => "homological stream domain field {field} is inconsistent";
     Self::CountMismatch { field } => "homological stream field {field} is inconsistent";
     Self::ReplayMismatch { field } => "homological stream replay differs at {field}";
@@ -258,7 +267,7 @@ pub struct VerifiedHomologicalStream {
 
 impl VerifiedHomologicalStream {
     accessor_methods! {
-        /// The canonical checkpoint that was verified.
+        /// The verified canonical checkpoint.
         pub portable() -> &HomologicalStreamPortable = |this| &this.portable;
         /// The complete census reconstructed during verification.
         pub census() -> &crate::census::VerifiedCensus = |this| &this.census;

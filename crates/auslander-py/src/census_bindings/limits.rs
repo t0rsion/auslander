@@ -14,11 +14,11 @@ impl PyCensusLimits {
     #[pyo3(signature = (max_candidates=None, max_representatives=None, max_assignments=None, max_isomorphism_checks=None, max_work_units=None, *, retention=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
-        max_candidates: Option<usize>,
-        max_representatives: Option<usize>,
-        max_assignments: Option<usize>,
-        max_isomorphism_checks: Option<usize>,
-        max_work_units: Option<usize>,
+        max_candidates: Option<u64>,
+        max_representatives: Option<u64>,
+        max_assignments: Option<u64>,
+        max_isomorphism_checks: Option<u64>,
+        max_work_units: Option<u64>,
         retention: Option<&str>,
     ) -> PyResult<Self> {
         let defaults = CensusLimits::default();
@@ -44,31 +44,31 @@ impl PyCensusLimits {
 
     /// Maximum raw candidates fully processed.
     #[getter]
-    fn max_candidates(&self) -> usize {
+    fn max_candidates(&self) -> u64 {
         self.inner.max_candidates
     }
 
     /// Maximum retained representatives.
     #[getter]
-    fn max_representatives(&self) -> usize {
+    fn max_representatives(&self) -> u64 {
         self.inner.max_representatives
     }
 
     /// Maximum retained duplicate assignments.
     #[getter]
-    fn max_assignments(&self) -> usize {
+    fn max_assignments(&self) -> u64 {
         self.inner.max_assignments
     }
 
     /// Maximum completed isomorphism comparisons.
     #[getter]
-    fn max_isomorphism_checks(&self) -> usize {
+    fn max_isomorphism_checks(&self) -> u64 {
         self.inner.max_isomorphism_checks
     }
 
     /// Maximum candidate and comparison work units.
     #[getter]
-    fn max_work_units(&self) -> usize {
+    fn max_work_units(&self) -> u64 {
         self.inner.max_work_units
     }
 
@@ -96,6 +96,13 @@ fn parse_retention(value: Option<&str>, default: CensusRetention) -> PyResult<Ce
     }
 }
 
+/// Converts a `u64` ceiling to a parser array ceiling, saturating at `usize::MAX`.
+///
+/// Saturation is exact: no array on the host holds more than `usize::MAX` elements.
+fn saturating_usize(value: u64) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
+}
+
 /// A caller-owned ceiling for parsing and replaying a portable census file.
 #[pyclass(name = "CensusVerifyLimits", module = "auslander", frozen)]
 #[derive(Clone, Copy)]
@@ -114,8 +121,8 @@ impl PyCensusVerifyLimits {
         max_certificate_bytes: Option<usize>,
         max_dimensions: Option<usize>,
         max_dimension: Option<usize>,
-        max_representatives: Option<usize>,
-        max_assignments: Option<usize>,
+        max_representatives: Option<u64>,
+        max_assignments: Option<u64>,
         max_coordinate_values: Option<usize>,
         max_witness_matrices: Option<usize>,
         max_witness_rows: Option<usize>,
@@ -127,9 +134,9 @@ impl PyCensusVerifyLimits {
         max_string_bytes: Option<usize>,
         max_vertices: Option<usize>,
         max_coordinates: Option<usize>,
-        max_candidates: Option<usize>,
-        max_isomorphism_checks: Option<usize>,
-        max_work_units: Option<usize>,
+        max_candidates: Option<u64>,
+        max_isomorphism_checks: Option<u64>,
+        max_work_units: Option<u64>,
     ) -> Self {
         let defaults = CensusVerifyLimits::default();
         let parse = defaults.parse;
@@ -141,8 +148,10 @@ impl PyCensusVerifyLimits {
                         .unwrap_or(parse.max_certificate_bytes),
                     max_dimensions: max_dimensions.unwrap_or(parse.max_dimensions),
                     max_dimension: max_dimension.unwrap_or(parse.max_dimension),
-                    max_representatives: max_representatives.unwrap_or(parse.max_representatives),
-                    max_assignments: max_assignments.unwrap_or(parse.max_assignments),
+                    max_representatives: max_representatives
+                        .map_or(parse.max_representatives, saturating_usize),
+                    max_assignments: max_assignments
+                        .map_or(parse.max_assignments, saturating_usize),
                     max_coordinate_values: max_coordinate_values
                         .unwrap_or(parse.max_coordinate_values),
                     max_witness_matrices: max_witness_matrices
@@ -194,13 +203,13 @@ impl PyCensusVerifyLimits {
 
     /// The greatest number of retained representatives.
     #[getter]
-    fn max_representatives(&self) -> usize {
+    fn max_representatives(&self) -> u64 {
         self.inner.max_representatives
     }
 
     /// The greatest number of retained assignments.
     #[getter]
-    fn max_assignments(&self) -> usize {
+    fn max_assignments(&self) -> u64 {
         self.inner.max_assignments
     }
 
@@ -272,19 +281,19 @@ impl PyCensusVerifyLimits {
 
     /// The greatest replayed candidate count.
     #[getter]
-    fn max_candidates(&self) -> usize {
+    fn max_candidates(&self) -> u64 {
         self.inner.max_candidates
     }
 
     /// The greatest replayed isomorphism-check count.
     #[getter]
-    fn max_isomorphism_checks(&self) -> usize {
+    fn max_isomorphism_checks(&self) -> u64 {
         self.inner.max_isomorphism_checks
     }
 
     /// The greatest replay work count.
     #[getter]
-    fn max_work_units(&self) -> usize {
+    fn max_work_units(&self) -> u64 {
         self.inner.max_work_units
     }
 

@@ -1,13 +1,14 @@
 use crate::quiver::ArrowId;
 
-/// Rejected input for the checked gentle-tree classification.
+/// Rejected input for gentle recognition or the gentle-tree classification.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GentleError {
-    /// The quiver has no vertices, so its underlying graph is not a tree.
+    /// The quiver has no vertices.
     EmptyQuiver,
-    /// Arrow `arrow` is a loop at `vertex`.
+    /// Arrow `arrow` is a loop at `vertex`. Only the tree route rejects loops.
     Loop { arrow: ArrowId, vertex: u32 },
-    /// Arrows `first` and `second` form a parallel undirected edge.
+    /// Arrows `first` and `second` form a parallel undirected edge. Only the
+    /// tree route rejects them.
     MultipleEdges {
         first: ArrowId,
         second: ArrowId,
@@ -15,7 +16,7 @@ pub enum GentleError {
     },
     /// The loopless simple graph is disconnected.
     Disconnected { vertices: usize, reachable: usize },
-    /// A connected simple graph has a cycle.
+    /// A connected simple graph has a cycle. Only the tree route rejects it.
     Cycle { vertices: usize, edges: usize },
     /// Reduced relation `relation` has more than one term, so the ideal is not
     /// monomial in the checked presentation.
@@ -38,7 +39,7 @@ pub enum GentleError {
 }
 
 display_error! { error GentleError {
-    Self::EmptyQuiver => "the quiver has no vertices, so its underlying graph is not a tree";
+    Self::EmptyQuiver => "the quiver has no vertices";
     Self::Loop { arrow, vertex } => "arrow {} is a loop at vertex {vertex}", arrow.0;
     Self::MultipleEdges { first, second, endpoints } => "arrows {} and {} are parallel on the undirected edge {} -- {}", first.0, second.0, endpoints.0, endpoints.1;
     Self::Disconnected { vertices, reachable } => "the underlying graph reaches {reachable} of {vertices} vertices";

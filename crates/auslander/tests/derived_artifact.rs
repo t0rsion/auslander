@@ -140,7 +140,7 @@ fn cancellation_returns_a_typed_unverified_cut() {
         verify_derived_artifact(&text, ArtifactVerifyLimits::default(), &control).unwrap();
     assert!(matches!(
         outcome,
-        ArtifactVerificationOutcome::Cut(ArtifactVerificationCut::Cancelled {
+        ArtifactVerificationOutcome::Stopped(ArtifactVerificationCut::Cancelled {
             completed_mutations: 0
         })
     ));

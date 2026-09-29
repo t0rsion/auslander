@@ -13,9 +13,12 @@ mod cone;
 mod hom;
 
 pub use chain::{ChainHomotopy, ChainMap, ChainMapError};
+pub(crate) use chain::{rebase_morphism, same_complex_data};
+pub(crate) use complex::block_matrices;
 pub use complex::{
     BoundedComplex, BoundedComplexError, DegreeRange, DegreeRangeError, direct_sum_complexes,
 };
+pub(crate) use hom::HomSpaceMemo;
 pub use hom::{
     ChainHomQuotient, ChainHomSpace, DegreeComplex, Homotopy, HomotopyHom, HomotopyHomQuotient,
 };

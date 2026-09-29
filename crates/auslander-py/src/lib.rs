@@ -34,6 +34,7 @@ use auslander::ar;
 use auslander::arquiver::{
     self, ArQuiver, ArQuiverError, ArrowValuation, CatalogProvenance, IndecomposableCatalog,
 };
+use auslander::artifact::{ArtifactKind, read_kind};
 use auslander::basic::{AddClosureWitness, BasicDecomposition, BasicError, ProjectiveSupport};
 use auslander::batch::{
     HomologicalBatch, HomologicalBatchError, HomologicalBatchLimits, HomologicalBatchWork,
@@ -146,8 +147,8 @@ use auslander::tilting::{
     TiltingError, TiltingLimits,
 };
 use auslander::tilting_complex::{
-    ApproximationDirection, CertifiedTiltingComplex, TiltingComplexLimits, TiltingComplexResult,
-    TiltingMutationOutcome, left_tilting_mutation, regular_tilting_complex, right_tilting_mutation,
+    ApproximationDirection, CertifiedSiltingComplex, CertifiedTiltingComplex, TiltingComplexLimits,
+    TiltingComplexResult, TiltingMutationOutcome, regular_tilting_complex, silting_mutation,
 };
 use auslander::verify;
 
@@ -158,12 +159,15 @@ mod atlas_bindings;
 mod batch_bindings;
 mod catalog_bindings;
 mod census_bindings;
+mod classification_bindings;
 mod complex_bindings;
 mod complex_maps_bindings;
 mod coordinate_bindings;
 mod decomposition_bindings;
+mod derived_atlas_bindings;
 mod derived_complex_bindings;
 mod derived_hom_bindings;
+mod derived_invariant_bindings;
 mod derived_transport_bindings;
 mod dynkin_bindings;
 mod equivalence_bindings;
@@ -171,6 +175,7 @@ mod error_bindings;
 mod ext_algebra_bindings;
 mod ext_classes_bindings;
 mod field_quiver_bindings;
+mod gentle_bindings;
 mod graph_bindings;
 mod hochschild_bindings;
 mod homological_checkpoint_bindings;
@@ -193,12 +198,15 @@ pub(crate) use atlas_bindings::*;
 pub(crate) use batch_bindings::*;
 pub(crate) use catalog_bindings::*;
 pub(crate) use census_bindings::*;
+pub(crate) use classification_bindings::*;
 pub(crate) use complex_bindings::*;
 pub(crate) use complex_maps_bindings::*;
 pub(crate) use coordinate_bindings::*;
 pub(crate) use decomposition_bindings::*;
+pub(crate) use derived_atlas_bindings::*;
 pub(crate) use derived_complex_bindings::*;
 pub(crate) use derived_hom_bindings::*;
+pub(crate) use derived_invariant_bindings::*;
 pub(crate) use derived_transport_bindings::*;
 pub(crate) use dynkin_bindings::*;
 pub(crate) use equivalence_bindings::*;
@@ -206,6 +214,7 @@ pub(crate) use error_bindings::*;
 pub(crate) use ext_algebra_bindings::*;
 pub(crate) use ext_classes_bindings::*;
 pub(crate) use field_quiver_bindings::*;
+pub(crate) use gentle_bindings::*;
 pub(crate) use graph_bindings::*;
 pub(crate) use hochschild_bindings::*;
 pub(crate) use homological_checkpoint_bindings::*;
@@ -397,7 +406,28 @@ fn auslander_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
         PyIncompleteEquivalenceGraph,
         PyVerifiedDerivedArtifact,
         PyIncompleteArtifactVerification,
+        PyInvariantLimits,
+        PyInvariantReading,
+        PyDerivedInvariants,
+        PyDerivedInequivalenceWitness,
+        PyGentleKey,
+        PyGentleDerivedInvariant,
+        PyGentleThread,
+        PyGentlePresentation,
+        PyAlgebraIsomorphism,
+        PyClassificationLimits,
+        PyDerivedMerge,
+        PyDerivedClass,
+        PyClassSeparation,
+        PyUnresolvedPair,
+        PyMutationWalk,
+        PyDerivedClassification,
+        PyDerivedAtlasArtifact,
     );
+    m.add(
+        "DERIVED_INVARIANT_KINDS",
+        pyo3::types::PyTuple::new(m.py(), invariant_kind_names())?,
+    )?;
     add_exceptions!(m;
         TauAgreementUnknown,
         BudgetExhaustedError,
@@ -413,6 +443,7 @@ fn auslander_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
         DynkinError,
         NonzeroIdealError,
         NotDynkinError,
+        NotGentleError,
     );
     add_functions!(m;
         catalog,
@@ -436,6 +467,11 @@ fn auslander_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
         verify_self_ext_locus_artifact,
         build_derived_artifact,
         py_verify_derived_artifact,
+        py_header_kind,
+        py_connected_gentle_keys,
+        py_connected_gentle_algebras,
+        classify_derived,
+        py_verify_derived_atlas,
     );
     Ok(())
 }

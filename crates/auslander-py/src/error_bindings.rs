@@ -582,3 +582,13 @@ create_exception!(
      representation finite. `euclidean` is the EuclideanType of that graph when \
      it has one and None otherwise."
 );
+
+create_exception!(
+    auslander,
+    NotGentleError,
+    PyValueError,
+    "Gentle recognition rejected the stored presentation. `kind` names the \
+     failed condition, such as \"non_quadratic\" or \"incoming_degree\". The \
+     rejection proves nothing about the algebra: an isomorphic presentation \
+     can be gentle."
+);

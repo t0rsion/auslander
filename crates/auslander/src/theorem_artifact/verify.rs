@@ -63,19 +63,19 @@ fn check_work_limits(
     representatives: usize,
     limits: SelfExtLocusVerifyLimits,
 ) -> Result<(), SelfExtLocusArtifactError> {
+    let representatives = representatives as u64;
     check_limit(
         "representatives",
         representatives,
-        limits.max_representatives,
+        limits.max_representatives as u64,
     )?;
-    let span = artifact
-        .last_degree
-        .checked_sub(artifact.first_degree)
+    let span = (artifact.last_degree as u64)
+        .checked_sub(artifact.first_degree as u64)
         .and_then(|value| value.checked_add(1))
         .ok_or(SelfExtLocusArtifactError::CounterOverflow {
             field: "degree span",
         })?;
-    check_limit("degree_span", span, limits.max_degree_span)?;
+    check_limit("degree_span", span, limits.max_degree_span as u64)?;
     let ext_spaces =
         representatives
             .checked_mul(span)
@@ -87,8 +87,8 @@ fn check_work_limits(
 
 fn check_limit(
     field: &'static str,
-    declared: usize,
-    limit: usize,
+    declared: u64,
+    limit: u64,
 ) -> Result<(), SelfExtLocusArtifactError> {
     if declared > limit {
         Err(SelfExtLocusArtifactError::VerificationLimit {

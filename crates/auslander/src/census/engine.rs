@@ -173,7 +173,7 @@ fn classify_candidate(
             CandidateComparison::Cut(reason) => return Ok(Some(reason)),
         }
     }
-    if state.representatives.len() >= state.limits.max_representatives {
+    if state.representatives.len() as u64 >= state.limits.max_representatives {
         return Ok(Some(CensusCutReason::RepresentativeLimit {
             limit: state.limits.max_representatives,
         }));
@@ -256,7 +256,7 @@ fn commit_duplicate(
         advance_cursor(state)?;
         return Ok(CandidateComparison::Classified);
     }
-    if state.assignments.len() >= state.limits.max_assignments {
+    if state.assignments.len() as u64 >= state.limits.max_assignments {
         return Ok(CandidateComparison::Cut(CensusCutReason::AssignmentLimit {
             limit: state.limits.max_assignments,
         }));
@@ -344,7 +344,12 @@ fn update_progress(control: Option<&ComputationControl>, state: &CensusState, co
     } else {
         ProgressStage::Census
     };
-    control.update(stage, state.work_units, state.limits.max_work_units);
+    let saturate = |value: u64| usize::try_from(value).unwrap_or(usize::MAX);
+    control.update(
+        stage,
+        saturate(state.work_units),
+        saturate(state.limits.max_work_units),
+    );
 }
 
 fn coordinates_at(domain: &CensusDomain, cursor: u128) -> Vec<Fp> {
@@ -409,7 +414,7 @@ fn build_module_from_values(domain: &CensusDomain, values: &[u64]) -> Result<Mod
 }
 
 fn verify_state_data(state: &CensusState) -> bool {
-    let Ok(cursor) = usize::try_from(state.cursor) else {
+    let Ok(cursor) = u64::try_from(state.cursor) else {
         return false;
     };
     state.cursor <= state.domain.raw_space_size()
@@ -426,9 +431,10 @@ fn accepted_count_is_consistent(state: &CensusState) -> bool {
             .representatives
             .len()
             .checked_add(state.assignments.len())
-            .is_some_and(|count| state.accepted_modules == count),
+            .is_some_and(|count| state.accepted_modules == count as u64),
         CensusRetention::RepresentativesOnly => {
-            state.assignments.is_empty() && state.accepted_modules >= state.representatives.len()
+            state.assignments.is_empty()
+                && state.accepted_modules >= state.representatives.len() as u64
         }
     }
 }
@@ -477,7 +483,7 @@ fn replay_complete(state: &CensusState) -> bool {
 
 fn replay_prefix(state: &CensusState) -> bool {
     let mut limits = state.limits;
-    let Ok(cursor) = usize::try_from(state.cursor) else {
+    let Ok(cursor) = u64::try_from(state.cursor) else {
         return false;
     };
     limits.max_candidates = cursor;

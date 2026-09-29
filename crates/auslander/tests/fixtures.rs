@@ -23,14 +23,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use auslander::algebra::{
-    Algebra, an_with_relations, cyclic_nakayama, dual_numbers, kronecker, linear_an,
-    linear_nakayama, monomial_algebra, path_algebra, radical_square_zero_cycle, truncated_poly,
+    Algebra, an_with_relations, commutative_square, cyclic_nakayama, dual_numbers, kronecker,
+    linear_an, linear_nakayama, monomial_algebra, path_algebra, radical_square_zero_cycle,
+    truncated_poly,
 };
 use auslander::almost_split::{AlmostSplitOutcome, AlmostSplitWitness, almost_split};
+use auslander::ar::tau;
 use auslander::arquiver::ar_quiver;
+use auslander::control::ComputationControl;
 use auslander::decompose::{Certificate, decompose};
+use auslander::derived_classification::{ClassificationLimits, classify_derived};
 use auslander::ext::{ext_table, global_dimension};
 use auslander::field::PrimeField;
+use auslander::gentle::connected_gentle_algebras;
 use auslander::indec::IndecomposableModule;
 use auslander::module::{Module, direct_sum};
 use auslander::monomial::MonomialIdeal;
@@ -438,7 +443,7 @@ fn gentle_branch_a_0_1_b_1_2_c_1_3_with_ab_zero() {
     );
 }
 
-// Mirrors the Ext table example in the repo README. Keep the two in sync.
+// Mirrors the Ext table example in docs/guide.md. Keep the two in sync.
 #[test]
 fn readme_ext_table_example() {
     let field = PrimeField::new(5).unwrap();
@@ -448,7 +453,7 @@ fn readme_ext_table_example() {
     assert_eq!(ext_table(&s0, &s2, 4).unwrap(), vec![0, 0, 1, 0, 0]);
 }
 
-// Mirrors the decomposition example in the repo README. Keep the two in sync.
+// Mirrors the decomposition example in docs/guide.md. Keep the two in sync.
 #[test]
 fn readme_decomposition_example() {
     let field = PrimeField::new(32003).unwrap();
@@ -465,7 +470,7 @@ fn readme_decomposition_example() {
     );
 }
 
-// Mirrors the AR-layer example in the repo README. Keep the two in sync.
+// Mirrors the AR-layer example in docs/guide.md. Keep the two in sync.
 #[test]
 fn readme_ar_example() {
     let field = PrimeField::new(5).unwrap();
@@ -486,4 +491,27 @@ fn readme_ar_example() {
     let quiver = ar_quiver(&algebra).unwrap();
     assert_eq!(quiver.vertices().len(), 3);
     assert_eq!(quiver.arrows().len(), 4);
+}
+
+// Mirrors the module example in the repo README. Keep the two in sync.
+#[test]
+fn readme_commutative_square_example() {
+    let algebra = commutative_square(PrimeField::new(5).unwrap());
+    assert_eq!(algebra.dim(), 9);
+    let s0 = Module::simple(&algebra, 0);
+    let s3 = Module::simple(&algebra, 3);
+    assert_eq!(projective_dimension(&s0, 5), Bounded::Exact(2));
+    assert_eq!(ext_table(&s0, &s3, 3).unwrap(), vec![0, 0, 1, 0]);
+    assert_eq!(tau(&s0).unwrap().dim_vector(), [1, 1, 1, 0]);
+}
+
+// Mirrors the Rust derived classification example in the repo README. Keep the
+// two in sync.
+#[test]
+fn readme_derived_classification_example() {
+    let family = connected_gentle_algebras(3, PrimeField::new(2).unwrap()).unwrap();
+    let limits = ClassificationLimits::with_walk_vertices(8);
+    let result = classify_derived(&family, &limits, &ComputationControl::new()).unwrap();
+    assert_eq!((family.len(), result.classes().len()), (77, 30));
+    assert!(result.unresolved().is_empty());
 }

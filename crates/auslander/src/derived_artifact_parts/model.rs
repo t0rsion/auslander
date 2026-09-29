@@ -10,6 +10,10 @@ pub struct ArtifactMutation {
 }
 
 impl ArtifactMutation {
+    pub(crate) fn new(direction: ApproximationDirection, summand: usize) -> ArtifactMutation {
+        ArtifactMutation { direction, summand }
+    }
+
     accessor_methods! {
         /// The mutation direction.
         pub direction() -> ApproximationDirection = |this| this.direction;
@@ -25,7 +29,7 @@ pub struct ArtifactParseLimits {
     pub max_input_bytes: usize,
     /// The greatest byte count for either embedded completion certificate.
     pub max_certificate_bytes: usize,
-    /// The greatest number of stored mutation steps.
+    /// The maximum number of stored mutation steps.
     pub max_mutations: usize,
     /// The greatest digit count in one unsigned integer.
     pub max_integer_digits: usize,
@@ -48,18 +52,26 @@ pub struct ArtifactVerifyLimits {
     /// Parser and allocation ceilings.
     pub parse: ArtifactParseLimits,
     /// The greatest accepted tilting Hom-space limit.
-    pub max_hom_spaces: usize,
+    pub max_hom_spaces: u64,
     /// The greatest accepted target endomorphism dimension limit.
-    pub max_endo_dimension: usize,
+    pub max_endo_dimension: u64,
     /// The greatest accepted target radical-product limit.
-    pub max_radical_products: usize,
+    pub max_radical_products: u64,
     /// The greatest accepted target path limit.
-    pub max_paths: usize,
+    pub max_paths: u64,
     /// The greatest accepted target relation-term limit.
-    pub max_relation_terms: usize,
+    pub max_relation_terms: u64,
     /// The greatest accepted completion step limit.
-    pub max_completion_steps: usize,
-    /// The greatest number of charged verifier work units.
+    pub max_completion_steps: u64,
+    /// The greatest accepted completion working-basis limit.
+    pub max_completion_basis: u64,
+    /// The greatest accepted completion word-length limit.
+    pub max_completion_word_len: u64,
+    /// The greatest accepted completion origin-term limit.
+    pub max_completion_origin_terms: u64,
+    /// The greatest accepted completion ambiguity limit.
+    pub max_completion_ambiguities: u64,
+    /// The maximum number of charged verifier work units.
     pub max_work_units: usize,
 }
 
@@ -74,6 +86,10 @@ impl Default for ArtifactVerifyLimits {
             max_paths: target.max_paths,
             max_relation_terms: target.max_relation_terms,
             max_completion_steps: target.completion.max_steps,
+            max_completion_basis: target.completion.max_basis,
+            max_completion_word_len: target.completion.max_word_len,
+            max_completion_origin_terms: target.completion.max_origin_terms,
+            max_completion_ambiguities: target.completion.max_ambiguities,
             max_work_units: 1_000_000,
         }
     }

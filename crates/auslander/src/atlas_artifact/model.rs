@@ -7,10 +7,12 @@ use crate::atlas::{
     MultiplicityOutcome,
 };
 use crate::certificate::Certificate;
+use crate::portable::{
+    fingerprint, open_header, push_ascii, push_escaped, push_list, push_numbers, seal,
+};
 
 use super::errors::CatalogAtlasArtifactError;
 use super::parser::RawArtifact;
-use super::serialization::{fingerprint, push_usizes};
 use super::{
     CATALOG_ATLAS_ARTIFACT_ENGINE, CATALOG_ATLAS_ARTIFACT_KIND, CATALOG_ATLAS_ARTIFACT_SCHEMA,
 };
@@ -22,23 +24,23 @@ pub struct CatalogAtlasArtifactParseLimits {
     pub max_input_bytes: usize,
     /// The greatest decoded certificate byte count.
     pub max_certificate_bytes: usize,
-    /// The greatest number of catalog entries.
+    /// The maximum number of catalog entries.
     pub max_catalog_entries: usize,
-    /// The greatest number of target-dimension entries.
+    /// The maximum number of target-dimension entries.
     pub max_dimensions: usize,
     /// The greatest target or entry dimension at one vertex.
     pub max_dimension: usize,
-    /// The greatest number of Ext rows.
+    /// The maximum number of Ext rows.
     pub max_ext_rows: usize,
-    /// The greatest number of Ext dimensions in one row.
+    /// The maximum number of Ext dimensions in one row.
     pub max_ext_degrees: usize,
-    /// The greatest number of multiplicity result rows.
+    /// The maximum number of multiplicity result rows.
     pub max_result_rows: usize,
-    /// The greatest number of multiplicity values in one row.
+    /// The maximum number of multiplicity values in one row.
     pub max_multiplicity_values: usize,
-    /// The greatest number of numeric values in the document.
+    /// The maximum number of numeric values in the document.
     pub max_numeric_values: usize,
-    /// The greatest number of array elements in the document.
+    /// The maximum number of array elements in the document.
     pub max_array_elements: usize,
     /// The greatest digit count in one unsigned integer.
     pub max_integer_digits: usize,
@@ -71,9 +73,9 @@ impl Default for CatalogAtlasArtifactParseLimits {
 pub struct CatalogAtlasArtifactVerifyLimits {
     /// Limits applied by the portable parser.
     pub parse: CatalogAtlasArtifactParseLimits,
-    /// The greatest number of algebra vertices to reconstruct.
+    /// The maximum number of algebra vertices to reconstruct.
     pub max_vertices: usize,
-    /// The greatest number of quiver arrows to reconstruct.
+    /// The maximum number of quiver arrows to reconstruct.
     pub max_arrows: usize,
     /// The greatest algebra basis dimension to reconstruct.
     pub max_algebra_dimension: usize,
@@ -84,25 +86,25 @@ pub struct CatalogAtlasArtifactVerifyLimits {
     /// The greatest inclusive Ext degree bound.
     pub max_degree: usize,
     /// The greatest ordered-pair count for the atlas.
-    pub max_pairs: usize,
-    /// The greatest number of stored Ext cells.
-    pub max_ext_cells: usize,
-    /// The greatest number of retained resolution terms.
-    pub max_resolution_terms: usize,
-    /// The greatest number of retained multiplicity rows.
+    pub max_pairs: u64,
+    /// The maximum number of stored Ext cells.
+    pub max_ext_cells: u64,
+    /// The maximum number of retained resolution terms.
+    pub max_resolution_terms: u64,
+    /// The maximum number of retained multiplicity rows.
     pub max_result_rows: usize,
-    /// The greatest number of multiplicity values in one row.
+    /// The maximum number of multiplicity values in one row.
     pub max_multiplicity: usize,
-    /// The greatest number of multiplicity search states.
-    pub max_nodes: usize,
-    /// The greatest number of direct-sum copies permitted by the atlas.
-    pub max_materialized_summands: usize,
+    /// The maximum number of multiplicity search states.
+    pub max_nodes: u64,
+    /// The maximum number of direct-sum copies permitted by the atlas.
+    pub max_materialized_summands: u64,
     /// The greatest total materialized matrix cell count.
-    pub max_materialized_cells: usize,
+    pub max_materialized_cells: u64,
     /// The greatest total dimension of one catalog entry.
     pub max_entry_total_dimension: usize,
-    /// The greatest number of generic Ext cells replayed.
-    pub max_generic_ext_cells: usize,
+    /// The maximum number of generic Ext cells replayed.
+    pub max_generic_ext_cells: u64,
 }
 
 impl Default for CatalogAtlasArtifactVerifyLimits {
@@ -179,7 +181,7 @@ impl CatalogAtlasArtifactResultRow {
     }
 }
 
-/// Complete enumeration or a cut prefix with explicit coverage data.
+/// A complete enumeration or a cut prefix.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CatalogAtlasArtifactStatus {
     /// The full finite multiplicity enumeration was retained.
@@ -188,7 +190,7 @@ pub enum CatalogAtlasArtifactStatus {
     Cut {
         reason: MultiplicityCutReason,
         coverage: usize,
-        nodes_visited: usize,
+        nodes_visited: u64,
     },
 }
 
@@ -209,7 +211,7 @@ impl CatalogAtlasArtifactStatus {
             Self::Cut { reason, .. } => Some(*reason),
         };
         /// Iterative search states visited before a cut.
-        pub nodes_visited() -> Option<usize> = |this| match this {
+        pub nodes_visited() -> Option<u64> = |this| match this {
             Self::Complete => None,
             Self::Cut { nodes_visited, .. } => Some(*nodes_visited),
         };
@@ -247,11 +249,11 @@ impl VerifiedCatalogAtlasArtifact {
     accessor_methods! {
         /// The canonical artifact that passed replay.
         pub artifact() -> &CatalogAtlasArtifact = |this| &this.artifact;
-        /// The freshly rebuilt algebra.
+        /// The rebuilt algebra.
         pub algebra() -> &Arc<Algebra> = |this| &this.algebra;
-        /// The freshly rebuilt complete catalog.
+        /// The rebuilt complete catalog.
         pub catalog() -> &Arc<IndecomposableCatalog> = |this| &this.catalog;
-        /// The freshly rebuilt optimized atlas.
+        /// The rebuilt optimized atlas.
         pub atlas() -> &CatalogAtlas = |this| &this.atlas;
     }
 }
@@ -335,30 +337,17 @@ impl CatalogAtlasArtifact {
         text: &str,
         limits: CatalogAtlasArtifactParseLimits,
     ) -> Result<Self, CatalogAtlasArtifactError> {
-        if text.len() > limits.max_input_bytes {
-            return Err(CatalogAtlasArtifactError::ParseLimit {
-                path: "$".to_string(),
-                used: text.len(),
-                limit: limits.max_input_bytes,
-            });
-        }
         let artifact = Self::from_raw(RawArtifact::parse(text, limits)?)?;
         artifact.validate_serialized(text)
     }
 
     fn from_raw(raw: RawArtifact) -> Result<Self, CatalogAtlasArtifactError> {
-        let certificate_text =
-            String::from_utf8(raw.certificate).map_err(|_| CatalogAtlasArtifactError::Syntax {
-                byte: 0,
-                message: "embedded certificate bytes are not UTF-8".to_string(),
-            })?;
-        let certificate = Certificate::from_json(&certificate_text)?;
+        let certificate = Certificate::from_json(&raw.certificate)?;
         let provenance = provenance_from_str(&raw.provenance).ok_or_else(|| {
             CatalogAtlasArtifactError::Provenance {
                 found: raw.provenance.clone(),
             }
         })?;
-        let status = raw.status.into_status()?;
         let artifact = Self {
             certificate,
             field: raw.field,
@@ -369,17 +358,9 @@ impl CatalogAtlasArtifact {
             atlas_limits: raw.atlas_limits,
             multiplicity_limits: raw.multiplicity_limits,
             work: raw.work,
-            ext_rows: raw
-                .ext_rows
-                .into_iter()
-                .map(|row| CatalogAtlasArtifactExtRow::new(row.source, row.target, row.dimensions))
-                .collect(),
-            result_rows: raw
-                .result_rows
-                .into_iter()
-                .map(|row| CatalogAtlasArtifactResultRow::new(row.multiplicities, row.self_ext))
-                .collect(),
-            status,
+            ext_rows: raw.ext_rows,
+            result_rows: raw.result_rows,
+            status: raw.status,
             fingerprint: raw.fingerprint,
         };
         Ok(artifact)
@@ -399,11 +380,7 @@ impl CatalogAtlasArtifact {
 
     /// Serializes this artifact to byte-exact canonical JSON.
     pub fn to_canonical_json(&self) -> String {
-        let mut output = self.canonical_without_fingerprint();
-        output.push_str(",\"fingerprint\":\"");
-        output.push_str(&self.fingerprint);
-        output.push_str("\"}");
-        output
+        seal(self.canonical_without_fingerprint(), &self.fingerprint)
     }
 
     /// Whether the non-authenticating fingerprint covers the preceding fields.
@@ -412,26 +389,21 @@ impl CatalogAtlasArtifact {
     }
 
     pub(crate) fn canonical_without_fingerprint(&self) -> String {
-        let mut output = String::new();
-        output.push_str("{\"schema\":\"");
-        output.push_str(CATALOG_ATLAS_ARTIFACT_SCHEMA);
-        output.push_str("\",\"kind\":\"");
-        output.push_str(CATALOG_ATLAS_ARTIFACT_KIND);
-        output.push_str("\",\"engine\":\"");
-        output.push_str(CATALOG_ATLAS_ARTIFACT_ENGINE);
-        output.push_str("\",\"certificate\":\"");
-        super::serialization::push_escaped_string(
-            &mut output,
-            self.certificate.to_canonical_json().as_bytes(),
-        );
-        output.push_str("\",\"field\":");
+        let mut output = open_header([
+            CATALOG_ATLAS_ARTIFACT_SCHEMA,
+            CATALOG_ATLAS_ARTIFACT_KIND,
+            CATALOG_ATLAS_ARTIFACT_ENGINE,
+        ]);
+        output.push_str(",\"certificate\":");
+        push_escaped(&mut output, self.certificate.to_canonical_json().as_bytes());
+        output.push_str(",\"field\":");
         output.push_str(&self.field.to_string());
-        output.push_str(",\"provenance\":\"");
-        output.push_str(provenance_str(self.provenance));
-        output.push_str("\",\"catalog_ids\":");
-        push_usizes(&mut output, &self.catalog_ids);
+        output.push_str(",\"provenance\":");
+        push_ascii(&mut output, provenance_str(self.provenance));
+        output.push_str(",\"catalog_ids\":");
+        push_numbers(&mut output, &self.catalog_ids);
         output.push_str(",\"target_dimensions\":");
-        push_usizes(&mut output, &self.target_dimensions);
+        push_numbers(&mut output, &self.target_dimensions);
         output.push_str(",\"max_degree\":");
         output.push_str(&self.max_degree.to_string());
         output.push_str(",\"atlas_limits\":");
@@ -440,31 +412,25 @@ impl CatalogAtlasArtifact {
         super::serialization::push_multiplicity_limits(&mut output, self.multiplicity_limits);
         output.push_str(",\"work\":");
         super::serialization::push_work(&mut output, self.work);
-        output.push_str(",\"ext_rows\":[");
-        for (index, row) in self.ext_rows.iter().enumerate() {
-            if index != 0 {
-                output.push(',');
-            }
+        output.push_str(",\"ext_rows\":");
+        push_list(&mut output, &self.ext_rows, |output, row| {
             output.push_str("{\"source\":");
             output.push_str(&row.source.to_string());
             output.push_str(",\"target\":");
             output.push_str(&row.target.to_string());
             output.push_str(",\"dimensions\":");
-            push_usizes(&mut output, &row.dimensions);
+            push_numbers(output, &row.dimensions);
             output.push('}');
-        }
-        output.push_str("],\"result_rows\":[");
-        for (index, row) in self.result_rows.iter().enumerate() {
-            if index != 0 {
-                output.push(',');
-            }
+        });
+        output.push_str(",\"result_rows\":");
+        push_list(&mut output, &self.result_rows, |output, row| {
             output.push_str("{\"multiplicities\":");
-            push_usizes(&mut output, &row.multiplicities);
+            push_numbers(output, &row.multiplicities);
             output.push_str(",\"self_ext\":");
-            push_usizes(&mut output, &row.self_ext);
+            push_numbers(output, &row.self_ext);
             output.push('}');
-        }
-        output.push_str("],\"status\":");
+        });
+        output.push_str(",\"status\":");
         super::serialization::push_status(&mut output, &self.status);
         output
     }
@@ -496,7 +462,7 @@ fn status_from_outcome(outcome: &MultiplicityOutcome) -> CatalogAtlasArtifactSta
     }
 }
 
-fn provenance_str(value: CatalogProvenance) -> &'static str {
+pub(crate) fn provenance_str(value: CatalogProvenance) -> &'static str {
     match value {
         CatalogProvenance::Nakayama => "nakayama",
         CatalogProvenance::DynkinZeroIdeal => "dynkin_zero_ideal",
@@ -510,44 +476,5 @@ pub(super) fn provenance_from_str(value: &str) -> Option<CatalogProvenance> {
         "dynkin_zero_ideal" => Some(CatalogProvenance::DynkinZeroIdeal),
         "gentle_tree" => Some(CatalogProvenance::GentleTree),
         _ => None,
-    }
-}
-
-impl super::parser::RawStatus {
-    fn into_status(self) -> Result<CatalogAtlasArtifactStatus, CatalogAtlasArtifactError> {
-        if self.kind == "complete" {
-            if self.coverage.is_some() || self.nodes_visited.is_some() || self.reason.is_some() {
-                return Err(CatalogAtlasArtifactError::CountMismatch {
-                    field: "status.complete".to_string(),
-                });
-            }
-            return Ok(CatalogAtlasArtifactStatus::Complete);
-        }
-        if self.kind != "cut" {
-            return Err(CatalogAtlasArtifactError::Syntax {
-                byte: 0,
-                message: "status kind must be complete or cut".to_string(),
-            });
-        }
-        let reason = self
-            .reason
-            .ok_or_else(|| CatalogAtlasArtifactError::CountMismatch {
-                field: "status.reason".to_string(),
-            })?;
-        let coverage = self
-            .coverage
-            .ok_or_else(|| CatalogAtlasArtifactError::CountMismatch {
-                field: "status.coverage".to_string(),
-            })?;
-        let nodes_visited =
-            self.nodes_visited
-                .ok_or_else(|| CatalogAtlasArtifactError::CountMismatch {
-                    field: "status.nodes_visited".to_string(),
-                })?;
-        Ok(CatalogAtlasArtifactStatus::Cut {
-            reason,
-            coverage,
-            nodes_visited,
-        })
     }
 }

@@ -1,4 +1,4 @@
-/// A portable value with a freshly reconstructed algebra and live census state.
+/// A portable value with a reconstructed algebra and live census state.
 #[derive(Clone, Debug)]
 pub struct VerifiedCensus {
     portable: CensusPortable,
@@ -8,9 +8,9 @@ pub struct VerifiedCensus {
 
 impl VerifiedCensus {
     accessor_methods! {
-        /// The canonical portable value that was verified.
+        /// The verified canonical portable value.
         pub portable() -> &CensusPortable = |this| &this.portable;
-        /// The freshly reconstructed census request.
+        /// The reconstructed census request.
         pub census() -> &Census = |this| &this.census;
         /// The replay-verified complete result or cut checkpoint.
         pub outcome() -> &CensusOutcome = |this| &this.outcome;
@@ -40,7 +40,7 @@ impl VerifiedCensus {
 /// A rejected portable census value or verification attempt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CensusPortableError {
-    /// A declared parser container or scalar limit was exceeded.
+    /// A declared parser container or scalar limit is exceeded.
     ParseLimit {
         path: String,
         used: usize,
@@ -83,14 +83,16 @@ pub enum CensusPortableError {
     /// A declared verification workload exceeds the caller's ceiling.
     VerificationLimit {
         field: &'static str,
-        declared: usize,
-        limit: usize,
+        declared: u64,
+        limit: u64,
     },
-    /// A serialized counter does not fit the host's `usize` type.
+    /// A serialized counter does not fit `u64`.
     CounterOverflow { field: &'static str },
     /// Failed in-memory outcomes are not durable checkpoints.
     FailedOutcome,
 }
+
+from_portable_error!(CensusPortableError, header);
 
 display_error! { CensusPortableError {
     Self::ParseLimit { path, used, limit } => "portable field {path} needs {used} units, limit {limit}";
@@ -112,7 +114,7 @@ display_error! { CensusPortableError {
     Self::CountMismatch { field } => "census count field {field} is inconsistent";
     Self::ReplayMismatch { field } => "census replay differs at {field}";
     Self::VerificationLimit { field, declared, limit } => "census verification field {field} has {declared}, limit {limit}";
-    Self::CounterOverflow { field } => "census counter field {field} does not fit usize";
+    Self::CounterOverflow { field } => "census counter field {field} does not fit u64";
     Self::FailedOutcome => "failed census outcomes are not portable checkpoints";
 } }
 
@@ -134,8 +136,8 @@ from_variants! { CensusPortableError {
 
 fn check_limit(
     field: &'static str,
-    declared: usize,
-    limit: usize,
+    declared: u64,
+    limit: u64,
 ) -> Result<(), CensusPortableError> {
     if declared > limit {
         return Err(CensusPortableError::VerificationLimit {
@@ -152,12 +154,12 @@ fn portable_domain(
     portable: &CensusPortable,
     limits: &CensusVerifyLimits,
 ) -> Result<CensusDomain, CensusPortableError> {
-    let vertices = algebra.quiver().num_vertices() as usize;
-    check_limit("vertices", vertices, limits.max_vertices)?;
+    let vertices = u64::from(algebra.quiver().num_vertices());
+    check_limit("vertices", vertices, limits.max_vertices as u64)?;
     check_limit(
         "dimensions",
-        portable.dimensions.len(),
-        limits.parse.max_dimensions,
+        portable.dimensions.len() as u64,
+        limits.parse.max_dimensions as u64,
     )?;
     let dimension = portable
         .dimensions
@@ -165,11 +167,15 @@ fn portable_domain(
         .copied()
         .max()
         .unwrap_or_default();
-    check_limit("dimension", dimension, limits.max_dimension)?;
+    check_limit("dimension", dimension as u64, limits.max_dimension as u64)?;
     let coordinate_count = checked_coordinate_count(algebra, &portable.dimensions)?;
-    check_limit("coordinate_count", coordinate_count, limits.max_coordinates)?;
+    check_limit(
+        "coordinate_count",
+        coordinate_count,
+        limits.max_coordinates as u64,
+    )?;
     let domain = CensusDomain::new(algebra, portable.dimensions.clone())?;
-    if portable.coordinate_count != coordinate_count {
+    if portable.coordinate_count as u64 != coordinate_count {
         return Err(CensusPortableError::DomainMismatch {
             field: "coordinate_count".to_string(),
         });
@@ -187,19 +193,21 @@ fn portable_domain(
     Ok(domain)
 }
 
+/// The coordinate count of `dimensions`, in `u64` so that the count and
+/// its limit check agree on every host.
 fn checked_coordinate_count(
     algebra: &Algebra,
     dimensions: &[usize],
-) -> Result<usize, CensusPortableError> {
+) -> Result<u64, CensusPortableError> {
     if dimensions.len() != algebra.quiver().num_vertices() as usize {
         return Err(CensusPortableError::DomainMismatch {
             field: "dimensions".to_string(),
         });
     }
-    let mut total = 0usize;
+    let mut total = 0u64;
     for (index, &(source, target)) in algebra.quiver().arrows().iter().enumerate() {
-        let rows = dimensions[source as usize];
-        let columns = dimensions[target as usize];
+        let rows = dimensions[source as usize] as u64;
+        let columns = dimensions[target as usize] as u64;
         let entries =
             rows.checked_mul(columns)
                 .ok_or_else(|| CensusPortableError::DomainMismatch {
@@ -255,87 +263,6 @@ fn portable_witness(
     Morphism::new(source, target, maps).map_err(CensusPortableError::Witness)
 }
 
-fn push_escaped_string(output: &mut String, bytes: &[u8]) {
-    for &byte in bytes {
-        match byte {
-            b'"' => output.push_str("\\\""),
-            b'\\' => output.push_str("\\\\"),
-            _ => output.push(byte as char),
-        }
-    }
-}
-
-fn push_decimal_string(output: &mut String, value: u128) {
-    output.push('"');
-    output.push_str(&value.to_string());
-    output.push('"');
-}
-
-fn push_limits(output: &mut String, limits: CensusLimits) {
-    output.push_str("{\"max_candidates\":");
-    output.push_str(&limits.max_candidates.to_string());
-    output.push_str(",\"max_representatives\":");
-    output.push_str(&limits.max_representatives.to_string());
-    output.push_str(",\"max_assignments\":");
-    output.push_str(&limits.max_assignments.to_string());
-    output.push_str(",\"max_isomorphism_checks\":");
-    output.push_str(&limits.max_isomorphism_checks.to_string());
-    output.push_str(",\"max_work_units\":");
-    output.push_str(&limits.max_work_units.to_string());
-    output.push('}');
-}
-
-fn push_counts(
-    output: &mut String,
-    candidates: usize,
-    accepted_modules: usize,
-    rejected_candidates: usize,
-    isomorphism_checks: usize,
-) {
-    output.push_str("{\"candidates\":");
-    output.push_str(&candidates.to_string());
-    output.push_str(",\"accepted_modules\":");
-    output.push_str(&accepted_modules.to_string());
-    output.push_str(",\"rejected_candidates\":");
-    output.push_str(&rejected_candidates.to_string());
-    output.push_str(",\"isomorphism_checks\":");
-    output.push_str(&isomorphism_checks.to_string());
-    output.push('}');
-}
-
-fn push_usizes<T: std::fmt::Display>(output: &mut String, values: &[T]) {
-    output.push('[');
-    for (index, value) in values.iter().enumerate() {
-        if index != 0 {
-            output.push(',');
-        }
-        output.push_str(&value.to_string());
-    }
-    output.push(']');
-}
-
-fn push_witness(output: &mut String, witness: &[Vec<Vec<u64>>]) {
-    output.push('[');
-    for (vertex, rows) in witness.iter().enumerate() {
-        if vertex != 0 {
-            output.push(',');
-        }
-        push_rows(output, rows);
-    }
-    output.push(']');
-}
-
-fn push_rows(output: &mut String, rows: &[Vec<u64>]) {
-    output.push('[');
-    for (index, row) in rows.iter().enumerate() {
-        if index != 0 {
-            output.push(',');
-        }
-        push_usizes(output, row);
-    }
-    output.push(']');
-}
-
 fn push_status(output: &mut String, status: &CensusPortableStatus) {
     match status {
         CensusPortableStatus::Complete => output.push_str("{\"kind\":\"complete\"}"),
@@ -382,32 +309,11 @@ fn push_cut_reason(output: &mut String, reason: &CensusCutReason) {
         } => {
             output.push_str("\"kind\":\"unknown_isomorphism\",\"representative\":");
             output.push_str(&representative.to_string());
-            output.push_str(",\"reason\":\"");
-            push_string(output, reason);
-            output.push('"');
+            output.push_str(",\"reason\":");
+            push_ascii(output, reason);
         }
     }
     output.push('}');
-}
-
-fn push_string(output: &mut String, value: &str) {
-    assert!(
-        value.bytes().all(|byte| byte.is_ascii()
-            && !byte.is_ascii_control()
-            && byte != b'"'
-            && byte != b'\\'),
-        "portable census strings must be printable ASCII without quotes or backslashes"
-    );
-    output.push_str(value);
-}
-
-fn fingerprint(text: &str) -> String {
-    let mut value = 0xcbf29ce484222325u64;
-    for byte in text.bytes() {
-        value ^= u64::from(byte);
-        value = value.wrapping_mul(0x100000001b3);
-    }
-    format!("{value:016x}")
 }
 
 /// Parses and independently verifies one untrusted census value.

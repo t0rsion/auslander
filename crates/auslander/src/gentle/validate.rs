@@ -1,9 +1,12 @@
+use std::sync::Arc;
+
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::algebra::Algebra;
 use crate::quiver::{ArrowId, Quiver};
 
 use super::errors::GentleError;
+use super::presentation::GentlePresentation;
 
 /// The checked tree and the quadratic monomial relations used by enumeration.
 pub(crate) struct ValidatedGentle {
@@ -11,19 +14,24 @@ pub(crate) struct ValidatedGentle {
     pub(crate) forbidden: FxHashSet<(ArrowId, ArrowId)>,
 }
 
-/// Checks the reduced presentation and returns the tree adjacency data.
-pub(crate) fn validate(algebra: &Algebra) -> Result<ValidatedGentle, GentleError> {
+/// Checks a gentle tree: general recognition plus the tree condition.
+///
+/// The tree check runs between the relation check and the quiver checks of
+/// [`GentlePresentation::new`]. That order fixes which error an input with
+/// several failures reports.
+pub(crate) fn validate(algebra: &Arc<Algebra>) -> Result<ValidatedGentle, GentleError> {
     let forbidden = reduced_quadratic_relations(algebra)?;
     let neighbours = simple_tree(algebra.quiver())?;
-    check_degrees(algebra.quiver())?;
-    check_continuations(algebra.quiver(), &forbidden)?;
+    GentlePresentation::from_relations(algebra, &forbidden)?;
     Ok(ValidatedGentle {
         neighbours,
         forbidden,
     })
 }
 
-fn reduced_quadratic_relations(
+/// The ordered pairs `(a, b)` with `a·b` a reduced relation, or the first
+/// reduced relation that is not a quadratic monomial.
+pub(crate) fn reduced_quadratic_relations(
     algebra: &Algebra,
 ) -> Result<FxHashSet<(ArrowId, ArrowId)>, GentleError> {
     let mut forbidden = FxHashSet::default();
@@ -44,6 +52,17 @@ fn reduced_quadratic_relations(
         forbidden.insert((word[0], word[1]));
     }
     Ok(forbidden)
+}
+
+/// Checks connectivity, degrees, and the continuation conditions, in that
+/// order.
+pub(crate) fn check_gentle_quiver(
+    quiver: &Quiver,
+    forbidden: &FxHashSet<(ArrowId, ArrowId)>,
+) -> Result<(), GentleError> {
+    check_connected(quiver)?;
+    check_degrees(quiver)?;
+    check_continuations(quiver, forbidden)
 }
 
 fn simple_tree(quiver: &Quiver) -> Result<Vec<Vec<(u32, ArrowId)>>, GentleError> {
@@ -73,7 +92,7 @@ fn simple_tree(quiver: &Quiver) -> Result<Vec<Vec<(u32, ArrowId)>>, GentleError>
         neighbours[source as usize].push((target, arrow));
         neighbours[target as usize].push((source, arrow));
     }
-    check_connected(&neighbours)?;
+    check_connected(quiver)?;
     if edges.len() != vertices.saturating_sub(1) {
         return Err(GentleError::Cycle {
             vertices,
@@ -83,24 +102,33 @@ fn simple_tree(quiver: &Quiver) -> Result<Vec<Vec<(u32, ArrowId)>>, GentleError>
     Ok(neighbours)
 }
 
-fn check_connected(neighbours: &[Vec<(u32, ArrowId)>]) -> Result<(), GentleError> {
-    let mut seen = vec![false; neighbours.len()];
-    let mut stack = vec![0usize];
+fn check_connected(quiver: &Quiver) -> Result<(), GentleError> {
+    let vertices = quiver.num_vertices() as usize;
+    if vertices == 0 {
+        return Err(GentleError::EmptyQuiver);
+    }
+    let mut seen = vec![false; vertices];
+    let mut stack = vec![0u32];
     seen[0] = true;
     while let Some(vertex) = stack.pop() {
-        for &(next, _) in &neighbours[vertex] {
-            let next = next as usize;
-            if !seen[next] {
-                seen[next] = true;
-                stack.push(next);
+        let arrows = quiver
+            .arrows_from(vertex)
+            .iter()
+            .chain(quiver.arrows_to(vertex));
+        for &arrow in arrows {
+            for next in [quiver.source(arrow), quiver.target(arrow)] {
+                if !seen[next as usize] {
+                    seen[next as usize] = true;
+                    stack.push(next);
+                }
             }
         }
     }
     let reachable = seen.iter().filter(|&&present| present).count();
-    (reachable == neighbours.len())
+    (reachable == vertices)
         .then_some(())
         .ok_or(GentleError::Disconnected {
-            vertices: neighbours.len(),
+            vertices,
             reachable,
         })
 }

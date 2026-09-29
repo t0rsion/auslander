@@ -4,7 +4,7 @@ use crate::ext::ExtError;
 /// A rejected self-Ext locus artifact or verification attempt.
 #[derive(Clone, Debug)]
 pub enum SelfExtLocusArtifactError {
-    /// A declared parser container or scalar limit was exceeded.
+    /// A declared parser container or scalar limit is exceeded.
     ParseLimit {
         path: String,
         used: usize,
@@ -35,8 +35,8 @@ pub enum SelfExtLocusArtifactError {
     /// A declared verification workload exceeds the caller's ceiling.
     VerificationLimit {
         field: &'static str,
-        declared: usize,
-        limit: usize,
+        declared: u64,
+        limit: u64,
     },
     /// A verification counter overflowed.
     CounterOverflow { field: &'static str },
@@ -45,6 +45,8 @@ pub enum SelfExtLocusArtifactError {
     /// Independent Ext calculation disagrees with the claimed locus.
     LocusMismatch { representative: usize },
 }
+
+from_portable_error!(SelfExtLocusArtifactError);
 
 display_error! { SelfExtLocusArtifactError {
     Self::ParseLimit { path, used, limit } => "theorem artifact field {path} needs {used} units, limit {limit}";
@@ -60,7 +62,7 @@ display_error! { SelfExtLocusArtifactError {
     Self::DegreeOutsideCheckpoint { degree, checkpoint } => "self-Ext degree {degree} exceeds checkpoint degree {checkpoint}";
     Self::RepresentativeIndex { index } => "self-Ext locus index {index} is unordered, repeated, or outside the census";
     Self::VerificationLimit { field, declared, limit } => "theorem verification field {field} has {declared}, limit {limit}";
-    Self::CounterOverflow { field } => "theorem verification field {field} overflows usize";
+    Self::CounterOverflow { field } => "theorem verification field {field} overflows u64";
     Self::Ext(error) => "independent self-Ext calculation failed: {error}";
     Self::LocusMismatch { representative } => "independent self-Ext calculation disagrees at representative {representative}";
 } }

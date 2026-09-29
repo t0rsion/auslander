@@ -19,14 +19,14 @@ use super::{present_target, verify_target};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TargetLimits {
     /// Maximum dimension of `End_A(T)` before its multiplication table is built.
-    pub max_endo_dimension: usize,
+    pub max_endo_dimension: u64,
     /// Maximum calls to [`EndoAlgebra::multiply`] while building radical
     /// powers and their idempotent corners.
-    pub max_radical_products: usize,
+    pub max_radical_products: u64,
     /// Maximum enumerated paths of lengths `2..=lambda`.
-    pub max_paths: usize,
+    pub max_paths: u64,
     /// Maximum nonzero coefficients copied into the relation list.
-    pub max_relation_terms: usize,
+    pub max_relation_terms: u64,
     /// Limits for the final bound quiver completion.
     pub completion: CompletionLimits,
 }
@@ -67,11 +67,11 @@ pub enum TargetCutStage {
 pub struct TargetBudgetCut {
     pub stage: TargetCutStage,
     /// Units already reserved before the rejection.
-    pub used: usize,
+    pub used: u64,
     /// Units requested by the rejected reservation.
-    pub requested: usize,
+    pub requested: u64,
     /// The corresponding limit.
-    pub limit: usize,
+    pub limit: u64,
 }
 
 /// Why a target construction stopped at a caller limit.
@@ -79,7 +79,7 @@ pub struct TargetBudgetCut {
 pub enum TargetCutReason {
     /// A radical-product, path, or relation-term budget stopped the run.
     Budget(TargetBudgetCut),
-    /// The existing completion engine stopped the run.
+    /// The completion engine stopped the run.
     Completion(TruncationDiagnostics),
 }
 
@@ -125,13 +125,13 @@ impl TargetPresentationCut {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TargetWork {
     /// Dimension of `End_A(T)` before its multiplication table is built.
-    pub endo_dimension: usize,
+    pub endo_dimension: u64,
     /// Radical-power and corner products.
-    pub radical_products: usize,
+    pub radical_products: u64,
     /// Enumerated paths of lengths `2..=lambda`.
-    pub paths: usize,
+    pub paths: u64,
     /// Nonzero coefficients in the input relation list.
-    pub relation_terms: usize,
+    pub relation_terms: u64,
 }
 
 /// Exact evidence that the tilting target is not split over the base field.

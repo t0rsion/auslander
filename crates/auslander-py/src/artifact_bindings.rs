@@ -113,6 +113,7 @@ pub(crate) fn artifact_error(error: ArtifactError) -> PyErr {
         | ArtifactError::Syntax { .. }
         | ArtifactError::Certificate { .. }
         | ArtifactError::Schema { .. }
+        | ArtifactError::ObsoleteSchema { .. }
         | ArtifactError::FingerprintShape
         | ArtifactError::FingerprintMismatch
         | ArtifactError::Mathematical(_)) => value_error(error),
@@ -133,46 +134,53 @@ pub(crate) fn artifact_initial_tilting(
     }
 }
 
-pub(crate) fn named_tilting_mutation(
-    tilting: &CertifiedTiltingComplex,
+/// One irreducible silting mutation, as an artifact recipe step replays it.
+pub(crate) fn named_silting_mutation(
+    complex: &CertifiedSiltingComplex,
     direction: &str,
     summand: usize,
     position: usize,
 ) -> PyResult<TiltingMutationOutcome> {
-    let limits = TiltingComplexLimits::default();
-    match direction {
-        "left" => left_tilting_mutation(tilting, summand, limits),
-        "right" => right_tilting_mutation(tilting, summand, limits),
+    let direction = match direction {
+        "left" => ApproximationDirection::Left,
+        "right" => ApproximationDirection::Right,
         _ => {
             return Err(PyValueError::new_err(format!(
                 "mutation {position} direction must be 'left' or 'right'"
             )));
         }
-    }
-    .map_err(|error| DefectError::new_err(error.to_string()))
+    };
+    silting_mutation(complex, summand, direction, TiltingComplexLimits::default())
+        .map_err(|error| DefectError::new_err(error.to_string()))
 }
 
-pub(crate) fn require_tilting_mutation(
+pub(crate) fn require_silting_mutation(
     outcome: TiltingMutationOutcome,
     position: usize,
-) -> PyResult<CertifiedTiltingComplex> {
-    let TiltingMutationOutcome::Tilting(value) = outcome else {
-        return Err(PyValueError::new_err(format!(
-            "mutation {position} did not produce a tilting complex: {outcome:?}"
-        )));
-    };
-    Ok(*value)
+) -> PyResult<CertifiedSiltingComplex> {
+    match outcome {
+        TiltingMutationOutcome::Tilting(value) => Ok(value.into_silting()),
+        TiltingMutationOutcome::Silting(value) => Ok(*value),
+        outcome => Err(PyValueError::new_err(format!(
+            "mutation {position} did not produce a silting complex: {outcome:?}"
+        ))),
+    }
 }
 
+/// Replays `mutations` from `tilting`. A step can pass through a silting
+/// complex that is not tilting, and the last complex must be tilting.
 pub(crate) fn apply_named_mutations(
-    mut tilting: CertifiedTiltingComplex,
+    tilting: CertifiedTiltingComplex,
     mutations: &[(String, usize)],
 ) -> PyResult<CertifiedTiltingComplex> {
+    let mut complex = tilting.into_silting();
     for (position, (direction, summand)) in mutations.iter().enumerate() {
-        let outcome = named_tilting_mutation(&tilting, direction, *summand, position)?;
-        tilting = require_tilting_mutation(outcome, position)?;
+        let outcome = named_silting_mutation(&complex, direction, *summand, position)?;
+        complex = require_silting_mutation(outcome, position)?;
     }
-    Ok(tilting)
+    complex
+        .to_tilting()
+        .ok_or_else(|| PyValueError::new_err("the mutations end at a complex that is not tilting"))
 }
 
 pub(crate) fn artifact_edge(
@@ -201,7 +209,7 @@ pub(crate) fn build_derived_artifact_inner(
         .map_err(artifact_error)
 }
 
-/// Build a canonical derived artifact from a checked left or right mutation recipe.
+/// Builds a canonical derived artifact from a checked left or right mutation recipe.
 #[pyfunction]
 #[pyo3(signature = (algebra, mutations, field=None))]
 pub(crate) fn build_derived_artifact(
@@ -214,7 +222,7 @@ pub(crate) fn build_derived_artifact(
     py.allow_threads(|| build_derived_artifact_inner(&algebra, &mutations))
 }
 
-/// Verify one untrusted `auslander-derived-v1` artifact.
+/// Verifies one untrusted `auslander-derived-v2` artifact.
 #[pyfunction(name = "verify_derived_artifact")]
 #[pyo3(
     text_signature = "(text, control=None)",
@@ -233,8 +241,24 @@ pub(crate) fn py_verify_derived_artifact(
         ArtifactVerificationOutcome::Verified(inner) => {
             Py::new(py, PyVerifiedDerivedArtifact { inner: *inner }).map(Py::into_any)
         }
-        ArtifactVerificationOutcome::Cut(inner) => {
+        ArtifactVerificationOutcome::Stopped(inner) => {
             Py::new(py, PyIncompleteArtifactVerification { inner }).map(Py::into_any)
         }
     }
+}
+
+/// Returns the Python kind name that the header of one portable value selects.
+///
+/// `auslander::artifact::read_kind` reads the header. An unknown or obsolete
+/// schema or kind raises `ValueError` naming the value found.
+#[pyfunction(name = "_header_kind")]
+pub(crate) fn py_header_kind(text: &str) -> PyResult<&'static str> {
+    Ok(match read_kind(text).map_err(value_error)? {
+        ArtifactKind::DerivedEquivalence => "derived",
+        ArtifactKind::Census => "census",
+        ArtifactKind::HomologicalStream => "homological",
+        ArtifactKind::CatalogAtlas => "atlas",
+        ArtifactKind::SelfExtLocus => "theorem",
+        ArtifactKind::DerivedAtlas => "derived_atlas",
+    })
 }

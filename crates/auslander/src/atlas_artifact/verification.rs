@@ -67,7 +67,7 @@ fn preflight(
     check_target_budget(artifact, limits)?;
     check_atlas_limits(artifact.atlas_limits, limits)?;
     check_multiplicity_limits(artifact, limits)?;
-    let plan = WorkPlan::new(artifact.catalog_ids.len(), artifact.max_degree)?;
+    let plan = WorkPlan::new(artifact.catalog_ids.len() as u64, artifact.max_degree)?;
     check_work_budget(artifact, &plan, limits)?;
     check_rows_shape(artifact, artifact.catalog_ids.len(), plan.degrees, limits)
 }
@@ -157,20 +157,23 @@ fn check_atlas_limits(
             limits.max_materialized_cells,
         ),
     ] {
-        check_limit(field, declared, limit)?;
+        check_count(field, declared, limit)?;
     }
     Ok(())
 }
+
+/// Planned atlas work. The counts are `u64` so that an overflow and a limit
+/// check agree on every host.
 #[derive(Clone, Copy)]
 struct WorkPlan {
-    pairs: usize,
+    pairs: u64,
     degrees: usize,
-    ext_cells: usize,
-    resolution_terms: usize,
+    ext_cells: u64,
+    resolution_terms: u64,
 }
 
 impl WorkPlan {
-    fn new(entries: usize, max_degree: usize) -> Result<Self, CatalogAtlasArtifactError> {
+    fn new(entries: u64, max_degree: usize) -> Result<Self, CatalogAtlasArtifactError> {
         let pairs = entries
             .checked_mul(entries)
             .ok_or(CatalogAtlasArtifactError::Overflow { field: "pairs" })?;
@@ -180,10 +183,10 @@ impl WorkPlan {
                 field: "degree cells",
             })?;
         let ext_cells = pairs
-            .checked_mul(degrees)
+            .checked_mul(degrees as u64)
             .ok_or(CatalogAtlasArtifactError::Overflow { field: "Ext cells" })?;
         let terms_per_source =
-            degrees
+            (degrees as u64)
                 .checked_add(1)
                 .ok_or(CatalogAtlasArtifactError::Overflow {
                     field: "resolution terms",
@@ -226,7 +229,7 @@ fn check_work_budget(
             artifact.atlas_limits.max_resolution_terms,
         ),
     ] {
-        check_limit(field, planned, declared)?;
+        check_count(field, planned, declared)?;
     }
     check_work_shape(artifact, plan)
 }
@@ -236,19 +239,19 @@ fn check_caller_work_limits(
     plan: &WorkPlan,
     limits: CatalogAtlasArtifactVerifyLimits,
 ) -> Result<(), CatalogAtlasArtifactError> {
-    check_limit("pairs", plan.pairs, limits.max_pairs)?;
-    check_limit("Ext cells", plan.ext_cells, limits.max_ext_cells)?;
-    check_limit(
+    check_count("pairs", plan.pairs, limits.max_pairs)?;
+    check_count("Ext cells", plan.ext_cells, limits.max_ext_cells)?;
+    check_count(
         "generic Ext cells",
         plan.ext_cells,
         limits.max_generic_ext_cells,
     )?;
-    check_limit(
+    check_count(
         "resolution terms",
         artifact.work.resolution_terms,
         limits.max_resolution_terms,
     )?;
-    check_limit(
+    check_count(
         "atlas resolution terms",
         plan.resolution_terms,
         limits.max_resolution_terms,
@@ -259,14 +262,14 @@ fn check_work_shape(
     artifact: &CatalogAtlasArtifact,
     plan: &WorkPlan,
 ) -> Result<(), CatalogAtlasArtifactError> {
-    if artifact.ext_rows.len() != plan.pairs {
+    if artifact.ext_rows.len() as u64 != plan.pairs {
         return Err(CatalogAtlasArtifactError::CountMismatch {
             field: "ext_rows".to_string(),
         });
     }
     if artifact.work.pairs != plan.pairs
         || artifact.work.ext_cells != plan.ext_cells
-        || artifact.work.resolutions != artifact.catalog_ids.len()
+        || artifact.work.resolutions != artifact.catalog_ids.len() as u64
         || artifact.work.ext_tables != plan.pairs
         || artifact.work.resolution_terms > plan.resolution_terms
     {
@@ -281,12 +284,12 @@ fn check_multiplicity_limits(
     artifact: &CatalogAtlasArtifact,
     limits: CatalogAtlasArtifactVerifyLimits,
 ) -> Result<(), CatalogAtlasArtifactError> {
-    check_limit(
+    check_count(
         "multiplicity.max_solutions",
         artifact.multiplicity_limits.max_solutions,
-        limits.max_result_rows,
+        limits.max_result_rows as u64,
     )?;
-    check_limit(
+    check_count(
         "multiplicity.max_nodes",
         artifact.multiplicity_limits.max_nodes,
         limits.max_nodes,
@@ -298,7 +301,7 @@ fn check_multiplicity_limits(
     } = artifact.status
     {
         check_limit("status.coverage", coverage, limits.max_result_rows)?;
-        check_limit("status.nodes_visited", nodes_visited, limits.max_nodes)?;
+        check_count("status.nodes_visited", nodes_visited, limits.max_nodes)?;
     }
     Ok(())
 }
@@ -454,6 +457,14 @@ fn check_limit(
     field: &'static str,
     declared: usize,
     limit: usize,
+) -> Result<(), CatalogAtlasArtifactError> {
+    check_count(field, declared as u64, limit as u64)
+}
+
+fn check_count(
+    field: &'static str,
+    declared: u64,
+    limit: u64,
 ) -> Result<(), CatalogAtlasArtifactError> {
     if declared > limit {
         return Err(CatalogAtlasArtifactError::VerificationLimit {

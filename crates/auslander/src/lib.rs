@@ -15,6 +15,20 @@
 //! `Bounded::AtLeast`. A resolution prefix that runs out of budget ends in
 //! `ResolutionEnd::Cut` with the next syzygy known to be nonzero. Nothing
 //! truncates silently.
+//!
+//! Derived classification sorts a finite family over one field into derived
+//! equivalence classes. [`derived_invariant`] computes checked invariants of
+//! one algebra, and a [`derived_invariant::DerivedInequivalenceWitness`]
+//! separates two algebras. [`equivalence_discovery`] walks mutations, and
+//! [`algebra_isomorphism`] matches each recovered target against the family.
+//! [`derived_classification::classify_derived`] combines both sides: every
+//! pair of members is merged, separated, or typed
+//! [`derived_classification::UnresolvedPair`].
+//!
+//! Each portable artifact kind has its own parser, verifier, and error type,
+//! and [`artifact`] selects one by header. A kind lives in a top-level
+//! `*_artifact` module, or next to the type it serializes: [`census`],
+//! [`batch_stream`], and [`derived_classification`].
 
 macro_rules! accessor_methods {
     ($($(#[$attr:meta])* $vis:vis $name:ident($($argument:ident: $argument_type:ty),*) -> $output:ty = |$receiver:ident| $value:expr;)+) => {$(
@@ -44,6 +58,38 @@ macro_rules! from_variants {
             fn from(error: $source) -> Self { Self::$variant(error) }
         }
     )+};
+}
+
+/// Maps [`portable::PortableError`] onto an error with `Syntax` and
+/// `ParseLimit` variants of the same fields. With `header`, also maps
+/// `portable::HeaderMismatch` onto `Schema`, `Kind`, and `Engine` variants.
+macro_rules! from_portable_error {
+    ($target:ty, header) => {
+        from_portable_error!($target);
+        impl From<$crate::portable::HeaderMismatch> for $target {
+            fn from(error: $crate::portable::HeaderMismatch) -> Self {
+                match error {
+                    $crate::portable::HeaderMismatch::Schema { found } => Self::Schema { found },
+                    $crate::portable::HeaderMismatch::Kind { found } => Self::Kind { found },
+                    $crate::portable::HeaderMismatch::Engine { found } => Self::Engine { found },
+                }
+            }
+        }
+    };
+    ($target:ty) => {
+        impl From<$crate::portable::PortableError> for $target {
+            fn from(error: $crate::portable::PortableError) -> Self {
+                match error {
+                    $crate::portable::PortableError::Syntax { byte, message } => {
+                        Self::Syntax { byte, message }
+                    }
+                    $crate::portable::PortableError::ParseLimit { path, used, limit } => {
+                        Self::ParseLimit { path, used, limit }
+                    }
+                }
+            }
+        }
+    };
 }
 
 macro_rules! error_source {
@@ -176,10 +222,12 @@ macro_rules! verify_guard {
 }
 
 pub mod algebra;
+pub mod algebra_isomorphism;
 pub mod almost_split;
 pub mod approx;
 pub mod ar;
 pub mod arquiver;
+pub mod artifact;
 pub mod atlas;
 pub mod atlas_artifact;
 pub mod basic;
@@ -196,7 +244,9 @@ pub mod control;
 pub mod decompose;
 pub mod derived;
 pub mod derived_artifact;
+pub mod derived_classification;
 pub mod derived_hom;
+pub mod derived_invariant;
 pub mod derived_transport;
 pub mod dynkin;
 pub mod endo;
@@ -224,6 +274,7 @@ pub mod mutation;
 pub mod opposite;
 pub mod order;
 pub mod perfect;
+pub(crate) mod portable;
 pub mod profile;
 pub mod quiver;
 pub mod radical;

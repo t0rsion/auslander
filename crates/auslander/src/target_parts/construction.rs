@@ -21,7 +21,7 @@ pub(super) fn target_defect(reason: &str) -> TargetError {
 
 pub(super) fn build_radical_chain<A: CoordinateAlgebra>(
     endo: &A,
-    limit: usize,
+    limit: u64,
 ) -> Result<(Vec<DenseMat>, ProductCounter), TargetErrorOrCut> {
     let mut products = ProductCounter { used: 0, limit };
     let powers = radical_chain(endo, &mut products)?;
@@ -49,7 +49,7 @@ pub(super) fn checked_target_paths<A: CoordinateAlgebra>(
         limits.max_paths,
     )?;
     let square_dim = powers.get(1).map_or(0, DenseMat::rows);
-    if paths.count < square_dim {
+    if paths.count < square_dim as u64 {
         return Err(
             target_defect("the length-at-least-two path images do not span rad(E)^2").into(),
         );
@@ -63,10 +63,10 @@ pub(super) fn checked_target_relations(
     endo_dim: usize,
     paths: &PathBuild,
     square_dim: usize,
-    limit: usize,
-) -> Result<(Vec<Relation>, usize), TargetErrorOrCut> {
+    limit: u64,
+) -> Result<(Vec<Relation>, u64), TargetErrorOrCut> {
     let (relations, relation_terms) = target_relations(quiver, field, endo_dim, paths, limit)?;
-    if relations.len() != paths.count - square_dim {
+    if relations.len() as u64 != paths.count - square_dim as u64 {
         return Err(target_defect("the relation count disagrees with the rank of rad(E)^2").into());
     }
     Ok((relations, relation_terms))

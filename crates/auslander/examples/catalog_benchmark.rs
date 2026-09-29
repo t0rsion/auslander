@@ -220,7 +220,7 @@ fn multiplicity_limits() -> MultiplicityLimits {
 fn raw_limits(raw_space_size: u128) -> CensusLimits {
     CensusLimits {
         retention: CensusRetention::RepresentativesOnly,
-        max_candidates: usize::try_from(raw_space_size).expect("raw benchmark fits usize"),
+        max_candidates: u64::try_from(raw_space_size).expect("raw benchmark fits u64"),
         ..CensusLimits::default()
     }
 }

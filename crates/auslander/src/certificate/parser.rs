@@ -1,4 +1,7 @@
+use std::collections::BTreeSet;
+
 use super::{CertParseError, MAX_JSON_DEPTH};
+use crate::portable::{Cursor, CursorLimits, PortableError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Value {
@@ -9,10 +12,14 @@ pub(super) enum Value {
     Obj(Vec<(String, Value)>),
 }
 
-fn syntax(byte: usize, message: &str) -> CertParseError {
-    CertParseError::Syntax {
-        byte,
-        message: message.to_string(),
+impl From<PortableError> for CertParseError {
+    fn from(error: PortableError) -> Self {
+        match error {
+            PortableError::Syntax { byte, message } => CertParseError::Syntax { byte, message },
+            PortableError::ParseLimit { path, used, limit } => {
+                shape(&path, format!("needs {used} units, limit {limit}"))
+            }
+        }
     }
 }
 
@@ -24,211 +31,57 @@ pub(super) fn shape(context: &str, message: String) -> CertParseError {
 }
 
 pub(super) fn parse(text: &str) -> Result<Value, CertParseError> {
-    let bytes = text.as_bytes();
-    let mut pos = 0;
-    let value = parse_value(bytes, &mut pos, 0)?;
-    skip_ws(bytes, &mut pos);
-    if pos != bytes.len() {
-        return Err(syntax(pos, "trailing content"));
-    }
+    let mut c = Cursor::new(text, CursorLimits::NONE)?;
+    let value = parse_value(&mut c, 0)?;
+    c.end()?;
     Ok(value)
-}
-
-fn skip_ws(bytes: &[u8], pos: &mut usize) {
-    while matches!(bytes.get(*pos), Some(b' ' | b'\t' | b'\n' | b'\r')) {
-        *pos += 1;
-    }
-}
-
-fn expect(bytes: &[u8], pos: &mut usize, ch: u8) -> Result<(), CertParseError> {
-    skip_ws(bytes, pos);
-    if bytes.get(*pos) == Some(&ch) {
-        *pos += 1;
-        Ok(())
-    } else {
-        Err(syntax(*pos, &format!("expected '{}'", ch as char)))
-    }
 }
 
 /// `depth` counts the containers enclosing this value. A container that
 /// would sit deeper than [`MAX_JSON_DEPTH`] levels is rejected before the
 /// parser recurses into it.
-fn parse_value(bytes: &[u8], pos: &mut usize, depth: usize) -> Result<Value, CertParseError> {
-    skip_ws(bytes, pos);
-    match bytes.get(*pos) {
-        Some(b'{') => {
-            check_depth(pos, depth)?;
-            parse_obj(bytes, pos, depth + 1)
-        }
-        Some(b'[') => {
-            check_depth(pos, depth)?;
-            parse_arr(bytes, pos, depth + 1)
-        }
-        Some(b'"') => Ok(Value::Str(parse_string(bytes, pos)?)),
-        Some(b'0'..=b'9') => parse_num(bytes, pos),
-        Some(b't' | b'f') => parse_bool(bytes, pos),
-        _ => Err(syntax(
-            *pos,
-            "expected an object, array, string, boolean, or unsigned integer",
-        )),
+fn parse_value(c: &mut Cursor, depth: usize) -> Result<Value, CertParseError> {
+    match c.peek() {
+        Some(open @ (b'{' | b'[')) => parse_container(c, open, depth),
+        Some(b'"') => Ok(Value::Str(c.string("string")?)),
+        Some(b'0'..=b'9') => Ok(Value::Num(c.u64("number")?)),
+        Some(b't' | b'f') => Ok(Value::Bool(c.bool()?)),
+        _ => Err(c
+            .syntax("expected an object, array, string, boolean, or unsigned integer")
+            .into()),
     }
 }
 
-fn check_depth(pos: &mut usize, depth: usize) -> Result<(), CertParseError> {
-    (depth < MAX_JSON_DEPTH).then_some(()).ok_or_else(|| {
-        syntax(
-            *pos,
-            &format!("containers nest deeper than {MAX_JSON_DEPTH} levels"),
-        )
-    })
+fn parse_container(c: &mut Cursor, open: u8, depth: usize) -> Result<Value, CertParseError> {
+    if depth >= MAX_JSON_DEPTH {
+        let message = format!("containers nest deeper than {MAX_JSON_DEPTH} levels");
+        return Err(c.syntax(message).into());
+    }
+    if open == b'{' {
+        return parse_obj(c, depth + 1);
+    }
+    let items = c.array("array", usize::MAX, |c, _| parse_value(c, depth + 1))?;
+    Ok(Value::Arr(items))
 }
 
-fn parse_bool(bytes: &[u8], pos: &mut usize) -> Result<Value, CertParseError> {
-    for (literal, value) in [(&b"true"[..], true), (&b"false"[..], false)] {
-        if bytes[*pos..].starts_with(literal) {
-            *pos += literal.len();
-            return Ok(Value::Bool(value));
-        }
-    }
-    Err(syntax(*pos, "expected 'true' or 'false'"))
-}
-
-fn parse_num(bytes: &[u8], pos: &mut usize) -> Result<Value, CertParseError> {
-    let start = *pos;
-    while matches!(bytes.get(*pos), Some(b'0'..=b'9')) {
-        *pos += 1;
-    }
-    let digits = &bytes[start..*pos];
-    if digits.len() > 1 && digits[0] == b'0' {
-        return Err(syntax(start, "number has a leading zero"));
-    }
-    if matches!(bytes.get(*pos), Some(b'.' | b'e' | b'E')) {
-        return Err(syntax(*pos, "number must be an unsigned integer"));
-    }
-    std::str::from_utf8(digits)
-        .expect("digits are ASCII")
-        .parse()
-        .map(Value::Num)
-        .map_err(|_| syntax(start, "number does not fit in u64"))
-}
-
-fn parse_string(bytes: &[u8], pos: &mut usize) -> Result<String, CertParseError> {
-    expect(bytes, pos, b'"')?;
-    let start = *pos;
-    loop {
-        if bytes.get(*pos) == Some(&b'"') {
-            let text = std::str::from_utf8(&bytes[start..*pos]).expect("checked ASCII");
-            *pos += 1;
-            return Ok(text.to_string());
-        }
-        if let Some(message) = string_byte_error(bytes.get(*pos)) {
-            return Err(syntax(*pos, message));
-        }
-        *pos += 1;
-    }
-}
-
-fn string_byte_error(byte: Option<&u8>) -> Option<&'static str> {
-    match byte {
-        Some(b'\\') => Some("escape sequences are not canonical"),
-        Some(&value) => string_ascii_error(value),
-        None => Some("unterminated string"),
-    }
-}
-
-fn string_ascii_error(byte: u8) -> Option<&'static str> {
-    if byte < 0x20 {
-        Some("control character in string")
-    } else if byte >= 0x80 {
-        Some("non-ASCII character in string")
-    } else {
-        None
-    }
-}
-
-fn collection_separator(
-    bytes: &[u8],
-    pos: &mut usize,
-    close: u8,
-    expected: &str,
-) -> Result<bool, CertParseError> {
-    skip_ws(bytes, pos);
-    match bytes.get(*pos) {
-        Some(b',') => {
-            *pos += 1;
-            Ok(false)
-        }
-        Some(&value) if value == close => {
-            *pos += 1;
-            Ok(true)
-        }
-        _ => Err(syntax(*pos, expected)),
-    }
-}
-
-fn parse_nonempty_array(
-    bytes: &[u8],
-    pos: &mut usize,
-    depth: usize,
-) -> Result<Vec<Value>, CertParseError> {
-    let mut items = Vec::new();
-    loop {
-        items.push(parse_value(bytes, pos, depth)?);
-        if collection_separator(bytes, pos, b']', "expected ',' or ']'")? {
-            return Ok(items);
-        }
-    }
-}
-
-fn parse_arr(bytes: &[u8], pos: &mut usize, depth: usize) -> Result<Value, CertParseError> {
-    expect(bytes, pos, b'[')?;
-    skip_ws(bytes, pos);
-    if bytes.get(*pos) == Some(&b']') {
-        *pos += 1;
-        return Ok(Value::Arr(Vec::new()));
-    }
-    parse_nonempty_array(bytes, pos, depth).map(Value::Arr)
-}
-
-fn parse_object_pair(
-    bytes: &[u8],
-    pos: &mut usize,
-    depth: usize,
-    keys: &mut std::collections::BTreeSet<String>,
-) -> Result<(String, Value), CertParseError> {
-    skip_ws(bytes, pos);
-    let key = parse_string(bytes, pos)?;
-    if !keys.insert(key.clone()) {
-        return Err(syntax(*pos, &format!("duplicate key {key:?}")));
-    }
-    expect(bytes, pos, b':')?;
-    let value = parse_value(bytes, pos, depth)?;
-    Ok((key, value))
-}
-
-fn parse_nonempty_object(
-    bytes: &[u8],
-    pos: &mut usize,
-    depth: usize,
-) -> Result<Vec<(String, Value)>, CertParseError> {
+fn parse_obj(c: &mut Cursor, depth: usize) -> Result<Value, CertParseError> {
+    c.token(b'{')?;
     let mut pairs = Vec::new();
-    let mut keys = std::collections::BTreeSet::new();
+    let mut keys = BTreeSet::new();
+    if c.eat(b'}') {
+        return Ok(Value::Obj(pairs));
+    }
     loop {
-        pairs.push(parse_object_pair(bytes, pos, depth, &mut keys)?);
-        if collection_separator(bytes, pos, b'}', "expected ',' or '}'")? {
-            return Ok(pairs);
+        let key = c.string("object key")?;
+        if !keys.insert(key.clone()) {
+            return Err(c.syntax(format!("duplicate key {key:?}")).into());
+        }
+        c.token(b':')?;
+        pairs.push((key, parse_value(c, depth)?));
+        if !c.more(b'}')? {
+            return Ok(Value::Obj(pairs));
         }
     }
-}
-
-fn parse_obj(bytes: &[u8], pos: &mut usize, depth: usize) -> Result<Value, CertParseError> {
-    expect(bytes, pos, b'{')?;
-    skip_ws(bytes, pos);
-    if bytes.get(*pos) == Some(&b'}') {
-        *pos += 1;
-        return Ok(Value::Obj(Vec::new()));
-    }
-    parse_nonempty_object(bytes, pos, depth).map(Value::Obj)
 }
 
 /// The object's values in the order of `keys`. Rejects unknown keys and

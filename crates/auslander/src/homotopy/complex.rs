@@ -31,7 +31,7 @@ impl DegreeRange {
         pub upper() -> i32 = |this| this.upper;
         /// The number of stored degrees.
         pub len() -> usize = |this| (this.upper as i64 - this.lower as i64 + 1) as usize;
-        /// Whether this nonempty range has no degrees.
+        /// Always `false`, because a range holds at least one degree.
         pub is_empty() -> bool = |_this| false;
         /// Whether `degree` lies in this interval.
         pub contains(degree: i32) -> bool = |this| this.lower <= degree && degree <= this.upper;
@@ -293,13 +293,7 @@ impl BoundedComplex {
                 stored: self.range,
             });
         }
-        if range == self.range {
-            return Ok(self.clone());
-        }
-        let terms: Vec<Module> = (0..range.len())
-            .map(|offset| padded_term(self, range.lower + offset as i32))
-            .collect();
-        padded_complex(self, range, terms)
+        placed_complex(self, range)
     }
 
     /// Rechecks algebras, endpoints, and zero composites.
@@ -426,6 +420,21 @@ fn padded_differential(
         .unwrap_or_else(|| zero_between(source, target))
 }
 
+/// Places `complex` on `range`: zero terms pad it, and terms outside `range`
+/// are dropped without a check.
+pub(super) fn placed_complex(
+    complex: &BoundedComplex,
+    range: DegreeRange,
+) -> Result<BoundedComplex, BoundedComplexError> {
+    if range == complex.range {
+        return Ok(complex.clone());
+    }
+    let terms = (range.lower..=range.upper)
+        .map(|degree| padded_term(complex, degree))
+        .collect();
+    padded_complex(complex, range, terms)
+}
+
 pub(super) fn padded_complex(
     complex: &BoundedComplex,
     range: DegreeRange,
@@ -481,7 +490,7 @@ fn insert_block(
     }
 }
 
-pub(super) fn block_matrices(
+pub(crate) fn block_matrices(
     source_parts: &[Module],
     target_parts: &[Module],
     blocks: &[Morphism],

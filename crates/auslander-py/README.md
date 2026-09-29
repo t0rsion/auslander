@@ -5,7 +5,9 @@ kQ/I over a checked prime field, where I is an admissible ideal given by
 forbidden words or by general relations, and finite-dimensional right
 modules. The v0.9 catalog API builds complete indecomposable catalogs, caches
 ordered Ext tables, enumerates multiplicities, and replays typed artifacts.
-Paths compose left to right; arrow matrices act on row vectors.
+`classify_derived` partitions a finite family up to derived equivalence,
+and `verify_derived_atlas` replays its atlas. Paths compose left to right;
+arrow matrices act on row vectors.
 
 ## Guides
 
@@ -15,6 +17,7 @@ Paths compose left to right; arrow matrices act on row vectors.
 - [Algebra and homological computations](docs/algebra.md)
 - [Representation theory](docs/representation-theory.md)
 - [Catalog atlas workflow](docs/catalog-workflow.md)
+- [Derived classification](docs/derived-classification.md)
 - [v0.9 migration](https://github.com/t0rsion/auslander/blob/main/docs/migration-v09.md)
 
 ## Quick start
@@ -43,6 +46,11 @@ assert replayed.verification == "replayed"
 The [catalog workflow notebook](examples/catalog_workflow.ipynb) displays the
 catalog decomposition, ordered Ext cells, materialized modules, artifact
 replay, and a degree-two obstruction.
+
+The [derived classification tour](examples/derived_classification_tour.ipynb)
+classifies the 77 connected gentle algebras with 3 vertices over `F_2`. It
+checks that the gentle trees form the class of `A_3`, separates a genus-1
+pair by the winding class, prints one merge witness, and replays the atlas.
 
 ## Building
 

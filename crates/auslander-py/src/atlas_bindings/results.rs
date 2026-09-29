@@ -39,7 +39,7 @@ impl PyMultiplicityCutReason {
 
     /// The ceiling that stopped the search.
     #[getter]
-    fn limit(&self) -> usize {
+    fn limit(&self) -> u64 {
         match self.inner {
             MultiplicityCutReason::SolutionLimit { limit }
             | MultiplicityCutReason::NodeLimit { limit } => limit,
@@ -104,7 +104,7 @@ impl PyMultiplicityComplete {
 
     /// The number of search states visited.
     #[getter]
-    fn nodes_visited(&self) -> usize {
+    fn nodes_visited(&self) -> u64 {
         self.inner.nodes_visited()
     }
 
@@ -200,13 +200,13 @@ impl PyMultiplicityCut {
 
     /// The number of search states visited before the cut.
     #[getter]
-    fn nodes_visited(&self) -> usize {
+    fn nodes_visited(&self) -> u64 {
         self.inner.nodes_visited()
     }
 
     /// The retained-solution ceiling.
     #[getter]
-    fn limit(&self) -> usize {
+    fn limit(&self) -> u64 {
         self.inner.limit()
     }
 
@@ -355,7 +355,7 @@ impl PyMultiplicityResult {
 
     /// The number of search states visited.
     #[getter]
-    fn nodes_visited(&self) -> usize {
+    fn nodes_visited(&self) -> u64 {
         match &self.inner {
             MultiplicityOutcome::Complete(result) => result.nodes_visited(),
             MultiplicityOutcome::Cut(cut) => cut.nodes_visited(),

@@ -8,7 +8,7 @@ use crate::verify::VerifyError;
 /// A portable atlas artifact failed parsing, replay, or a mathematical check.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CatalogAtlasArtifactError {
-    /// A parser byte, container, string, or integer limit was exceeded.
+    /// A parser byte, container, string, or integer limit is exceeded.
     ParseLimit {
         path: String,
         used: usize,
@@ -53,12 +53,14 @@ pub enum CatalogAtlasArtifactError {
     /// A declared workload exceeds the verifier ceiling.
     VerificationLimit {
         field: &'static str,
-        declared: usize,
-        limit: usize,
+        declared: u64,
+        limit: u64,
     },
     /// A checked count has no representable product or sum.
     Overflow { field: &'static str },
 }
+
+from_portable_error!(CatalogAtlasArtifactError, header);
 
 display_error! { CatalogAtlasArtifactError {
     Self::ParseLimit { path, used, limit } => "atlas artifact field {path} needs {used} units, limit {limit}";

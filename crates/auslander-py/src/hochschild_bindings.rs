@@ -17,9 +17,9 @@ impl PyBarLimits {
         text_signature = "(max_tensor_tuples, max_cochain_dim, max_matrix_entries, max_work_units)"
     )]
     fn new(
-        max_tensor_tuples: usize,
-        max_cochain_dim: usize,
-        max_matrix_entries: usize,
+        max_tensor_tuples: u64,
+        max_cochain_dim: u64,
+        max_matrix_entries: u64,
         max_work_units: u64,
     ) -> Self {
         Self {
@@ -33,17 +33,17 @@ impl PyBarLimits {
     }
 
     #[getter]
-    fn max_tensor_tuples(&self) -> usize {
+    fn max_tensor_tuples(&self) -> u64 {
         self.inner.max_tensor_tuples
     }
 
     #[getter]
-    fn max_cochain_dim(&self) -> usize {
+    fn max_cochain_dim(&self) -> u64 {
         self.inner.max_cochain_dim
     }
 
     #[getter]
-    fn max_matrix_entries(&self) -> usize {
+    fn max_matrix_entries(&self) -> u64 {
         self.inner.max_matrix_entries
     }
 
@@ -52,7 +52,7 @@ impl PyBarLimits {
         self.inner.max_work_units
     }
 
-    fn __repr__(&self) -> String {
+    pub(crate) fn __repr__(&self) -> String {
         format!(
             "BarLimits(max_tensor_tuples={}, max_cochain_dim={}, max_matrix_entries={}, max_work_units={})",
             self.inner.max_tensor_tuples,

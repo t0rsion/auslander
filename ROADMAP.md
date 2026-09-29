@@ -4,6 +4,46 @@ Releases ship when their gates hold. A gate is a checkable condition: a
 test suite, a certificate, an oracle comparison. This file does not
 promise dates.
 
+## Next candidates
+
+Each candidate comes from a stated limit of v0.10. None has a contract yet.
+
+- General string algebras and bands. Complete catalogs stop at gentle
+  trees, which have no band modules.
+- General isomorphism search. A recovered target that is neither gentle nor
+  equal to a member certificate matches nothing, so a pair of algebras that
+  are not gentle can stay unresolved.
+- Extension fields and characteristic zero. Every algebra lives over a
+  checked prime field.
+- The unresolved pair of genus 2 in the 4-vertex study over `F_2`. Its
+  complete gentle invariants agree, which implies a derived equivalence by
+  Amiot, Plamondon, and Schroll, but no walk within the recorded limits
+  certifies a merge.
+
+## v0.10: certified derived classification
+
+Status: implemented on the release branch, not yet published. The binding
+contract is [`docs/derived-classification.md`](docs/derived-classification.md).
+`classify_derived` partitions a finite family over one prime field. A merge
+carries a replayable derived-equivalence path and a target isomorphism. A
+separation carries an invariant with different recomputed values. Every
+other pair is typed `Unresolved`.
+
+- Derived invariants: vertex count, integer Cartan invariants, the pencil
+  `det(xC + C^T)`, bounded Hochschild dimensions, the Avella-Alaminos-Geiss
+  function, and the winding class of a gentle presentation.
+- General gentle recognition and enumeration up to bound-quiver
+  isomorphism.
+- Mutation walks through silting complexes, opt-in with
+  `DiscoveryLimits::through_silting`.
+- The `derived-atlas-v1` artifact, its replay verifier, and a
+  dependency-free WebAssembly build of the verifiers with a static page.
+- A flagship study of connected gentle algebras over `F_2`. The committed
+  atlas classifies the 88 algebras with at most 3 vertices into 40 classes
+  with no unresolved pair. With silting walks of 64 vertices, the second
+  atlas classifies the 982 with at most 4 vertices into 143 classes with
+  one unresolved pair.
+
 ## Public v0.9: reusable catalogs
 
 The [release checklist](docs/releasing.md) defines the current gates.

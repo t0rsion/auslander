@@ -83,7 +83,7 @@ fn projective_generators_recover_verified_opposite_targets_over_f2_and_f5() {
         let target = presented(&regular(&algebra));
         assert_eq!(target.target().dim(), algebra.dim());
         assert_eq!(target.target().quiver().arrows(), &[(1, 0), (2, 1)]);
-        assert_eq!(target.work().endo_dimension, algebra.dim());
+        assert_eq!(target.work().endo_dimension, algebra.dim() as u64);
 
         let coordinates: Vec<_> = (0..target.target().dim())
             .map(|index| field.elem(index as i64))

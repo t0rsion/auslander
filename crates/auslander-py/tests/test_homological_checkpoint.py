@@ -122,6 +122,22 @@ def test_homological_limits_and_resume_budget_are_visible():
         verified.resume(auslander.HomologicalStreamBudget(max_sources=0))
 
 
+def test_default_budget_is_u64_max_and_its_checkpoint_verifies():
+    unbounded = 2**64 - 1
+    budget = auslander.HomologicalStreamBudget()
+    assert budget.max_sources == budget.max_work_units == unbounded
+    assert auslander.HomologicalStreamConfig().max_sources == unbounded
+    stream = auslander.start_homological_stream(_census(), 2)
+    checkpoint = stream.advance()
+    while checkpoint.status == "active":
+        checkpoint = stream.advance()
+    assert checkpoint.status == "complete"
+    assert str(unbounded) in checkpoint.canonical_json
+    assert checkpoint.verify().status == "complete"
+    with pytest.raises(OverflowError):
+        auslander.HomologicalStreamBudget(max_sources=unbounded + 1)
+
+
 def _run_cli(*arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-m", "auslander", *arguments],

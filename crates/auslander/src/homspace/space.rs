@@ -114,8 +114,7 @@ impl HomSpace {
         let field = self.source.field();
         Ok(self
             .flat
-            .transpose()
-            .solve(&flat_row(f), &field)
+            .row_coords(&flat_row(f), &field)
             .expect("the hom basis spans every morphism between the endpoints"))
     }
 

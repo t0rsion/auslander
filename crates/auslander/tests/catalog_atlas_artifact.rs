@@ -10,7 +10,7 @@ use auslander::atlas_artifact::{
 use auslander::ext::ext_table;
 use auslander::field::PrimeField;
 
-fn artifact(max_solutions: usize) -> CatalogAtlasArtifact {
+fn artifact(max_solutions: u64) -> CatalogAtlasArtifact {
     let algebra = linear_an(2, PrimeField::new(5).unwrap());
     let catalog = Arc::new(IndecomposableCatalog::dynkin(&algebra).unwrap());
     let atlas = CatalogAtlas::compute(catalog, 2, CatalogAtlasLimits::default()).unwrap();

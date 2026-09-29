@@ -61,7 +61,7 @@ fn truncated_poly_dimension_four_has_all_multiplicity_solutions() {
         .enumerate_multiplicities(
             &[4],
             MultiplicityLimits {
-                max_solutions: usize::MAX,
+                max_solutions: u64::MAX,
                 max_nodes: 1_000,
             },
         )
@@ -128,7 +128,7 @@ fn multiplicity_cuts_are_typed_and_zero_dimension_materializes_zero() {
         .enumerate_multiplicities(
             &[4],
             MultiplicityLimits {
-                max_solutions: usize::MAX,
+                max_solutions: u64::MAX,
                 max_nodes: 1,
             },
         )
@@ -207,9 +207,9 @@ fn checked_limits_and_overflows_reject_before_unbounded_work() {
     assert!(matches!(
         atlas.materialize(&[usize::MAX, 0, 0]),
         Err(AtlasMaterializeError::SummandLimit {
-            requested: usize::MAX,
+            requested,
             limit: 1
-        })
+        }) if requested == usize::MAX as u64
     ));
     assert!(matches!(
         atlas.materialize(&[2, 0, 0]),
@@ -238,8 +238,8 @@ fn materialization_checks_cells_before_building_the_sum() {
     ));
 
     let overflow = atlas_with_limits(CatalogAtlasLimits {
-        max_materialized_summands: usize::MAX,
-        max_materialized_cells: usize::MAX,
+        max_materialized_summands: u64::MAX,
+        max_materialized_cells: u64::MAX,
         ..base
     });
     assert!(matches!(
@@ -263,8 +263,8 @@ fn materialization_checks_cells_before_building_the_sum() {
         catalog,
         0,
         CatalogAtlasLimits {
-            max_materialized_summands: usize::MAX,
-            max_materialized_cells: usize::MAX,
+            max_materialized_summands: u64::MAX,
+            max_materialized_cells: u64::MAX,
             ..base
         },
     )

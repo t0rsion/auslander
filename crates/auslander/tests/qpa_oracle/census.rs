@@ -468,16 +468,16 @@ fn compare_domain_counts(
     if result.domain().coordinate_count() != expected.coordinate_count {
         mismatches.push(format!("{context}: coordinate_count"));
     }
-    if result.candidates() != expected.candidates {
+    if result.candidates() != expected.candidates as u64 {
         mismatches.push(format!("{context}: candidates"));
     }
-    if result.accepted_modules() != expected.accepted_modules {
+    if result.accepted_modules() != expected.accepted_modules as u64 {
         mismatches.push(format!("{context}: accepted_modules"));
     }
-    if result.rejected_candidates() != expected.rejected_candidates {
+    if result.rejected_candidates() != expected.rejected_candidates as u64 {
         mismatches.push(format!("{context}: rejected_candidates"));
     }
-    if result.isomorphism_checks() != expected.isomorphism_checks {
+    if result.isomorphism_checks() != expected.isomorphism_checks as u64 {
         mismatches.push(format!("{context}: isomorphism_checks"));
     }
     mismatches

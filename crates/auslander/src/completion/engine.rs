@@ -21,7 +21,7 @@ use std::collections::BTreeSet;
 struct Engine<'a> {
     field: PrimeField,
     limits: &'a CompletionLimits,
-    steps: usize,
+    steps: u64,
 }
 
 impl Engine<'_> {
@@ -109,7 +109,7 @@ impl Engine<'_> {
         out: &mut BTreeSet<AmbKey>,
     ) -> Result<(), Exhausted> {
         pair_ambiguities(i, j, lead_word(&basis[i]), lead_word(&basis[j]), out);
-        if out.len() > self.limits.max_ambiguities {
+        if out.len() as u64 > self.limits.max_ambiguities {
             return Err(Exhausted::Ambiguities);
         }
         Ok(())
@@ -216,13 +216,13 @@ impl Engine<'_> {
         relation: &Relation,
         basis: &[BasisElem],
     ) -> Result<Option<(Poly, Origin)>, TruncationDiagnostics> {
-        if relation.leading().1.len() > self.limits.max_word_len {
+        if relation.leading().1.len() as u64 > self.limits.max_word_len {
             return Err(self.diag(basis.len(), 0, TruncationReason::WordLenBudget));
         }
         let mut poly = poly_from_relation(relation);
         let mut origin = Origin::new();
         origin.insert((index, Vec::new(), Vec::new()), self.field.one());
-        if origin.len() > self.limits.max_origin_terms {
+        if origin.len() as u64 > self.limits.max_origin_terms {
             return Err(self.diag(basis.len(), 0, TruncationReason::OriginBudget));
         }
         self.reduce_full(basis, None, &mut poly, Some(&mut origin), None)
@@ -243,7 +243,7 @@ impl Engine<'_> {
             else {
                 continue;
             };
-            if basis.len() >= self.limits.max_basis {
+            if basis.len() as u64 >= self.limits.max_basis {
                 return Err(self.diag(basis.len(), 0, TruncationReason::BasisBudget));
             }
             make_monic(self.field, &mut poly, &mut origin);
@@ -258,7 +258,7 @@ impl Engine<'_> {
         key: AmbKey,
         pending: usize,
     ) -> Result<Option<(Poly, Origin)>, TruncationDiagnostics> {
-        if superposition_len(basis, key) > self.limits.max_word_len {
+        if superposition_len(basis, key) as u64 > self.limits.max_word_len {
             return Err(self.diag(basis.len(), pending, TruncationReason::WordLenBudget));
         }
         let mut origin = Origin::new();
@@ -295,7 +295,7 @@ impl Engine<'_> {
         pending: usize,
         queue: &mut BTreeSet<AmbKey>,
     ) -> Result<(), TruncationDiagnostics> {
-        if basis.len() >= self.limits.max_basis {
+        if basis.len() as u64 >= self.limits.max_basis {
             return Err(self.diag(basis.len(), pending, TruncationReason::BasisBudget));
         }
         make_monic(self.field, &mut poly, &mut origin);

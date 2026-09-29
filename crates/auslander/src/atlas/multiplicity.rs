@@ -14,7 +14,7 @@ pub struct MultiplicityCut {
     solutions: Vec<MultiplicityVector>,
     limits: MultiplicityLimits,
     reason: MultiplicityCutReason,
-    nodes_visited: usize,
+    nodes_visited: u64,
 }
 
 impl PartialEq for MultiplicityCut {
@@ -34,9 +34,9 @@ impl Eq for MultiplicityCut {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MultiplicityCutReason {
     /// The next solution would exceed the retained-row ceiling.
-    SolutionLimit { limit: usize },
+    SolutionLimit { limit: u64 },
     /// The next search state would exceed the search-node ceiling.
-    NodeLimit { limit: usize },
+    NodeLimit { limit: u64 },
 }
 
 display_error! { MultiplicityCutReason {
@@ -53,13 +53,13 @@ impl MultiplicityCut {
         /// The exact solutions found before the cut.
         pub solutions() -> &[MultiplicityVector] = |this| &this.solutions;
         /// The maximum number of retained solutions.
-        pub limit() -> usize = |this| this.limits.max_solutions;
+        pub limit() -> u64 = |this| this.limits.max_solutions;
         /// The limits used by the cut computation.
         pub limits() -> MultiplicityLimits = |this| this.limits;
         /// The typed budget that stopped the search.
         pub reason() -> MultiplicityCutReason = |this| this.reason;
         /// The number of search states visited before the cut.
-        pub nodes_visited() -> usize = |this| this.nodes_visited;
+        pub nodes_visited() -> u64 = |this| this.nodes_visited;
         /// The number of retained solutions.
         pub len() -> usize = |this| this.solutions.len();
         /// Whether the cut retained no solutions.
@@ -74,7 +74,7 @@ pub struct MultiplicityComplete {
     target_dimensions: Vec<usize>,
     solutions: Vec<MultiplicityVector>,
     limits: MultiplicityLimits,
-    nodes_visited: usize,
+    nodes_visited: u64,
 }
 
 impl PartialEq for MultiplicityComplete {
@@ -100,7 +100,7 @@ impl MultiplicityComplete {
         /// The limits used by the complete computation.
         pub limits() -> MultiplicityLimits = |this| this.limits;
         /// The number of search states visited.
-        pub nodes_visited() -> usize = |this| this.nodes_visited;
+        pub nodes_visited() -> u64 = |this| this.nodes_visited;
         /// The number of complete solutions.
         pub len() -> usize = |this| this.solutions.len();
         /// Whether the complete result has no solutions.
@@ -176,7 +176,7 @@ struct Search<'a> {
     current: MultiplicityVector,
     solutions: Vec<MultiplicityVector>,
     limits: MultiplicityLimits,
-    nodes_visited: usize,
+    nodes_visited: u64,
     cut_reason: Option<MultiplicityCutReason>,
 }
 
@@ -341,7 +341,7 @@ impl Search<'_> {
         if self.remaining.iter().any(|&remaining| remaining != 0) {
             return false;
         }
-        if self.solutions.len() >= self.limits.max_solutions {
+        if self.solutions.len() as u64 >= self.limits.max_solutions {
             self.cut_reason = Some(MultiplicityCutReason::SolutionLimit {
                 limit: self.limits.max_solutions,
             });

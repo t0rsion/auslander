@@ -57,11 +57,11 @@ impl CatalogAtlas {
             table,
             resolutions,
             work: CatalogAtlasWork {
-                pairs,
-                ext_cells: cells,
-                resolutions: terms.0,
-                resolution_terms,
-                ext_tables: pairs,
+                pairs: pairs as u64,
+                ext_cells: cells as u64,
+                resolutions: terms.0 as u64,
+                resolution_terms: resolution_terms as u64,
+                ext_tables: pairs as u64,
             },
         })
     }
@@ -143,9 +143,9 @@ impl CatalogAtlas {
         let count = checked_summand_count(multiplicities, self.limits.max_materialized_summands)?;
         let dimensions = self.dimensions_for_multiplicities(multiplicities)?;
         let cells = materialized_cell_count(self.algebra(), &dimensions)?;
-        if cells > self.limits.max_materialized_cells {
+        if cells as u64 > self.limits.max_materialized_cells {
             return Err(AtlasMaterializeError::CellLimit {
-                requested: cells,
+                requested: cells as u64,
                 limit: self.limits.max_materialized_cells,
             });
         }
@@ -201,18 +201,18 @@ fn preflight(
     let pairs = catalog_len
         .checked_mul(catalog_len)
         .ok_or(CatalogAtlasError::PairCountOverflow { catalog_len })?;
-    if pairs > limits.max_pairs {
+    if pairs as u64 > limits.max_pairs {
         return Err(CatalogAtlasError::PairLimit {
-            requested: pairs,
+            requested: pairs as u64,
             limit: limits.max_pairs,
         });
     }
     let cells = pairs
         .checked_mul(degrees)
         .ok_or(CatalogAtlasError::ExtCellCountOverflow { pairs, degrees })?;
-    if cells > limits.max_ext_cells {
+    if cells as u64 > limits.max_ext_cells {
         return Err(CatalogAtlasError::ExtCellLimit {
-            requested: cells,
+            requested: cells as u64,
             limit: limits.max_ext_cells,
         });
     }
@@ -228,9 +228,9 @@ fn preflight(
             terms_per_source,
         },
     )?;
-    if resolution_terms > limits.max_resolution_terms {
+    if resolution_terms as u64 > limits.max_resolution_terms {
         return Err(CatalogAtlasError::ResolutionTermLimit {
-            requested: resolution_terms,
+            requested: resolution_terms as u64,
             limit: limits.max_resolution_terms,
         });
     }
@@ -253,9 +253,9 @@ fn build_resolutions(
         used = used
             .checked_add(resolution.terms.len())
             .expect("preflight bounds the retained resolution terms");
-        if used > limits.max_resolution_terms {
+        if used as u64 > limits.max_resolution_terms {
             return Err(CatalogAtlasError::ResolutionTermLimit {
-                requested: used,
+                requested: used as u64,
                 limit: limits.max_resolution_terms,
             });
         }
@@ -282,16 +282,16 @@ fn build_table(
 
 fn checked_summand_count(
     multiplicities: &[usize],
-    limit: usize,
+    limit: u64,
 ) -> Result<usize, AtlasMaterializeError> {
     let mut count = 0usize;
     for &multiplicity in multiplicities {
         count = count
             .checked_add(multiplicity)
             .ok_or(AtlasMaterializeError::SummandCountOverflow)?;
-        if count > limit {
+        if count as u64 > limit {
             return Err(AtlasMaterializeError::SummandLimit {
-                requested: count,
+                requested: count as u64,
                 limit,
             });
         }

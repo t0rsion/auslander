@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>auslander artifact verifier</title>
+<style>
+  :root {
+    --bg: #fbfbf9;
+    --surface: #ffffff;
+    --text: #1d1d1b;
+    --muted: #5f5f5a;
+    --line: #d9d9d3;
+    --accent: #2f5d8a;
+    --focus: #2f5d8a;
+    --ok: #1f6b3a;
+    --ok-bg: #e6f2ea;
+    --cut: #7a5300;
+    --cut-bg: #f8eed8;
+    --bad: #a3261d;
+    --bad-bg: #f9e5e2;
+    --neutral-bg: #eeeeea;
+    --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151514;
+      --surface: #1e1e1c;
+      --text: #e8e8e3;
+      --muted: #a2a29b;
+      --line: #3a3a36;
+      --accent: #8cb8e6;
+      --focus: #8cb8e6;
+      --ok: #7fd49a;
+      --ok-bg: #1b3324;
+      --cut: #e8c170;
+      --cut-bg: #3a2f17;
+      --bad: #f19a8f;
+      --bad-bg: #3d1e1a;
+      --neutral-bg: #2a2a27;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.5 var(--sans);
+  }
+  .page { max-width: 46rem; margin: 0 auto; padding: 2rem 16px 3rem; }
+  h1 { font-size: 1.35rem; margin: 0 0 0.5rem; letter-spacing: -0.01em; }
+  p { margin: 0 0 1rem; }
+  .lede { color: var(--muted); }
+  code { font-family: var(--mono); font-size: 0.9em; }
+  #drop {
+    border: 1.5px dashed var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+    padding: 1.75rem 1rem;
+    text-align: center;
+    cursor: pointer;
+  }
+  #drop.over { border-color: var(--accent); border-style: solid; }
+  #drop.busy { opacity: 0.6; cursor: progress; }
+  #drop:focus-visible, button:focus-visible, textarea:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+  #drop .hint { color: var(--muted); font-size: 0.875rem; margin: 0.25rem 0 0; }
+  .link { color: var(--accent); text-decoration: underline; cursor: pointer; }
+  .visually-hidden {
+    position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip: rect(0 0 0 0); white-space: nowrap;
+  }
+  label[for="paste"] { display: block; margin: 1.25rem 0 0.35rem; font-weight: 600; font-size: 0.95rem; }
+  textarea {
+    width: 100%;
+    min-height: 7rem;
+    resize: vertical;
+    padding: 0.6rem;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text);
+    font: 0.85rem/1.4 var(--mono);
+  }
+  .actions { display: flex; gap: 0.5rem; margin-top: 0.6rem; flex-wrap: wrap; }
+  button {
+    font: inherit;
+    font-size: 0.95rem;
+    padding: 0.45rem 0.9rem;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  #result {
+    margin-top: 2rem;
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+    padding: 1rem 1.1rem 1.1rem;
+  }
+  #badge {
+    display: inline-block;
+    font-weight: 700;
+    font-size: 0.95rem;
+    padding: 0.1rem 0.6rem;
+    border-radius: 999px;
+    background: var(--neutral-bg);
+  }
+  #result[data-state="verified"] { border-left-color: var(--ok); }
+  #result[data-state="verified"] #badge { background: var(--ok-bg); color: var(--ok); }
+  #result[data-state="verified-cut"], #result[data-state="stopped"] { border-left-color: var(--cut); }
+  #result[data-state="verified-cut"] #badge, #result[data-state="stopped"] #badge { background: var(--cut-bg); color: var(--cut); }
+  #result[data-state="rejected"], #result[data-state="failed"], #result[data-state="unavailable"] { border-left-color: var(--bad); }
+  #result[data-state="rejected"] #badge, #result[data-state="failed"] #badge, #result[data-state="unavailable"] #badge { background: var(--bad-bg); color: var(--bad); }
+  #explanation { margin: 0.6rem 0 0.9rem; }
+  dl {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 0.3rem 1rem;
+    margin: 0 0 1rem;
+  }
+  dt { color: var(--muted); }
+  dd { margin: 0; overflow-wrap: anywhere; }
+  #kind, #fingerprint { font-family: var(--mono); font-size: 0.9rem; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+  caption { text-align: left; font-weight: 600; padding-bottom: 0.35rem; }
+  th, td { text-align: left; padding: 0.3rem 0.5rem; border-top: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 500; color: var(--muted); font-family: var(--mono); white-space: nowrap; }
+  td { font-family: var(--mono); overflow-wrap: anywhere; width: 100%; }
+  #error {
+    margin: 0;
+    padding: 0.6rem 0.75rem;
+    border-radius: 6px;
+    background: var(--bad-bg);
+    color: var(--bad);
+    font: 0.85rem/1.45 var(--mono);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  #result[data-state="stopped"] #error { background: var(--cut-bg); color: var(--cut); }
+  #atlas { margin-top: 1.5rem; border-top: 1px solid var(--line); padding-top: 1rem; }
+  #atlas h2 { font-size: 1.05rem; margin: 0 0 0.5rem; }
+  .note { color: var(--muted); font-size: 0.875rem; }
+  details { margin: 0 0 1rem; }
+  summary { cursor: pointer; font-weight: 600; padding: 0.2rem 0; }
+  table.rows { table-layout: auto; }
+  table.rows th { font-family: var(--sans); font-size: 0.85rem; }
+  table.rows td { width: auto; }
+  table.rows td:first-child { white-space: nowrap; }
+  table.rows td[data-label="Invariants"] { width: 55%; }
+  .invariant { display: inline-block; margin: 0 0.9rem 0.1rem 0; }
+  .invariant .name { color: var(--muted); }
+  footer { margin-top: 2.5rem; color: var(--muted); font-size: 0.85rem; }
+  @media (max-width: 30rem) {
+    .page { padding-top: 1.25rem; }
+    dl { grid-template-columns: minmax(0, 1fr); gap: 0 0; }
+    dd { margin-bottom: 0.4rem; }
+    th { white-space: normal; }
+    table.rows thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    table.rows tr { display: block; border-top: 1px solid var(--line); padding: 0.35rem 0; }
+    table.rows td { display: block; border-top: 0; padding: 0.1rem 0; width: auto; }
+    table.rows td[data-label="Invariants"] { width: auto; }
+    table.rows td::before { content: attr(data-label) " "; color: var(--muted); font-family: var(--sans); }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <h1>auslander artifact verifier</h1>
+    <p class="lede">Replays one portable value in this page. The verifier is the
+      Rust verifier of <code>auslander</code>, compiled to WebAssembly, with its
+      default limits. The file does not leave this browser.</p>
+  </header>
+  <main>
+    <div id="drop" role="button" tabindex="0" aria-describedby="drop-hint">
+      <label for="file" class="link">Choose a JSON artifact</label> or drop one here.
+      <p class="hint" id="drop-hint">Every kind that <code>auslander verify</code> accepts.</p>
+      <input type="file" id="file" class="visually-hidden" accept=".json,application/json">
+    </div>
+    <label for="paste">Or paste the JSON text</label>
+    <textarea id="paste" spellcheck="false" autocomplete="off"
+      placeholder='{"schema":"auslander-computation-v1","kind":"census-v1",...}'></textarea>
+    <div class="actions">
+      <button type="button" id="verify-paste" class="primary">Verify pasted text</button>
+      <button type="button" id="cancel" hidden>Cancel</button>
+    </div>
+    <section id="result" aria-live="polite" hidden>
+      <span id="badge"></span>
+      <p id="explanation"></p>
+      <dl>
+        <dt>Source</dt><dd id="source"></dd>
+        <dt>Kind</dt><dd id="kind"></dd>
+        <dt>Fingerprint</dt><dd id="fingerprint"></dd>
+        <dt>Time</dt><dd id="time"></dd>
+      </dl>
+      <table id="summary" hidden>
+        <caption>Summary</caption>
+        <tbody></tbody>
+      </table>
+      <pre id="error" hidden></pre>
+      <section id="atlas" aria-labelledby="atlas-heading" hidden>
+        <h2 id="atlas-heading">Derived classification</h2>
+        <p id="atlas-lede"></p>
+        <p id="atlas-separations" class="note"></p>
+        <details open>
+          <summary id="atlas-classes-count">Classes</summary>
+          <table id="atlas-classes" class="rows">
+            <thead>
+              <tr><th scope="col">Class</th><th scope="col">Members</th><th scope="col">Invariants of the first member</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </details>
+        <details id="atlas-unresolved-box" open hidden>
+          <summary id="atlas-unresolved-count">Unresolved pairs</summary>
+          <table id="atlas-unresolved" class="rows">
+            <thead>
+              <tr><th scope="col">Classes</th><th scope="col">Representatives</th><th scope="col">Recorded walk stops (not replayed)</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </details>
+        <p class="note">Members are indices into the atlas family, from 0. The
+          first member of a class is its representative. The page reads these rows
+          from the file after the verifier accepts its exact bytes. <code>n</code> is
+          the vertex count, <code>AAG</code> the Avella-Alaminos-Geiss function, and
+          <code>dim HH</code> lists <code>dim HH^0</code> upward.</p>
+      </section>
+    </section>
+  </main>
+  <footer>
+    The fingerprint is FNV-1a over the canonical fields. It detects accidental
+    changes and does not authenticate. Replay runs in a Web Worker on one thread.
+  </footer>
+</div>
+<script type="module" src="page.js"></script>
+</body>
+</html>

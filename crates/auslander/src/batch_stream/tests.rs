@@ -5,7 +5,7 @@ use crate::control::ComputationControl;
 use crate::field::PrimeField;
 use crate::module::Module;
 
-fn limits(max_live_sources: usize) -> HomologicalBatchStreamLimits {
+fn limits(max_live_sources: u64) -> HomologicalBatchStreamLimits {
     HomologicalBatchStreamLimits {
         max_live_sources,
         max_pairs: 100,
@@ -72,14 +72,14 @@ fn chunks_match_singleton_and_all_at_once_batches() {
             assert_eq!(row.ext_dimensions(), ext);
             assert_eq!(row.resolution_end(), *end);
         }
-        assert_eq!(work.resolutions, expected.work().resolutions);
-        assert_eq!(work.target_covers, expected.work().target_covers);
-        assert_eq!(work.hom_spaces, expected.work().hom_spaces);
+        assert_eq!(work.resolutions, expected.work().resolutions as u64);
+        assert_eq!(work.target_covers, expected.work().target_covers as u64);
+        assert_eq!(work.hom_spaces, expected.work().hom_spaces as u64);
         assert_eq!(
             work.projective_factor_spaces,
-            expected.work().projective_factor_spaces
+            expected.work().projective_factor_spaces as u64
         );
-        assert_eq!(work.ext_tables, expected.work().ext_tables);
+        assert_eq!(work.ext_tables, expected.work().ext_tables as u64);
         assert!(work.peak_live_sources <= chunk_size);
         assert!(matches!(
             stream.status(),
@@ -106,7 +106,7 @@ fn cancellation_stops_only_at_chunk_boundaries() {
         panic!("cancellation must cut the next boundary");
     };
     assert_eq!(next_source, first.source_count());
-    assert_eq!(work.sources, first.source_count());
+    assert_eq!(work.sources, first.source_count() as u64);
     assert!(matches!(
         stream.status(),
         HomologicalBatchStreamStatus::Cut(HomologicalBatchStreamCutReason::Cancelled)
